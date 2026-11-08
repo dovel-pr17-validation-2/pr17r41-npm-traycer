@@ -1,0 +1,99 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nrwl/nx/master/packages/nx/schemas/nx-schema.json",
+  "useDaemonProcess": false,
+  "targetDefaults": {
+    "build": {
+      "dependsOn": ["^build"],
+      "cache": true,
+      "inputs": [
+        "default",
+        "^production",
+        "sharedGlobals",
+        { "env": "SENTRY_AUTH_TOKEN" }
+      ]
+    },
+    "compile": {
+      "dependsOn": ["^compile"],
+      "cache": true,
+      "inputs": ["default", "^production", "sharedGlobals"]
+    },
+    "lint": {
+      "cache": true,
+      "inputs": [
+        "{projectRoot}/**/*.ts",
+        "{projectRoot}/**/*.tsx",
+        "{projectRoot}/**/*.mts",
+        "{projectRoot}/**/*.cts",
+        "{projectRoot}/**/*.js",
+        "{projectRoot}/**/*.jsx",
+        "{projectRoot}/**/*.mjs",
+        "{projectRoot}/**/*.cjs",
+        "{projectRoot}/.eslintrc*",
+        "{projectRoot}/eslint.config.*",
+        "{projectRoot}/.oxlintrc*",
+        "{projectRoot}/oxlint.config.*",
+        "{projectRoot}/package.json",
+        "{projectRoot}/tsconfig*.json",
+        "{workspaceRoot}/package.json",
+        "{workspaceRoot}/eslint/*.mjs",
+        "^production"
+      ]
+    },
+    "test": {
+      "cache": true,
+      "inputs": [
+        "default",
+        "^production",
+        "sharedGlobals",
+        "{workspaceRoot}/scripts/test-worker-environment.ts"
+      ]
+    },
+    "format": {
+      "cache": true,
+      "inputs": [
+        "{projectRoot}/**/*.ts",
+        "{projectRoot}/**/*.tsx",
+        "{projectRoot}/**/*.js",
+        "{projectRoot}/**/*.jsx",
+        "{projectRoot}/**/*.json",
+        "{projectRoot}/.prettierrc",
+        "{projectRoot}/.prettierrc.*",
+        "{projectRoot}/.oxfmtrc.json",
+        "{workspaceRoot}/.oxfmtrc.json",
+        "{projectRoot}/.prettierignore"
+      ]
+    },
+    "format:check": {
+      "cache": true,
+      "inputs": [
+        "{projectRoot}/**/*.ts",
+        "{projectRoot}/**/*.tsx",
+        "{projectRoot}/**/*.js",
+        "{projectRoot}/**/*.jsx",
+        "{projectRoot}/**/*.json",
+        "{projectRoot}/.oxfmtrc.json",
+        "{workspaceRoot}/.oxfmtrc.json",
+        "{projectRoot}/.prettierignore"
+      ]
+    }
+  },
+  "defaultBase": "main",
+  "parallel": 8,
+  "namedInputs": {
+    "default": ["{projectRoot}/**/*"],
+    "production": [
+      "default",
+      "!{projectRoot}/**/*.spec.ts",
+      "!{projectRoot}/**/*.test.ts",
+      "!{projectRoot}/**/*.spec.tsx",
+      "!{projectRoot}/**/*.test.tsx",
+      "!{projectRoot}/**/*.md"
+    ],
+    "sharedGlobals": [
+      "{workspaceRoot}/package.json",
+      "{workspaceRoot}/scripts/tsrs.mjs",
+      "{workspaceRoot}/scripts/git-output-limit.cjs"
+    ]
+  },
+  "analytics": false
+}

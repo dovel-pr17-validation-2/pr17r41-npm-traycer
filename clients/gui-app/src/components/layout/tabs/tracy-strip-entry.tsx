@@ -1,0 +1,194 @@
+import type { ReactNode } from "react";
+import { Bot } from "lucide-react";
+import { BotMutedGlyph } from "@/components/bots/bot-muted-glyph";
+import { useEpicDndStore } from "@/components/epic-canvas/dnd/dnd-store";
+import { UnreadCountBadge } from "@/components/notifications/unread-count-badge";
+import { HoverCard } from "@/components/ui/hover-card";
+import { labelWithUnreadCount } from "@/lib/notifications/unread-count";
+import { cn } from "@/lib/utils";
+import { TabChrome } from "./header-tab-visual";
+import { useSurfaceJoinPane } from "./surface-join-pane";
+import { headerTabClassName } from "./tab-chrome-tokens";
+import type { TracyStripEntry } from "./tab-strip-controller";
+import { StripElapsedTime } from "./side-strip/strip-elapsed-time";
+import { SIDE_STRIP_NAV_TILE_COUNT_CLASS } from "./side-strip/side-strip-tokens";
+import {
+  useTracyEntrySignals,
+  type TracyEntrySignals,
+} from "./use-tracy-entry-signals";
+
+/**
+ * The entry's name in every placement: the fixed place is Tracy's whatever
+ * the bot it opens is called, so a rename or a new main bot never moves it.
+ */
+export const TRACY_ENTRY_LABEL = "Tracy";
+
+/**
+ * Where the count sits: up and to the right of the glyph, clear of it, as the
+ * bell's mark sits, ringed in the colour of the ground the entry stands on so
+ * it reads as cut out of it.
+ */
+const COUNT_SEAT_CLASS = {
+  strip: cn(SIDE_STRIP_NAV_TILE_COUNT_CLASS, "-top-3.5 right-auto left-3.5"),
+  drawer: cn(
+    SIDE_STRIP_NAV_TILE_COUNT_CLASS,
+    "-top-3.5 right-auto left-3.5 ring-popover md:ring-popover",
+  ),
+} as const;
+
+/**
+ * The entry's glyph, in every strip placement, wearing the bot's unread count
+ * off its top-right corner (the rail tile passes none: its row draws the count)
+ * and the muted mark on its bottom-right while the person set the channel to
+ * Nothing; the bare glyph at zero, and where the host does not count.
+ * `ground` is what the entry stands on: the strip's, or the phone drawer's.
+ */
+export function TracyEntryIcon(props: {
+  readonly className: string | undefined;
+  readonly unreadCount: number | null;
+  readonly muted: boolean;
+  readonly ground: "strip" | "drawer";
+}): ReactNode {
+  const { className, unreadCount, muted, ground } = props;
+  const mutedMark = muted ? (
+    <BotMutedGlyph
+      className="absolute right-0 bottom-0 translate-x-1/2 translate-y-1/4 rounded-full bg-background"
+      testId="tracy-entry-muted"
+    />
+  ) : null;
+  if ((unreadCount === null || unreadCount <= 0) && !muted) {
+    return (
+      <Bot
+        className={cn("size-4 shrink-0", className)}
+        aria-hidden="true"
+        data-testid="tracy-entry-icon"
+      />
+    );
+  }
+  return (
+    <span className={cn("relative inline-flex shrink-0", className)}>
+      <Bot
+        className="size-4 shrink-0"
+        aria-hidden="true"
+        data-testid="tracy-entry-icon"
+      />
+      {mutedMark}
+      {unreadCount === null ? null : (
+        <UnreadCountBadge
+          count={unreadCount}
+          size="xs"
+          testId="tracy-entry-unread-count"
+          corner={COUNT_SEAT_CLASS[ground]}
+          noun="unread"
+        />
+      )}
+    </span>
+  );
+}
+
+/**
+ * The hover card's body: the channel the surface shows, by its bot's name,
+ * and what the bot is doing while it works, or "Idle" when it is known to
+ * be; nothing when its state is not known.
+ */
+export function TracyEntryHoverBody(props: {
+  readonly signals: TracyEntrySignals;
+}): ReactNode {
+  const { signals } = props;
+  return (
+    <div data-testid="tracy-entry-hover-body" className="flex flex-col gap-1">
+      <div className="text-ui-sm font-medium text-foreground">
+        {signals.channelTitle ?? TRACY_ENTRY_LABEL}
+      </div>
+      {signals.working || signals.idle ? (
+        <div className="text-muted-foreground">
+          {signals.working ? (signals.step ?? "Replying…") : "Idle"}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The fixed Tracy entry at the strip's leading edge, after Home and outside
+ * the scrolling tabs: the Tracy glyph with the bot's unread count and
+ * "Tracy", bold while unread, and how
+ * long the bot has been working while it runs a turn; the hover names the
+ * channel the surface shows. Like Home it has no drag,
+ * no close, no menu and no Alt-digit; unlike Home it is a real tab, so it
+ * joins the sheet when selected.
+ */
+export function TracyStripSlot(props: {
+  readonly entry: TracyStripEntry;
+}): ReactNode {
+  const { tab, isActive, onActivate } = props.entry;
+  const signals = useTracyEntrySignals();
+  const dragging = useEpicDndStore((state) => state.activeHeaderTab !== null);
+  const joined = useSurfaceJoinPane(
+    isActive && !dragging ? { kind: tab.kind, id: tab.id } : null,
+    "top",
+  );
+  return (
+    <HoverCard
+      trigger={
+        <button
+          type="button"
+          role="tab"
+          aria-selected={isActive}
+          aria-label={labelWithUnreadCount(
+            TRACY_ENTRY_LABEL,
+            signals.unreadCount,
+          )}
+          data-testid="tab-tracy"
+          data-tab-kind="tracy"
+          data-unread={signals.unread ? "" : undefined}
+          onClick={onActivate}
+          className={cn(
+            headerTabClassName("own", isActive),
+            "w-auto max-w-[min(40vw,12rem)] shrink-0 cursor-pointer gap-1.5 [-webkit-app-region:no-drag]",
+          )}
+        >
+          <TabChrome
+            isActive={isActive}
+            joined={joined}
+            concealed={false}
+            color={null}
+            session={false}
+          />
+          <TracyEntryIcon
+            className="relative z-20"
+            unreadCount={signals.unreadCount}
+            muted={signals.muted}
+            ground="strip"
+          />
+          <span
+            className={cn(
+              "relative z-20 min-w-0 truncate",
+              signals.unread && "font-semibold text-foreground",
+            )}
+          >
+            {TRACY_ENTRY_LABEL}
+          </span>
+          {signals.workingSince === null ? null : (
+            <StripElapsedTime
+              since={signals.workingSince}
+              testId="tab-tracy-working"
+              className="relative z-20 shrink-0 text-ui-xs text-muted-foreground tabular-nums"
+            />
+          )}
+        </button>
+      }
+      content={<TracyEntryHoverBody signals={signals} />}
+      appearance="preview"
+      semantics={{ role: "tooltip" }}
+      side="bottom"
+      align="center"
+      sideOffset={4}
+      enabled
+      open={null}
+      onOpenChange={null}
+      testId="tracy-entry-hover-card"
+      className="w-[min(90vw,18rem)] p-3 text-ui-xs"
+    />
+  );
+}

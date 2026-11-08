@@ -1,0 +1,342 @@
+import { z } from "zod";
+import {
+  defineRecordContract,
+  defineRecordDowngradePath,
+  defineRecordUpgradePath,
+  defineVersionedRecordRegistry,
+  type RecordValue,
+} from "@traycer/protocol/framework/index";
+import { jsonContentMarkSchema } from "@traycer/protocol/common/schemas";
+import {
+  attachmentMentionAttrsSchema,
+  attachmentMentionNodeSchema,
+  epicArtifactKindSchema,
+  harnessIdSchema,
+  harnessIdSchemaPreReasonix,
+  markdownArtifactKindSchema,
+  permissionRoleSchema,
+  ticketStatusSchema,
+} from "@traycer/protocol/common/_internal/schemas";
+import { lazySchema } from "@traycer/protocol/framework/lazy-schema";
+
+/**
+ * Shared-vocabulary record registry.
+ *
+ * Each entry wraps a leaf schema that's referenced from multiple
+ * higher-level records (persistence epic, auth response envelopes, RPC
+ * frame payloads). Versioning the vocabulary independently means a
+ * change to `permissionRoleSchema` is one bump, even when 50+ embedders
+ * reference it.
+ *
+ * Non-recursive schemas live in `protocol/common/_internal/schemas.ts`;
+ * this file is the only one outside `_internal/` allowed to import
+ * them directly. The recursive `jsonContentSchema` and its
+ * `JsonContent` type alias are co-located here because `z.lazy()`
+ * requires an explicit `z.ZodType<JsonContent>` annotation, and
+ * keeping the alias in `_internal/` would force a type leak across
+ * the privacy boundary.
+ */
+
+// ---- Recursive `json-content` schema (kept here, not in _internal/) -- //
+
+/**
+ * The recursive shape of a TipTap / ProseMirror JSON node.
+ *
+ * Declared here (not in `_internal/schemas.ts`) because `z.lazy()`'s
+ * required `z.ZodType<JsonContent>` annotation needs a named alias,
+ * and exporting that alias from `_internal/` would force a type leak
+ * across the privacy boundary. Co-locating both the type alias and the
+ * schema with the registry keeps `_internal/` opaque while still
+ * letting the schema validate the recursive shape.
+ *
+ * This is the only record shape declared as a plain TS type - every
+ * other record type is derived from its registered Zod schema via
+ * `RecordValue<>` below. The recursive case is unavoidable: TS can't
+ * derive a recursive type purely from `z.infer<>` of a `z.lazy()`
+ * schema without an explicit annotation.
+ */
+export type JsonContent = {
+  type?: string;
+  attrs?: Record<string, unknown>;
+  content?: JsonContent[];
+  marks?: { type: string; attrs?: Record<string, unknown> }[];
+  text?: string;
+};
+
+const jsonContentSchema: z.ZodType<JsonContent> = lazySchema(() =>
+  z.lazy(() =>
+    z.object({
+      type: z.string().optional(),
+      attrs: z.record(z.string(), z.unknown()).optional(),
+      content: z.array(jsonContentSchema).optional(),
+      marks: z.array(jsonContentMarkSchema).optional(),
+      text: z.string().optional(),
+    }),
+  ),
+);
+
+export const jsonContentRecordV100 = defineRecordContract({
+  name: "json-content",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  schema: jsonContentSchema,
+});
+
+export const attachmentMentionAttrsRecordV100 = defineRecordContract({
+  name: "attachment-mention-attrs",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  schema: attachmentMentionAttrsSchema,
+});
+
+export const attachmentMentionNodeRecordV100 = defineRecordContract({
+  name: "attachment-mention-node",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  schema: attachmentMentionNodeSchema,
+});
+
+export const permissionRoleRecordV100 = defineRecordContract({
+  name: "permission-role",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  schema: permissionRoleSchema,
+});
+
+export const ticketStatusRecordV100 = defineRecordContract({
+  name: "ticket-status",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  schema: ticketStatusSchema,
+});
+
+export const epicArtifactKindRecordV100 = defineRecordContract({
+  name: "epic-artifact-kind",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  schema: markdownArtifactKindSchema,
+});
+
+// Kinds that carry a markdown body.
+export { markdownArtifactKindSchema };
+
+// Every artifact kind, markdown or not. The composer can `@` mention each.
+export { epicArtifactKindSchema };
+
+// Frozen copy for every released line. New lines read the latest record.
+// It shares the domain schema today; the two names can diverge if a markdown
+// kind is added. The released copy must keep its original four kinds.
+export const EpicArtifactKindSchemaPreHtml = epicArtifactKindRecordV100.schema;
+
+export const epicArtifactKindRecordV200 = defineRecordContract({
+  name: "epic-artifact-kind",
+  schemaVersion: { major: 2, minor: 0 } as const,
+  schema: epicArtifactKindSchema,
+});
+
+const epicArtifactKindUpgradeV100ToV200 = defineRecordUpgradePath<
+  typeof epicArtifactKindRecordV100,
+  typeof epicArtifactKindRecordV200
+>({
+  from: epicArtifactKindRecordV100.schemaVersion,
+  to: epicArtifactKindRecordV200.schemaVersion,
+  upgradeRecord: (record) => record,
+});
+
+const epicArtifactKindDowngradeV200ToV100 = defineRecordDowngradePath<
+  typeof epicArtifactKindRecordV200,
+  typeof epicArtifactKindRecordV100
+>({
+  from: epicArtifactKindRecordV200.schemaVersion,
+  to: epicArtifactKindRecordV100.schemaVersion,
+  downgradeRecord: (record) => {
+    const parsed = epicArtifactKindRecordV100.schema.safeParse(record);
+    if (parsed.success) return { ok: true as const, value: parsed.data };
+    return {
+      ok: false as const,
+      error: {
+        code: "DOWNGRADE_UNSUPPORTED" as const,
+        // Naming the first new kind would misreport every kind added after it:
+        // all kinds absent from 1.0 take this same path.
+        message:
+          "This artifact kind cannot be represented by epic-artifact-kind record 1.0",
+      },
+    };
+  },
+});
+
+export const harnessIdRecordV100 = defineRecordContract({
+  name: "harness-id",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  schema: harnessIdSchemaPreReasonix,
+});
+
+export const harnessIdRecordV200 = defineRecordContract({
+  name: "harness-id",
+  schemaVersion: { major: 2, minor: 0 } as const,
+  schema: harnessIdSchema,
+});
+
+const harnessIdUpgradeV100ToV200 = defineRecordUpgradePath<
+  typeof harnessIdRecordV100,
+  typeof harnessIdRecordV200
+>({
+  from: harnessIdRecordV100.schemaVersion,
+  to: harnessIdRecordV200.schemaVersion,
+  upgradeRecord: (record) => record,
+});
+
+const harnessIdDowngradeV200ToV100 = defineRecordDowngradePath<
+  typeof harnessIdRecordV200,
+  typeof harnessIdRecordV100
+>({
+  from: harnessIdRecordV200.schemaVersion,
+  to: harnessIdRecordV100.schemaVersion,
+  downgradeRecord: (record) => {
+    const parsed = harnessIdRecordV100.schema.safeParse(record);
+    if (parsed.success) return { ok: true as const, value: parsed.data };
+    return {
+      ok: false as const,
+      error: {
+        code: "DOWNGRADE_UNSUPPORTED" as const,
+        // Names no harness: 1.0 froze before Reasonix, and every id added
+        // after it (Antigravity, and whatever follows) takes this same path.
+        // Naming the first one would have misreported every id after it.
+        message: "This harness cannot be represented by harness-id record 1.0",
+      },
+    };
+  },
+});
+
+export const commonRecordRegistry = defineVersionedRecordRegistry({
+  "json-content": {
+    1: {
+      latestMinor: 0,
+      versions: {
+        0: {
+          contract: jsonContentRecordV100,
+          upgradeFromPreviousVersion: null,
+        },
+      },
+      downgradePathsFromLatest: {},
+    },
+  },
+  "attachment-mention-attrs": {
+    1: {
+      latestMinor: 0,
+      versions: {
+        0: {
+          contract: attachmentMentionAttrsRecordV100,
+          upgradeFromPreviousVersion: null,
+        },
+      },
+      downgradePathsFromLatest: {},
+    },
+  },
+  "attachment-mention-node": {
+    1: {
+      latestMinor: 0,
+      versions: {
+        0: {
+          contract: attachmentMentionNodeRecordV100,
+          upgradeFromPreviousVersion: null,
+        },
+      },
+      downgradePathsFromLatest: {},
+    },
+  },
+  "permission-role": {
+    1: {
+      latestMinor: 0,
+      versions: {
+        0: {
+          contract: permissionRoleRecordV100,
+          upgradeFromPreviousVersion: null,
+        },
+      },
+      downgradePathsFromLatest: {},
+    },
+  },
+  "ticket-status": {
+    1: {
+      latestMinor: 0,
+      versions: {
+        0: {
+          contract: ticketStatusRecordV100,
+          upgradeFromPreviousVersion: null,
+        },
+      },
+      downgradePathsFromLatest: {},
+    },
+  },
+  "epic-artifact-kind": {
+    1: {
+      latestMinor: 0,
+      versions: {
+        0: {
+          contract: epicArtifactKindRecordV100,
+          upgradeFromPreviousVersion: null,
+        },
+      },
+      downgradePathsFromLatest: {},
+    },
+    2: {
+      latestMinor: 0,
+      versions: {
+        0: {
+          contract: epicArtifactKindRecordV200,
+          upgradeFromPreviousVersion: epicArtifactKindUpgradeV100ToV200,
+        },
+      },
+      downgradePathsFromLatest: { 1: epicArtifactKindDowngradeV200ToV100 },
+    },
+  },
+  "harness-id": {
+    1: {
+      latestMinor: 0,
+      versions: {
+        0: {
+          contract: harnessIdRecordV100,
+          upgradeFromPreviousVersion: null,
+        },
+      },
+      downgradePathsFromLatest: {},
+    },
+    2: {
+      latestMinor: 0,
+      versions: {
+        0: {
+          contract: harnessIdRecordV200,
+          upgradeFromPreviousVersion: harnessIdUpgradeV100ToV200,
+        },
+      },
+      downgradePathsFromLatest: { 1: harnessIdDowngradeV200ToV100 },
+    },
+  },
+});
+
+export type CommonRecordRegistry = typeof commonRecordRegistry;
+
+// Types via `RecordValue<>` so runtime + type stay in lock-step.
+// `JsonContent` is declared above (recursive z.lazy() needs a named
+// annotation); structurally identical to
+// `RecordValue<CommonRecordRegistry, "json-content">`.
+export type AttachmentMentionAttrs = RecordValue<
+  CommonRecordRegistry,
+  "attachment-mention-attrs"
+>;
+export type AttachmentMentionNode = RecordValue<
+  CommonRecordRegistry,
+  "attachment-mention-node"
+>;
+/**
+ * Every role the `permission-role` record decodes, the retired `viewer`
+ * among them. A decoder's type: `grantedRole`
+ * (`protocol/common/permission-role`) turns one of these into the access it
+ * gives, and `PermissionRole` is that narrower result.
+ */
+export type WirePermissionRole = RecordValue<
+  CommonRecordRegistry,
+  "permission-role"
+>;
+export type TicketStatus = RecordValue<CommonRecordRegistry, "ticket-status">;
+export type EpicArtifactKind = RecordValue<
+  CommonRecordRegistry,
+  "epic-artifact-kind"
+>;
+export type MarkdownArtifactKind = z.infer<typeof markdownArtifactKindSchema>;
+export type HarnessId = RecordValue<CommonRecordRegistry, "harness-id">;

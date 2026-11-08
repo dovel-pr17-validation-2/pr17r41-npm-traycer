@@ -1,0 +1,194 @@
+name: Real supervisor (macOS launchd integration)
+
+# The CLI's real-launchd rows are only meaningful when a real OS supervisor
+# executes them, so they are opt-in behind TRAYCER_RUN_REAL_SUPERVISOR_MACOS —
+# and until this workflow existed **nothing set it**, leaving the suite unable
+# to pass honestly on any machine but a developer's own Mac.
+#
+# SCOPE: this workflow used to carry three jobs (macOS / Windows / Linux)
+# driving the platform annex matrix in `clients/shared/host-lifecycle`. That
+# matrix belonged to the autonomous decision layer, which reached zero
+# production callers and is archived in the epic's `parked-decision-layer`
+# artifact. What remains here is the part with a live subject: the CLI's
+# real-launchd provisioning + readiness rows, which exercise shipped
+# `lifecycle-probe` code paths.
+#
+# Two properties of this job are load-bearing:
+#
+#   1. No continue-on-error, no allowed failure. A gate that cannot fail is a
+#      decoration, and burying an unrunnable row behind one is how the matrix
+#      came to report coverage it did not have.
+#      UNVERIFIED FROM IN-TREE: whether this check is in this repository's
+#      branch-protection *required checks* list is a repo setting, not visible
+#      here, and nothing in this file can assert it. Someone with repo settings
+#      access has to confirm it — deliberately left unresolved rather than
+#      argued.
+#   2. Setting the opt-in is a claim the runner can host the rows. If it turns
+#      out it cannot, the suite fails loudly naming what is missing, rather than
+#      skipping. A job that flips the opt-in on and then silently skips proves
+#      nothing, which is the exact failure this gate exists to remove.
+#
+# The suite operates only on scoped labels (`ai.traycer.host.test.*`) under
+# scoped temp data dirs, tears down in `finally`, and ends with a residue sweep
+# that fails if the run leaked. Nothing here can touch a real non-scoped
+# `ai.traycer.*` registration.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  # A manual trigger for a sparing branch run, when a check is actually
+  # needed before the merge (AGENTS.md, "When CI runs").
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Only a pull request's runs supersede each other. A push to `main` gets its own
+  # group (the run id): every merge is tested once, so a later merge must never
+  # cancel an earlier merge's run.
+  group: real-supervisor-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  # Decides whether the macOS job below has anything to drive. It is the only
+  # job in this workflow and the scarce runner in the repository, and a push to
+  # a client that is not the CLI reaches none of what it executes.
+  # `scripts/ci-push-scope.sh` holds the list and the four rules that keep the
+  # decision a gate; the range starts at the last push this workflow PASSED on,
+  # so a red merge is not forgotten by the next one.
+  changes:
+    name: CLI real-launchd rows (changes)
+    # A team PR into `main`, `integration/*` or `land/*` skips this job: the
+    # merge to `main` runs it once. A fork PR, a bot PR and a PR into any
+    # other branch run it in full.
+    if: >-
+      github.event_name != 'pull_request'
+      || (github.base_ref != 'main' && !startsWith(github.base_ref, 'integration/') && !startsWith(github.base_ref, 'land/'))
+      || github.event.pull_request.head.repo.full_name != github.repository
+      || github.event.pull_request.user.type == 'Bot'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # `actions: read` lets the push step below list this workflow's earlier runs.
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      # Every commit, for the range below, but no file contents: the diff reads
+      # trees only, and the job's two files are both in `scripts/`.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          sparse-checkout: scripts
+          persist-credentials: false
+      - name: Find the last green push to compare against
+        id: base
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          base="$(scripts/ci-last-green-sha.sh real-supervisor.yml "$BRANCH" "$BEFORE")"
+          echo "sha=${base}" >> "$GITHUB_OUTPUT"
+      - name: Does this change reach the CLI's launchd rows?
+        id: filter
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE: ${{ steps.base.outputs.sha }}
+        run: |
+          set -euo pipefail
+          run="$(scripts/ci-push-scope.sh real-supervisor.yml "$EVENT" "$PR_BASE" "$PUSH_BASE")"
+          echo "run=${run}" >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: CLI real-launchd rows (macOS)
+    needs: changes
+    # A team PR into `main`, `integration/*` or `land/*` skips this job: the
+    # merge to `main` runs it once. A fork PR, a bot PR and a PR into any
+    # other branch run it in full.
+    #
+    # `!cancelled()` is what lets this job run when `changes` did not succeed:
+    # without it GitHub skips a job whose dependency failed, and a gate that
+    # skips on a failed read is not a gate. A failed detection runs the rows,
+    # and so does an answer that is anything but an explicit `false`.
+    if: >-
+      (
+        github.event_name != 'pull_request'
+        || (github.base_ref != 'main' && !startsWith(github.base_ref, 'integration/') && !startsWith(github.base_ref, 'land/'))
+        || github.event.pull_request.head.repo.full_name != github.repository
+        || github.event.pull_request.user.type == 'Bot'
+      )
+      && !cancelled()
+      && (needs.changes.result != 'success' || needs.changes.outputs.run != 'false')
+    runs-on: macos-latest
+    # These rows drive real launchd and wait on readiness. Without a bound, a
+    # wedged `launchctl` sits until the 6-hour default on a 10x-billed macOS
+    # runner, and `cancel-in-progress` means it holds the concurrency group
+    # against every later push while it does.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.14"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          package-manager-cache: false
+          node-version: "24.20.0"
+      - name: Cache bun global install cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+      - run: bun install --frozen-lockfile
+      - name: Report launchd capability
+        run: |
+          {
+            echo "### macOS runner capability"
+            echo '```'
+            echo "uid=$(id -u)"
+            launchctl print "gui/$(id -u)" >/dev/null 2>&1 \
+              && echo "launchctl gui domain: reachable" \
+              || echo "launchctl gui domain: NOT reachable"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      # The Layer-0 rows in this suite resolve `traycer-host/`, which exists
+      # ONLY in the internal monorepo. On this checkout `layer0Availability()`
+      # returns `not-internal-checkout`, so those rows skip loudly; the rest of
+      # the suite (fallback provision + readiness rows, producer-side
+      # attestation) really runs here.
+      #
+      # `TRAYCER_REQUIRE_LAYER0` is deliberately NOT set: this repository cannot
+      # honour it. The internal monorepo's `real-supervisor-internal.yml` sets
+      # it and is where the Layer-0 rows can actually land.
+      - name: CLI real-launchd rows (Layer-0 rows skip in an OSS checkout)
+        working-directory: clients/traycer-cli
+        env:
+          TRAYCER_RUN_REAL_SUPERVISOR_MACOS: "1"
+        run: bunx vitest run src/host/__tests__/lifecycle-probe-real-launchd.optional.integration.test.ts
+      # `pipefail` is load-bearing: without it a failing enumerator yields an
+      # empty pipeline, `-n "$leaked"` is false, and the step prints "no scoped
+      # residue" at exactly the moment it stopped being able to see any.
+      - name: Fail if the run leaked a scoped launchd label
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          leaked=$(launchctl list | awk '{print $3}' | { grep '^ai\.traycer\.host\.test\.' || true; })
+          if [ -n "$leaked" ]; then
+            echo "::error::real-supervisor run leaked scoped launchd labels:"
+            echo "$leaked"
+            exit 1
+          fi
+          echo "no scoped launchd residue"

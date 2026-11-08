@@ -1,0 +1,889 @@
+import type { TransportVantage } from "../../host-transport/vantage";
+import {
+  hostInstallRecordSchema,
+  hostInstallRecordWireV10Schema,
+  hostStagedRecordSchema,
+  hostStagedRecordWireV10Schema,
+  storedCliInstallManifestSchema,
+  // The browser-safe half deliberately: this module is on the RPC registry the
+  // renderer imports, and `./installation` also carries the Node-only readers.
+} from "@traycer/protocol/config/installation-records";
+import { z } from "zod";
+import { lazySchema } from "@traycer/protocol/framework/lazy-schema";
+
+const emptyRequestSchema = lazySchema(() => z.object({}));
+
+/**
+ * The CLI doctor report is intentionally represented structurally here rather
+ * than importing CLI-owned issue-code constants into protocol. That keeps the
+ * wire contract stable when the CLI adds a new diagnostic code.
+ */
+export const hostDoctorIssueSchema = lazySchema(() =>
+  z.object({
+    code: z.string().min(1),
+    severity: z.enum(["info", "warning", "error", "fatal"]),
+    title: z.string(),
+    message: z.string(),
+    fixAction: z.string().nullable(),
+    terminalCommand: z.string().nullable(),
+    details: z.record(z.string(), z.unknown()).nullable(),
+  }),
+);
+export type HostDoctorIssue = z.infer<typeof hostDoctorIssueSchema>;
+
+export const hostDoctorRequestSchema = emptyRequestSchema;
+export type HostDoctorRequest = z.infer<typeof hostDoctorRequestSchema>;
+
+export const hostDoctorResponseSchema = lazySchema(() =>
+  z.discriminatedUnion("status", [
+    z.object({
+      status: z.literal("ok"),
+      issues: z.array(hostDoctorIssueSchema),
+      triviallyGreenIssueCodes: z.array(z.string()),
+    }),
+    z.object({ status: z.literal("cli-unavailable") }),
+    z.object({ status: z.literal("cli-failed") }),
+    z.object({ status: z.literal("invalid-output") }),
+  ]),
+);
+export type HostDoctorResponse = z.infer<typeof hostDoctorResponseSchema>;
+
+export const LOCAL_WS_DOCTOR_TRIVIALLY_GREEN_ISSUE_CODES = [
+  "SERVICE_STOPPED",
+  "PORT_UNREACHABLE",
+  "PORT_CONFLICT",
+  "HOST_RPC_UNRESPONSIVE",
+] as const;
+
+/** No code is universally proven: a relay-served RPC gets this empty set. */
+export const RPC_DOCTOR_TRIVIALLY_GREEN_ISSUE_CODES = [] as const;
+
+/**
+ * The host can only caption doctor issues as trivially green when this RPC
+ * arrived over a direct local WebSocket. A relay session proves the relay
+ * connection, not the daemon's loopback listener or its local CLI state.
+ *
+ * `SERVICE_STOPPED`, `PORT_UNREACHABLE`, `PORT_CONFLICT` and
+ * `HOST_RPC_UNRESPONSIVE` are local-WS facts: the responding process accepted
+ * the loopback connection on its configured endpoint and answered it, so it
+ * is neither stopped, unreachable nor unresponsive. PID sidecar codes remain meaningful (the listener may
+ * have been started outside its service metadata), and the three host-RPC
+ * credential/protocol codes remain meaningful because the spawned CLI uses a
+ * separate stored bearer and performs its own negotiation.
+ */
+export function doctorTriviallyGreenIssueCodesForVantage(
+  vantage: TransportVantage,
+): readonly string[] {
+  return vantage === "local-ws"
+    ? LOCAL_WS_DOCTOR_TRIVIALLY_GREEN_ISSUE_CODES
+    : RPC_DOCTOR_TRIVIALLY_GREEN_ISSUE_CODES;
+}
+
+/**
+ * Only `https:` and `http:`. A download URL is fetched, so leaving it a bare
+ * string let a manifest name a `file:` or `javascript:` target that no
+ * signature check would ever get to weigh in on.
+ */
+const httpAssetUrlSchema = lazySchema(() =>
+  z
+    .string()
+    .refine(
+      (value) =>
+        URL.canParse(value) &&
+        (new URL(value).protocol === "https:" ||
+          new URL(value).protocol === "http:"),
+      { message: "must be an http(s) URL" },
+    ),
+);
+
+/**
+ * The two arms are genuinely different records, not one record with optional
+ * fields.
+ *
+ * This mirrors what `parsePlatformAsset` in the CLI's own registry parser
+ * already enforces: for `available: true` every artifact field must be
+ * present and usable - non-empty http(s) URLs, a positive `sizeBytes`, a
+ * lowercase 64-char digest - because a partial entry must be published as
+ * unavailable rather than half-filled. As one flat object the wire schema
+ * accepted exactly the partial entries that parser refuses.
+ *
+ * That matters here and not only there: this schema validates what a REMOTE
+ * host answered, and a remote host is not necessarily running a CLI whose
+ * parser is this strict. Both arms keep `unavailableReason` nullable, since
+ * an available asset may still carry a note.
+ */
+const hostPlatformAssetSchema = lazySchema(() =>
+  z.discriminatedUnion("available", [
+    z.object({
+      available: z.literal(true),
+      unavailableReason: z.string().nullable(),
+      url: httpAssetUrlSchema,
+      sizeBytes: z.number().int().positive(),
+      sha256: z.string().regex(/^[a-f0-9]{64}$/),
+      signatureUrl: httpAssetUrlSchema,
+      signatureAlgorithm: z.literal("minisign"),
+      publicKeyId: z.string().min(1),
+    }),
+    z.object({
+      available: z.literal(false),
+      unavailableReason: z.string().nullable(),
+      // Left wide on purpose: an unavailable platform is published with empty
+      // strings and `sizeBytes: 0`, and tightening these would reject the very
+      // shape that says "there is no artifact here".
+      url: z.string(),
+      sizeBytes: z.number().finite(),
+      sha256: z.string(),
+      signatureUrl: z.string(),
+      signatureAlgorithm: z.literal("minisign"),
+      publicKeyId: z.string(),
+    }),
+  ]),
+);
+
+// Frozen for host.update.check@1.0/1.1: those peers never reported formats.
+export const hostAvailableManifestSchemaPreStoreFormats = lazySchema(() =>
+  z.object({
+    schemaVersion: z.literal(1),
+    generatedAt: z.string(),
+    latest: z.string(),
+    versions: z.array(
+      z.object({
+        version: z.string(),
+        releasedAt: z.string(),
+        releaseNotesUrl: z.string(),
+        yanked: z.boolean(),
+        deprecationReason: z.string().nullable(),
+        requiredCliVersion: z.string().nullable(),
+        // The CLI projects this map to its platform before emitting it.
+        platforms: z.record(z.string(), hostPlatformAssetSchema),
+      }),
+    ),
+  }),
+);
+export const hostAvailableManifestSchema = lazySchema(() =>
+  hostAvailableManifestSchemaPreStoreFormats.extend({
+    versions: z.array(
+      hostAvailableManifestSchemaPreStoreFormats.shape.versions.element.extend({
+        // Older CLI listings omit this, just like older release manifests.
+        // The caller then consults the fixed released table, never a guess.
+        storeFormats: z
+          .object({ chatDb: z.number().int().nonnegative() })
+          .nullable()
+          .optional(),
+      }),
+    ),
+  }),
+);
+export type HostAvailableManifest = z.infer<typeof hostAvailableManifestSchema>;
+
+/**
+ * Whether the answer should include release candidates.
+ *
+ * `.default(false)` rather than a bare required boolean, and that is the whole
+ * compatibility story for this field: a released client that predates it sends
+ * `{}`, which a host built from this tree still parses — the default supplies
+ * the stable-only behaviour those clients have always got. Making it required
+ * would be a required-set change on a client→host slot, which the surface-compat
+ * oracle classifies as breaking for exactly that reason.
+ *
+ * The reverse direction degrades quietly on its own: a host that predates the
+ * field parses the request with `z.object({})`, which strips the unknown key and
+ * runs `host available --json` without `--include-pre-releases`. So a new client
+ * asking an old host for RCs gets the stable list rather than an error — the
+ * checkbox appears to do nothing rather than breaking the page, which is the
+ * right failure for a filter.
+ */
+export const hostUpdateCheckRequestSchema = lazySchema(() =>
+  z.object({
+    includePreReleases: z.boolean().default(false),
+  }),
+);
+export type HostUpdateCheckRequest = z.infer<
+  typeof hostUpdateCheckRequestSchema
+>;
+
+export const hostUpdateCheckResponseSchema = lazySchema(() =>
+  z.discriminatedUnion("outcome", [
+    z.object({
+      outcome: z.literal("ok"),
+      manifest: hostAvailableManifestSchemaPreStoreFormats,
+    }),
+    z.object({ outcome: z.literal("cli-unavailable") }),
+    z.object({ outcome: z.literal("cli-failed") }),
+    z.object({ outcome: z.literal("invalid-output") }),
+  ]),
+);
+export type HostUpdateCheckResponse = z.infer<
+  typeof hostUpdateCheckResponseSchema
+>;
+
+/**
+ * Where the catalog's effective RC inclusion came from.
+ *
+ * This is PROVENANCE, not a saved preference — nothing in it is persisted.
+ * `installed-rc` says the CLI derived inclusion from an installed canonical
+ * `X.Y.Z-rc.N` host, which is what lets Settings explain that the host is
+ * following its current RC line instead of implying the user checked a box.
+ * `stable-default` is the fail-closed answer, and covers a stable install, a
+ * non-canonical pre-release, no install at all, and an install record the CLI
+ * could not read — a corrupt record must not break registry listing, so it is
+ * reported as the ordinary default rather than as an error.
+ *
+ * The two explicit values mirror the CLI's positive and negative flags. They
+ * exist because "unchecked" and "never touched" are genuinely different
+ * requests: only an explicit false can filter RC rows off an RC host.
+ */
+export const hostIncludePreReleasesSourceSchema = lazySchema(() =>
+  z.enum([
+    "explicit-include",
+    "explicit-exclude",
+    "installed-rc",
+    "stable-default",
+  ]),
+);
+export type HostIncludePreReleasesSource = z.infer<
+  typeof hostIncludePreReleasesSourceSchema
+>;
+
+/**
+ * v1.1 replaces v1.0's defaulted boolean with a tri-state catalog override:
+ * `true` explicitly includes, `false` explicitly excludes, and ABSENT asks
+ * the host to derive inclusion from its own installed version.
+ *
+ * The third state is an omitted key rather than an explicit `null`, and that
+ * is a wire-projection requirement, not a style choice. Within one major there
+ * is no request-downgrade bridge - `downgradePathsFromLatest` is reserved for
+ * crossing majors - so a v1.1 client talking to a v1.0 host projects its
+ * params by PARSING them with the v1.0 request schema
+ * (`prepareRequestPayload`). `{ includePreReleases: null }` fails that parse,
+ * which would turn every default catalog load against an already-shipped host
+ * into `DOWNGRADE_UNSUPPORTED`. An omitted key parses to v1.0's `false`, which
+ * is precisely the documented old-host fallback: stable-only.
+ *
+ * `.optional()` and never `.default()`, for the reason
+ * `epicSubscribeOpenRequestSchema` gives: a default materializes a key the
+ * caller never wrote, splitting the GUI's query cache between the caller's
+ * params and the parsed params for one logical request - and here it would
+ * also re-collapse "excluded" into "not stated", the exact ambiguity this
+ * minor exists to remove.
+ *
+ * READING THE DERIVE STATE: test `params.includePreReleases === undefined`,
+ * never `"includePreReleases" in params` and never `Object.hasOwn(...)`. The
+ * two ways a derive request reaches a resolver do not agree on key PRESENCE,
+ * only on VALUE:
+ *
+ * - parsed from the wire, a v1.1 client's `{}` yields an object with no such
+ *   own key at all;
+ * - bridged from a v1.0 peer, `hostUpdateCheckUpgradeV10ToV11` yields whatever
+ *   that bridge constructs.
+ *
+ * The bridge deliberately omits the key so the two coincide today, and
+ * `host-update-check.test.ts` pins that with `toStrictEqual` rather than
+ * `toEqual` (which cannot see the difference). An identity check on the VALUE
+ * is correct under either representation, so it is the rule that survives.
+ */
+export const hostUpdateCheckRequestSchemaV11 = lazySchema(() =>
+  z.object({
+    includePreReleases: z.boolean().optional(),
+  }),
+);
+export type HostUpdateCheckRequestV11 = z.infer<
+  typeof hostUpdateCheckRequestSchemaV11
+>;
+
+/**
+ * v1.1's `ok` arm reports what the catalog actually did.
+ *
+ * `effectiveIncludePreReleases` is the resolved inclusion — the answer the
+ * rows were filtered by — and is NOT a restatement of the request: for a
+ * derive request (the absent third state) it is the host's own derivation,
+ * which is the only way a caller can learn what an unstated override became.
+ * The other three outcomes are unchanged; a CLI that never ran resolved
+ * nothing to report.
+ */
+export const hostUpdateCheckResponseSchemaV11 = lazySchema(() =>
+  z.discriminatedUnion("outcome", [
+    z.object({
+      outcome: z.literal("ok"),
+      manifest: hostAvailableManifestSchemaPreStoreFormats,
+      effectiveIncludePreReleases: z.boolean(),
+      includePreReleasesSource: hostIncludePreReleasesSourceSchema,
+    }),
+    z.object({ outcome: z.literal("cli-unavailable") }),
+    z.object({ outcome: z.literal("cli-failed") }),
+    z.object({ outcome: z.literal("invalid-output") }),
+  ]),
+);
+export type HostUpdateCheckResponseV11 = z.infer<
+  typeof hostUpdateCheckResponseSchemaV11
+>;
+
+/** Published store formats survive the host's CLI-JSON projection from @1.2. */
+export const hostUpdateCheckResponseSchemaV12 = lazySchema(() =>
+  z.discriminatedUnion("outcome", [
+    hostUpdateCheckResponseSchemaV11.options[0].extend({
+      manifest: hostAvailableManifestSchema,
+    }),
+    hostUpdateCheckResponseSchemaV11.options[1],
+    hostUpdateCheckResponseSchemaV11.options[2],
+    hostUpdateCheckResponseSchemaV11.options[3],
+  ]),
+);
+export type HostUpdateCheckResponseV12 = z.infer<
+  typeof hostUpdateCheckResponseSchemaV12
+>;
+
+export const hostUpdateInstallRequestSchema = lazySchema(() =>
+  z.object({
+    version: z.string().min(1),
+    force: z.boolean(),
+  }),
+);
+export type HostUpdateInstallRequest = z.infer<
+  typeof hostUpdateInstallRequestSchema
+>;
+
+/**
+ * @1.3 separates accepting lost chat access from force's busy-work consent.
+ * Required here so every current caller states the choice explicitly.
+ */
+export const hostUpdateInstallRequestV13Schema = lazySchema(() =>
+  hostUpdateInstallRequestSchema.extend({
+    acceptStoreFormatLoss: z.boolean(),
+  }),
+);
+export type HostUpdateInstallRequestV13 = z.infer<
+  typeof hostUpdateInstallRequestV13Schema
+>;
+
+/**
+ * `already-updating` means an update this host started is still running, so
+ * this one was not.
+ *
+ * `accepted` means the detached CLI was SPAWNED, not that it finished — the
+ * download, stage, drain and swap all happen after this method has already
+ * answered. Without this arm a caller cannot tell "your update is under way"
+ * from "nothing is happening", and a second request during that window
+ * launches a competing updater: the CLI's lock covers only its brief precheck
+ * and promote phases, so two runs download in parallel and can swap twice in a
+ * row.
+ */
+export const hostUpdateInstallResponseSchema = lazySchema(() =>
+  z.discriminatedUnion("outcome", [
+    z.object({ outcome: z.literal("accepted") }),
+    z.object({ outcome: z.literal("externally-managed") }),
+    z.object({ outcome: z.literal("cli-unavailable") }),
+    z.object({ outcome: z.literal("cli-failed") }),
+    z.object({ outcome: z.literal("already-updating") }),
+  ]),
+);
+export type HostUpdateInstallResponse = z.infer<
+  typeof hostUpdateInstallResponseSchema
+>;
+
+/**
+ * `@1.1` adds `attemptId` to the two arms for which a durable schema-v2 update
+ * attempt can be a fact. The per-arm semantics are NOT symmetric, and the
+ * asymmetry is the contract - read this before wiring either side.
+ *
+ * **`already-updating` → the attempt id, when one exists.** This arm means the
+ * host refused because an update is ALREADY running, so there is a real,
+ * already-durable attempt to name, and naming it is what lets a second UI
+ * action ATTACH to the in-flight attempt instead of racing it (experience doc,
+ * Flow C: "a second action for the same target attaches to the active
+ * attempt"). The id is read from the host's canonical attempt observation, so
+ * it is what the record says rather than what this call did.
+ *
+ * **`accepted` → always `null` before the cutover, and that is deliberate.**
+ * The host answers `accepted` at SPAWN of a detached CLI, and under the
+ * pre-cutover cohort gate (`decideUpdateExecutorCohort` is `shadow`) no
+ * schema-v2 attempt is created at all. There is therefore no adoption
+ * acknowledgement for this resolver to await, and returning an id read off the
+ * record here would attribute an unrelated pre-existing attempt to THIS
+ * dispatch - the exact fabrication the plan's "new UI never fabricates an
+ * identity when absent" rule forbids. Ticket 07 flips the authority and wires
+ * the executor's positive adoption acknowledgement through to this arm; until
+ * then a caller that needs live progress reads `host.status.updateOperation`,
+ * which is the negotiated route for that fact.
+ *
+ * Both arms are required-key/nullable-value, following the `busySessionCount` /
+ * `busyBreakdown` precedent: `null` means "this peer did not say", never "there
+ * is no attempt".
+ *
+ * ────────────────────────────────────────────────────────────────────────────
+ * `dispatch-indeterminate` — A THIRD ARM, ADDED HERE AND NOT IN A LATER MINOR
+ *
+ * Nothing produces this arm yet. It lands in `@1.1` anyway, and the reason is
+ * the shape of the type it lives in: a `z.discriminatedUnion` rejects an
+ * unknown discriminator OUTRIGHT — no partial parse, no ignorable-unknown — so
+ * an arm introduced in `@1.2` is a hard decode failure on every `@1.1` peer.
+ * That would mint a permanent unservable generation:
+ *
+ *   `@1.0`  knows no `attemptId`, knows no arm  → fine, plain `accepted` claims
+ *                                                 no identity anyway
+ *   `@1.1`  knows `attemptId`, knows no arm     → BROKEN: it expects an id and
+ *                                                 cannot decode "there is none"
+ *   `@1.2+` knows both                          → fine
+ *
+ * Shipping the arm inside `@1.1` deletes the middle row before it exists. The
+ * emitter, the resolver change and the executor ACK wiring are all Ticket 07's;
+ * this is only the decoder learning to tolerate it from birth.
+ *
+ * **`attemptId` IS ABSENT, NOT NULL — and that is the whole point.** The two
+ * identity-bearing arms above use required-key/nullable-value. This arm has no
+ * `attemptId` key at all, so reading an identity off it is structurally
+ * impossible rather than merely discouraged. An `attemptId: null` here would
+ * reproduce the exact ambiguity the arm exists to remove: a caller could not
+ * distinguish "dispatch happened, id unknown" from "no dispatch identity
+ * exists". Do NOT add the key for symmetry with its neighbours.
+ *
+ * **`reason` is a free-form nullable string, deliberately NOT a `z.enum`.**
+ * Three distinct causes reach this outcome — ACK timeout, child exit, and an
+ * invalid or missing ACK — and collapsing them into one opaque result is the
+ * diagnostic-substitution class this epic has already hit three times. An enum
+ * would carry the cause and then recreate the unknown-value decode failure one
+ * level down, so the next cause added would break old `@1.1` peers exactly as a
+ * new arm would. `null` means "this peer did not say", never "there was no
+ * reason".
+ *
+ * **What it means:** the host dispatched a detached CLI and cannot attribute
+ * any durable attempt to this dispatch. Not a success, not a refusal, not a CLI
+ * failure — an unresolved dispatch, distinct from `cli-failed` ("ran and
+ * failed") and `cli-unavailable` ("nothing to run"). A client renders the
+ * dispatch-uncertain state, falls back to `host.status.updateOperation` for
+ * live progress, and **must not arm the accepted latch**: that 60s lockout
+ * belongs to `accepted` alone, and arming it on an uncertain dispatch would
+ * freeze the controls a user needs over an outcome that is not an acceptance.
+ * ────────────────────────────────────────────────────────────────────────────
+ */
+export const hostUpdateInstallResponseV11Schema = lazySchema(() =>
+  z.discriminatedUnion("outcome", [
+    z.object({
+      outcome: z.literal("accepted"),
+      attemptId: z.string().min(1).nullable(),
+    }),
+    z.object({ outcome: z.literal("externally-managed") }),
+    z.object({ outcome: z.literal("cli-unavailable") }),
+    z.object({ outcome: z.literal("cli-failed") }),
+    z.object({
+      outcome: z.literal("already-updating"),
+      attemptId: z.string().min(1).nullable(),
+    }),
+    // No `attemptId` key. See the asymmetry note above before adding one.
+    z.object({
+      outcome: z.literal("dispatch-indeterminate"),
+      reason: z.string().min(1).nullable(),
+    }),
+  ]),
+);
+export type HostUpdateInstallResponseV11 = z.infer<
+  typeof hostUpdateInstallResponseV11Schema
+>;
+
+/** Bounded because the whole device may contain thousands of epic stores. */
+export const HOST_STORE_FLOOR_EPIC_ID_LIMIT = 10;
+
+export const hostUpdateStoreFloorRefusalSchema = lazySchema(() =>
+  z.object({
+    kind: z.enum(["blocked", "indeterminate"]),
+    reason: z.enum([
+      "newer-chat-stores",
+      "target-format-unknown",
+      "unreadable-stores",
+    ]),
+    targetVersion: z.string().min(1),
+    targetChatDb: z.number().int().nonnegative().nullable(),
+    // Null when any stamp was unreadable, just like host.status.onDiskMax.
+    onDiskMax: z.number().int().positive().nullable(),
+    // For a blocked verdict these name only proven-newer stores. Indeterminate
+    // verdicts name the stores whose compatibility could not be established.
+    epicCount: z.number().int().nonnegative(),
+    epicIds: z.array(z.string().min(1)).max(HOST_STORE_FLOOR_EPIC_ID_LIMIT),
+    // Keep unreadable stores separate even when another store proves the move
+    // is blocked: the UI must not label an unreadable stamp as proven-newer.
+    // Zero/empty means no per-epic read failed, not that the peer said nothing.
+    unreadableEpicCount: z.number().int().nonnegative(),
+    unreadableEpicIds: z
+      .array(z.string().min(1))
+      .max(HOST_STORE_FLOOR_EPIC_ID_LIMIT),
+  }),
+);
+export type HostUpdateStoreFloorRefusal = z.infer<
+  typeof hostUpdateStoreFloorRefusalSchema
+>;
+
+/**
+ * @1.3 retains cli-failed so every released peer can decode a pre-spawn
+ * refusal. The dispatcher strips these additive details for older minors;
+ * no new outcome or emission gate is needed. Null means no reason was given,
+ * including when a response is upgraded from an older peer.
+ */
+export const hostUpdateInstallResponseV13Schema = lazySchema(() =>
+  z.discriminatedUnion("outcome", [
+    hostUpdateInstallResponseV11Schema.options[0],
+    hostUpdateInstallResponseV11Schema.options[1],
+    hostUpdateInstallResponseV11Schema.options[2],
+    z.object({
+      outcome: z.literal("cli-failed"),
+      // Open vocabulary, like the bound-dispatch reason, so future CLI causes
+      // do not create an unservable generation of clients.
+      reason: z.string().min(1).nullable(),
+      storeFloor: hostUpdateStoreFloorRefusalSchema.nullable(),
+    }),
+    hostUpdateInstallResponseV11Schema.options[4],
+    hostUpdateInstallResponseV11Schema.options[5],
+  ]),
+);
+export type HostUpdateInstallResponseV13 = z.infer<
+  typeof hostUpdateInstallResponseV13Schema
+>;
+
+/**
+ * The request shape as it SHIPPED at `@1.0`: `attemptId` and `force`, with no
+ * `expected`. A hand-written literal, not `.omit()` over the live schema, for
+ * the reason `managedCommandSchemaPreRelaunch` gives — a future addition to
+ * the live shape must not be able to leak onto the released line this binds.
+ *
+ * Binding `@1.0` to this is what makes the strip STRUCTURAL rather than a
+ * filter applied after the fact: the dispatcher parses against the CALLER's
+ * schema, so an `expected` sent to a `@1.0` peer is unreachable for it, and
+ * that peer's behaviour is exactly what it was before this key existed.
+ */
+export const hostUpdateBoundDispatchRequestSchemaPreExpectedIdentity =
+  lazySchema(() =>
+    z.object({
+      attemptId: z.string().min(1),
+      force: z.boolean(),
+    }),
+  );
+
+/**
+ * The record position the dispatcher OBSERVED when it built this request.
+ *
+ * `z.number().int().positive()` is exactly the decoder's `positiveInteger`
+ * (`@traycer/protocol/config/host-update-attempt`): zod 4's `.int()` is
+ * safe-integer bounded, so both reject a counter above `2^53` where `+ 1`
+ * stops advancing. It is also byte-for-byte the rule `host.status` already
+ * applies to the same two fields, which matters because these values are
+ * compared for EQUALITY with the ones that arrived over that route.
+ */
+export const hostUpdateBoundDispatchExpectedIdentitySchema = lazySchema(() =>
+  z.object({
+    generation: z.number().int().positive(),
+    sequence: z.number().int().positive(),
+  }),
+);
+export type HostUpdateBoundDispatchExpectedIdentity = z.infer<
+  typeof hostUpdateBoundDispatchExpectedIdentitySchema
+>;
+
+/**
+ * The request shared by the two BOUND update dispatches,
+ * `host.update.activate` and `host.update.continue`.
+ *
+ * It names an ATTEMPT, not a version. That is the whole difference from
+ * `host.update.install`: these methods resume work a durable record already
+ * describes, so the operation comes from the record's continuation and the
+ * caller supplies only which attempt it means and whether the user asked to
+ * push past a busy host. A version here would be a second, unsynchronised copy
+ * of a fact the record already owns — and one a stale UI could get wrong.
+ *
+ * ### Why `expected` is NOT that second copy
+ *
+ * The argument above stands, and it does not reach this key. A version is a
+ * fact about the world; a stale one makes the host do the WRONG THING. A
+ * generation is a cursor into the record's own history whose only use is to be
+ * compared for equality, and a stale one produces a REFUSAL. The two fail in
+ * opposite directions, which is the whole reason one is refused here and the
+ * other is carried.
+ *
+ * It is not new vocabulary either. `host.status` already carries
+ * `attemptId + generation + sequence` and calls it "the ordering key, in full"
+ * (`../status/contracts.ts`); the client receives the triple, orders on it, and
+ * then had no way to say which one it was acting on. This request was the only
+ * place in the round trip that truncated the identity to a third of itself.
+ *
+ * ### Why OPTIONAL, and what its absence means
+ *
+ * Absence is the legacy signal, not a defaulted value. A client that predates
+ * `@1.1` cannot send the key, and a `@1.0` peer parses with
+ * {@link hostUpdateBoundDispatchRequestSchemaPreExpectedIdentity}, where it does
+ * not exist at all. A host that receives no `expected` must therefore behave
+ * exactly as it did before — unbound — because "the caller did not say" and
+ * "the caller says any position will do" have to stay distinguishable, and only
+ * the first of them is true of an old client.
+ *
+ * A host that DOES receive one compares it against the record it observes and
+ * refuses when the attempt has moved. That refusal rides the existing
+ * `dispatch-indeterminate { reason }` arm: `reason` is a free `z.string()` here
+ * and a kebab PATTERN in the ACK grammar, so the new `refused-attempt-moved`
+ * needs no schema change anywhere.
+ *
+ * The WIRE stays open and must: a host has to be able to report a reason a
+ * client predates, and an enum here would turn "a newer host said something
+ * new" into a parse failure at exactly the moment a user needs telling. What
+ * the package does enumerate is a BUILD-TIME vocabulary, one tuple per wire
+ * field, in `@traycer/protocol/config/host-update-bound-dispatch-reasons`:
+ * `HOST_UPDATE_KNOWN_INDETERMINATE_DISPATCH_REASONS` for this arm — the KNOWN
+ * values of a field that is genuinely open, because one producer generates
+ * them — and `HOST_UPDATE_CLI_FAILED_REASONS`, which is closed, for the other.
+ * A consumer narrows through that module; it never parses against it.
+ */
+export const hostUpdateBoundDispatchRequestSchema = lazySchema(() =>
+  z.object({
+    attemptId: z.string().min(1),
+    force: z.boolean(),
+    expected: hostUpdateBoundDispatchExpectedIdentitySchema.optional(),
+  }),
+);
+export type HostUpdateBoundDispatchRequest = z.infer<
+  typeof hostUpdateBoundDispatchRequestSchema
+>;
+
+/**
+ * The response shared by both bound dispatches — deliberately NOT
+ * `host.update.install`'s, at any minor.
+ *
+ * Two properties of the install response make reuse actively wrong here:
+ *
+ *  - its `cli-failed` arm carries NO reason (`{ outcome: "cli-failed" }`), and
+ *    a bound dispatch's most important failure is a CLI too old to honour the
+ *    bound options at all. That is a specific, actionable thing to tell a user
+ *    ("update the CLI, then try again"), and an arm with nowhere to put it
+ *    would erase it at the wire;
+ *  - the host projects every `host.update.install@1.0` peer's decision as
+ *    `accepted {null}`, a legacy accommodation for callers that predate
+ *    attempt ids. These methods are new AT 1.0, so there is no such peer, and
+ *    inheriting a projection that turns a refusal into an acceptance would be
+ *    the "never reports a false success" rule broken on day one.
+ *
+ * Every arm carries a non-null payload, unlike the install response's
+ * required-key/nullable-value fields: those exist because an OLD peer might
+ * not have said, and there are no old peers here. A caller may therefore act
+ * on `attemptId` and render `reason` without a "did not say" branch.
+ */
+export const hostUpdateBoundDispatchResponseSchema = lazySchema(() =>
+  z.discriminatedUnion("outcome", [
+    z.object({
+      outcome: z.literal("accepted"),
+      attemptId: z.string().min(1),
+    }),
+    z.object({
+      outcome: z.literal("already-updating"),
+      attemptId: z.string().min(1),
+    }),
+    z.object({
+      outcome: z.literal("dispatch-indeterminate"),
+      reason: z.string().min(1),
+    }),
+    z.object({
+      outcome: z.literal("cli-failed"),
+      reason: z.string().min(1),
+    }),
+  ]),
+);
+export type HostUpdateBoundDispatchResponse = z.infer<
+  typeof hostUpdateBoundDispatchResponseSchema
+>;
+
+export const hostGetInstallationInfoRequestSchema = emptyRequestSchema;
+export type HostGetInstallationInfoRequest = z.infer<
+  typeof hostGetInstallationInfoRequestSchema
+>;
+
+/**
+ * `@1.0` — the FROZEN released line, and it must stay byte-shaped as shipped.
+ *
+ * v1.2.0 released this method before `executableSha256` existed on either
+ * record, so a released peer's payload never carries that key. T3 then added it
+ * to the on-disk records, which is additive and harmless on disk but is a
+ * host→client divergence at a negotiated `1.0` — the exact finding
+ * `released-baseline-compat` raises.
+ *
+ * The `@1.0` slot is therefore served from the frozen WIRE projections. It is
+ * not a filter applied after building a richer response: the dispatcher parses
+ * against the CALLER's schema, so declaring the field absent here is what makes
+ * it structurally unreachable for that peer.
+ */
+export const hostGetInstallationInfoResponseSchema = lazySchema(() =>
+  z.discriminatedUnion("status", [
+    z.object({ status: z.literal("unmanaged") }),
+    z.object({
+      status: z.literal("managed"),
+      installRecord: hostInstallRecordWireV10Schema,
+      stagedRecord: hostStagedRecordWireV10Schema.nullable(),
+      cliManifest: storedCliInstallManifestSchema.nullable(),
+    }),
+  ]),
+);
+export type HostGetInstallationInfoResponse = z.infer<
+  typeof hostGetInstallationInfoResponseSchema
+>;
+
+/**
+ * `@1.1` — the same call, additionally carrying `executableSha256` on both
+ * records.
+ *
+ * A MINOR, not a major: the growth is additive, host→client, and every consumer
+ * already tolerates absence because old hosts never sent it (the record schemas
+ * normalize a missing value to `null` by construction). A major would force
+ * downgrade bridges for a field whose absent case is already the shipped
+ * reality.
+ */
+export const hostGetInstallationInfoResponseV11Schema = lazySchema(() =>
+  z.discriminatedUnion("status", [
+    z.object({ status: z.literal("unmanaged") }),
+    z.object({
+      status: z.literal("managed"),
+      installRecord: hostInstallRecordSchema,
+      stagedRecord: hostStagedRecordSchema.nullable(),
+      cliManifest: storedCliInstallManifestSchema.nullable(),
+    }),
+  ]),
+);
+export type HostGetInstallationInfoResponseV11 = z.infer<
+  typeof hostGetInstallationInfoResponseV11Schema
+>;
+
+/**
+ * The OS service registration, over RPC rather than only the local CLI bridge.
+ *
+ * These three exist because the Overview replaced the bridge-backed host page
+ * for EVERY host, and the OS service controls did not come with it — they were
+ * recorded as a scope drop, which in practice meant a registration a person
+ * could see on the machine in front of them and not on any other. Restoring them
+ * as bridge-only would have put the one genuinely per-kind fork back on a page
+ * whose premise is that local and remote render the same components.
+ *
+ * Read and write are separate methods on purpose: the status read is cheap and
+ * safe to run whenever the section is open, and the two writes are neither.
+ */
+/**
+ * `externally-managed` is the CLI's word for a registration that EXISTS but is
+ * not the CLI's to touch — on macOS, the label loaded from Traycer Desktop's
+ * SMAppService in-bundle plist. That is the NORMAL state of a Desktop-managed
+ * machine, so a wire enum without it would make `host.service.status` fail on
+ * exactly the fleet's most common configuration. A caller must render it as
+ * "registered, owned elsewhere" and withhold the CLI-backed mutations.
+ */
+export const hostServiceStateSchema = lazySchema(() =>
+  z.enum(["running", "stopped", "not-installed", "externally-managed"]),
+);
+export type HostServiceState = z.infer<typeof hostServiceStateSchema>;
+
+export const hostServiceStatusRequestSchema = emptyRequestSchema;
+export type HostServiceStatusRequest = z.infer<
+  typeof hostServiceStatusRequestSchema
+>;
+
+export const hostServiceStatusResponseSchema = lazySchema(() =>
+  z.discriminatedUnion("outcome", [
+    z.object({
+      outcome: z.literal("ok"),
+      state: hostServiceStateSchema,
+      /** The service label (`ai.traycer.host`, …) — identity, not decoration. */
+      label: z.string().min(1),
+      /** The plist / unit / scheduled-task path the registration lives at. */
+      manifestPath: z.string().min(1),
+    }),
+    /**
+     * The host refused to consult the CLI at all: an external supervisor owns
+     * its service lifecycle (`TRAYCER_HOST_UPDATES=external`), and the CANONICAL
+     * label the CLI would inspect is not the unit actually running this host —
+     * the read would answer about the wrong service. Distinct from `ok` with
+     * `state: "externally-managed"`, which is the CLI's own answer about a label
+     * it CAN see (Desktop's SMAppService): here there is no label or manifest
+     * path to report, because the supervising unit is outside the CLI's sight.
+     * Same gate `host.service.register` / `.deregister` already answer with.
+     */
+    z.object({ outcome: z.literal("externally-managed") }),
+    z.object({ outcome: z.literal("cli-unavailable") }),
+    z.object({ outcome: z.literal("cli-failed") }),
+    z.object({ outcome: z.literal("invalid-output") }),
+  ]),
+);
+export type HostServiceStatusResponse = z.infer<
+  typeof hostServiceStatusResponseSchema
+>;
+
+export const hostServiceRegisterRequestSchema = emptyRequestSchema;
+export type HostServiceRegisterRequest = z.infer<
+  typeof hostServiceRegisterRequestSchema
+>;
+
+/**
+ * `cli-failed` carries the CLI's own message, which the other maintenance
+ * methods throw away.
+ *
+ * That is not symmetry for its own sake: the most important refusal this
+ * command has is `service install` declining to touch a label owned by Desktop's
+ * SMAppService ("Traycer Desktop owns host registration on this machine …
+ * re-run with --takeover"). Reduced to a bare `cli-failed` the button would say
+ * "couldn't register" for a state that is not a fault at all and has a specific
+ * remedy, so the string is the payload.
+ *
+ * Unlike its sibling below this one CAN answer, and the asymmetry is not an
+ * oversight. Every refusal is a precondition the CLI checks BEFORE it touches
+ * launchd, so those come back over a live connection. What may not come back is
+ * SUCCESS: on macOS registering is a bootout/bootstrap/kickstart cycle, which
+ * kills this host and starts a new one, while on Linux the same command is an
+ * idempotent `systemctl enable --now` that commonly leaves the process in place.
+ * A caller must therefore treat a dropped connection on this method as a
+ * probable success — the host restarting — and never as a failed registration.
+ */
+export const hostServiceRegisterResponseSchema = lazySchema(() =>
+  z.discriminatedUnion("outcome", [
+    z.object({ outcome: z.literal("ok") }),
+    /**
+     * The HOST refused before the CLI ran: its updates — and with them its
+     * service lifecycle — are owned by an external supervisor
+     * (`TRAYCER_HOST_UPDATES=external`, the remote-staging unit being the
+     * canonical case). Distinct from a `cli-failed` refusal because the CLI
+     * would not refuse: it would install its OWN canonical unit beside the
+     * external one, two supervisors over one host home. Mirrors
+     * `host.update.install`'s outcome of the same name.
+     */
+    z.object({ outcome: z.literal("externally-managed") }),
+    z.object({ outcome: z.literal("cli-unavailable") }),
+    z.object({
+      outcome: z.literal("cli-failed"),
+      message: z.string().nullable(),
+    }),
+    z.object({ outcome: z.literal("invalid-output") }),
+  ]),
+);
+export type HostServiceRegisterResponse = z.infer<
+  typeof hostServiceRegisterResponseSchema
+>;
+
+export const hostServiceDeregisterRequestSchema = emptyRequestSchema;
+export type HostServiceDeregisterRequest = z.infer<
+  typeof hostServiceDeregisterRequestSchema
+>;
+
+/**
+ * `accepted`, not `ok` — and the difference is the whole contract.
+ *
+ * Deregistering boots out the very job that supervises this host, so the host
+ * process dies partway through the command that deregisters it. There is no
+ * moment at which a synchronous handler could return a result: the connection
+ * carrying the response goes away with the process. So the resolver spawns the
+ * CLI detached and answers `accepted` — the request was dispatched — exactly as
+ * `host.update.install` does for the same structural reason.
+ *
+ * A caller must therefore treat a dropped connection after `accepted` as the
+ * EXPECTED outcome rather than a failure, and must not promise the user it
+ * worked. What it can promise is that the host is going away.
+ */
+export const hostServiceDeregisterResponseSchema = lazySchema(() =>
+  z.discriminatedUnion("outcome", [
+    z.object({ outcome: z.literal("accepted") }),
+    /** Same host-side refusal as register's: an external supervisor owns it. */
+    z.object({ outcome: z.literal("externally-managed") }),
+    z.object({ outcome: z.literal("cli-unavailable") }),
+    z.object({ outcome: z.literal("cli-failed") }),
+  ]),
+);
+export type HostServiceDeregisterResponse = z.infer<
+  typeof hostServiceDeregisterResponseSchema
+>;

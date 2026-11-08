@@ -1,0 +1,84 @@
+# Pre-commit hooks. https://pre-commit.com
+# Install once:  pipx install pre-commit && pre-commit install
+# Run on demand: pre-commit run --all-files
+default_stages: [pre-commit]
+# A bare `pre-commit install` (what CONTRIBUTING.md documents) installs these
+# two. Without this it installs `pre-commit` alone and the DCO hook, a
+# `commit-msg` hook, never runs; a maintainer pull request into `main` runs no
+# DCO job in CI either (AGENTS.md, "When CI runs"), so the hook is the check.
+default_install_hook_types: [pre-commit, commit-msg]
+# Service emitter goldens are byte-for-byte emitter OUTPUT (a CRLF VBS, a
+# non-executable launcher script body): no hook may rewrite or lint them.
+exclude: ^clients/traycer-cli/src/service/platforms/__tests__/emitter-goldens/
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        # A dependency patch reproduces the upstream source byte for byte,
+        # trailing whitespace included, or it no longer applies.
+        exclude: \.gen\.(ts|tsx)$|^patches/
+      - id: end-of-file-fixer
+        exclude: \.gen\.(ts|tsx)$
+      - id: check-added-large-files
+        args: ["--maxkb=5000"]
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: detect-private-key
+      - id: mixed-line-ending
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+
+  - repo: https://github.com/gruntwork-io/pre-commit
+    rev: v0.1.20
+    hooks:
+      - id: shellcheck
+        # Avoid making the upstream wrapper inspect every tracked file merely
+        # to discover the handful of shell scripts.
+        types: [shell]
+
+  - repo: meta
+    hooks:
+      - id: check-hooks-apply
+
+  # DCO sign-off enforcement, mirroring .github/workflows/dco.yml. Runs at the
+  # commit-msg stage because the `Signed-off-by:` trailer is part of the message.
+  - repo: local
+    hooks:
+      - id: dco-signoff
+        name: DCO sign-off (git commit -s)
+        entry: scripts/check_dco_signoff.sh
+        language: script
+        stages: [commit-msg]
+
+  # Project checks — lint / format / compile locally (nx affected for speed).
+  # CI skips this hook and runs each as its own job in pre-commit.yml.
+  # Tests run in their own workflow (.github/workflows/test.yml).
+  - repo: local
+    hooks:
+      - id: local-definition-ratchet
+        name: No new local sleep, isRecord, errorMessage, source walker or stream-session lifecycle
+        entry: bun scripts/local-definition-ratchet.mjs scripts/local-definition-ratchet.json
+        language: system
+        pass_filenames: false
+        files: (\.[cm]?[jt]s|\.[jt]sx|^scripts/local-definition-ratchet\.json)$
+      - id: workspace-checks
+        name: lint · format · compile (nx affected)
+        entry: scripts/pre_commit_workspace_checks.sh
+        language: script
+        pass_filenames: false
+        files: >-
+          (?x)^(
+            bun\.lock|
+            bunfig\.toml|
+            nx\.json|
+            package\.json|
+            \.oxfmtrc\.json|
+            \.pre-commit-config\.yaml|
+            tsconfig.*\.json|
+            eslint/.*|
+            protocol/.*|
+            clients/.*|
+            scripts/.*
+          )$

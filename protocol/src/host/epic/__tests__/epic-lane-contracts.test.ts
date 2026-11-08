@@ -1,0 +1,2027 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import { buildProtocolSurface } from "@traycer/protocol/framework/surface-build";
+import {
+  epicArtifactRecordSchema,
+  epicCommentThreadRecordSchema,
+  epicCommentThreadRemovalSchema,
+  epicDeletedArtifactRecordSchema,
+  epicStateMetaPatchSchema,
+  epicStateMetaProjectionSchema,
+  epicStateRoleClaimsProjectionSchema,
+  epicStateSnapshotBasisSchema,
+  epicStateSubscribeClientFrameSchemaV10,
+  epicStateSubscribeOpenRequestSchemaV10,
+  epicStateSubscribeServerFrameSchemaV10,
+  epicStateSubscribeServerFrameSchemaV11,
+  epicStateSubscribeServerFrameSchemaV12,
+  epicStateSubscribeServerFrameSchemaV13,
+  epicStateSubscribeServerFrameSchemaV14,
+  epicStateSubscribeV13,
+  epicStateSubscribeV14,
+} from "@traycer/protocol/host/epic/state-subscribe";
+import {
+  epicDeletionAttributionSchema,
+  epicDeletionStatusSchema,
+  epicMigrationStatusSchema,
+  epicStatusSubscribeClientFrameSchemaV10,
+  epicStatusSubscribeServerFrameSchemaV10,
+  epicStatusSubscribeServerFrameSchemaV11,
+  EPIC_STATUS_ARTIFACT_SYNC_MINOR,
+} from "@traycer/protocol/host/epic/status-subscribe";
+import {
+  epicCloudSyncStatusSchema,
+  epicSubscribeV13,
+  epicSubscribeV16,
+} from "@traycer/protocol/host/epic/subscribe";
+import {
+  ARTIFACT_SUBSCRIBE_BODY_SYNC_MINOR,
+  artifactSubscribeClientFrameSchemaV10,
+  artifactSubscribeOpenRequestSchemaV10,
+  artifactSubscribeSeedOfferSchema,
+  artifactSubscribeServerFrameSchemaV10,
+  artifactSubscribeServerFrameSchemaV11,
+  artifactSubscribeUnavailableCodeSchema,
+} from "@traycer/protocol/host/epic/artifact-subscribe";
+import {
+  epicGetWorkspaceContextV10,
+  epicRetryMigrationV10,
+} from "@traycer/protocol/host/epic/lane-unaries";
+import { earlyMetaEpicSchema } from "@traycer/protocol/host/epic/snapshot-meta";
+import {
+  chatRecordSummaryV11Schema,
+  listChatRecordsRequestV11Schema,
+} from "@traycer/protocol/host/epic/chat-records";
+import { epicListChatRecordsUpgradeV10ToV11 } from "@traycer/protocol/host/epic/contracts";
+import {
+  hostRpcRegistry,
+  hostStreamRpcRegistry,
+} from "@traycer/protocol/host/index";
+import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
+
+/**
+ * `epic.state.subscribe@1.0` / `epic.status.subscribe@1.0` /
+ * `artifact.subscribe@1.0` / the two lane unaries / `epic.listChatRecords@1.1`.
+ *
+ * These five methods retire the monolithic `epic.subscribe` by splitting it
+ * into one lane per data CLASS - see the retirement note at the foot of
+ * `epic/subscribe.ts` and the module docs on each lane file for the WHY. This
+ * file exists to pin the invariants those docs state, so a later edit to any
+ * one lane cannot silently regress the property that justified splitting it
+ * out in the first place: the empty-delta guard that stops a lane position
+ * being consumed for nothing, the text/binary split that is the whole reason
+ * two of the three lanes exist, the closed enums that force a widening
+ * contributor through a new minor instead of a silent addition, and the fact
+ * that the released `epic.subscribe@1` line these lanes replace was left
+ * completely untouched by the split.
+ */
+
+describe("registry shape: the epic lane surface installs at the versions the split promised", () => {
+  it("installs epic.state.subscribe / epic.status.subscribe / artifact.subscribe at major 1, each with a @1.0 line", () => {
+    // `epic.state.subscribe` grew `@1.1` (tombstones carry artifact metadata)
+    // `@1.2` (the epic files arm) and `@1.3` (the html, canvas and file
+    // artifact kinds) and `@1.4` (anchor fields on comment thread records),
+    // `epic.status.subscribe` grew `@1.1` and `@1.2` after `@1.0` shipped, and
+    // `artifact.subscribe` grew `@1.1` for the `bodySync` frame. All three keep
+    // `@1.0` installed for released peers.
+    for (const [method, latestMinor] of [
+      ["epic.state.subscribe", 5],
+      ["epic.status.subscribe", 2],
+      ["artifact.subscribe", 1],
+    ] as const) {
+      const majorLine = hostStreamRpcRegistry[method][1];
+      expect(majorLine.latestMinor).toBe(latestMinor);
+      expect(majorLine.versions[0].contract.schemaVersion).toEqual({
+        major: 1,
+        minor: 0,
+      });
+    }
+    // `@1.0` staying INSTALLED is the durable half of what the split promised;
+    // the top of each line is not. cli-v1.3.0 shipped all three at `@1.0`;
+    // `epic.status.subscribe` has since grown `@1.1` for the durability legs
+    // and `@1.2` for `artifactSync`, and `epic.state.subscribe` `@1.1` for tombstone metadata - which is the
+    // correct way for a shipped lane to grow, so the table above pins each
+    // line's top rather than a flat `latestMinor: 0`.
+    expect(hostStreamRpcRegistry["epic.status.subscribe"][1].latestMinor).toBe(
+      EPIC_STATUS_ARTIFACT_SYNC_MINOR,
+    );
+    expect(hostStreamRpcRegistry["artifact.subscribe"][1].latestMinor).toBe(
+      ARTIFACT_SUBSCRIBE_BODY_SYNC_MINOR,
+    );
+  });
+
+  it("keeps epic.subscribe pinned to exactly major 1, with @2.0 gone and @1 intact at latestMinor 6", () => {
+    const epicSubscribeMajors = hostStreamRpcRegistry["epic.subscribe"];
+    expect(Object.keys(epicSubscribeMajors)).toEqual(["1"]);
+    // The `@1` line is six minors tall here: the local-room branch mints
+    // @1.4-@1.6 (durability, promotion, the s5 status pass) above mainline's
+    // released @1.3. What this assertion is about is that the line SURVIVES
+    // the lane split rather than being replaced by it - both its mainline
+    // floor and its current top are pinned so a regression either way is
+    // visible. (This carries the registry coverage of the deleted
+    // `epic-subscribe-v2.test.ts` forward.)
+    expect(epicSubscribeMajors[1].latestMinor).toBe(6);
+    expect(epicSubscribeMajors[1].versions[3]?.contract).toBe(epicSubscribeV13);
+    expect(epicSubscribeMajors[1].versions[6]?.contract).toBe(epicSubscribeV16);
+  });
+
+  it("installs the two lane unaries at 1.0, degrade: unsupported, and off the released floor", () => {
+    for (const method of [
+      "epic.getWorkspaceContext",
+      "epic.retryMigration",
+    ] as const) {
+      const registryEntry = hostRpcRegistry[method];
+      expect(registryEntry[1].latestMinor).toBe(0);
+      expect(registryEntry[1].versions[0].contract.schemaVersion).toEqual({
+        major: 1,
+        minor: 0,
+      });
+      expect(registryEntry.degrade).toEqual({ kind: "unsupported" });
+      // A new floor name is handshake-fatal against every released peer - this
+      // guard is what stops that mistake from ever landing quietly.
+      expect(RELEASED_FLOOR_METHOD_NAMES).not.toContain(method);
+    }
+  });
+
+  it("installs epic.listChatRecords with @1.0-@1.4 minors, latestMinor 4", () => {
+    const majorLine = hostRpcRegistry["epic.listChatRecords"][1];
+    expect(majorLine.latestMinor).toBe(4);
+    expect(majorLine.versions[0].contract.schemaVersion).toEqual({
+      major: 1,
+      minor: 0,
+    });
+    expect(majorLine.versions[1].contract.schemaVersion).toEqual({
+      major: 1,
+      minor: 1,
+    });
+    // @1.2 adds the cloud publication head to each row. The lane's own
+    // `hasDocReplica` request is unchanged, so this minor stacks on @1.1
+    // rather than forking it.
+    expect(majorLine.versions[2].contract.schemaVersion).toEqual({
+      major: 1,
+      minor: 2,
+    });
+    // @1.3 gates the answer on the list revision the caller sends back, so a
+    // poll with nothing to report stops re-encoding the whole registry. The
+    // request grows by `knownRevision`; the response becomes the
+    // snapshot/unchanged union.
+    expect(majorLine.versions[3].contract.schemaVersion).toEqual({
+      major: 1,
+      minor: 3,
+    });
+    // @1.4 says on each row whether the host dropped the chat's records.
+    expect(majorLine.versions[4].contract.schemaVersion).toEqual({
+      major: 1,
+      minor: 4,
+    });
+  });
+});
+
+describe("the released epic.subscribe@1 line and epic.listChatRecords@1.0 did not move", () => {
+  const fixturePath = join(
+    import.meta.dirname,
+    "../../__tests__/__fixtures__/released-baseline-surface.json",
+  );
+
+  it("stream['epic.subscribe']'s released minors are byte-for-byte the baseline; only @1.4-@1.6 were added", () => {
+    const baseline: unknown = JSON.parse(readFileSync(fixturePath, "utf8"));
+    const mine = buildProtocolSurface({
+      unary: {},
+      unaryFloorMethodNames: RELEASED_FLOOR_METHOD_NAMES,
+      stream: { "epic.subscribe": hostStreamRpcRegistry["epic.subscribe"] },
+    });
+
+    // Not byte-for-byte over the WHOLE entry: this branch adds the unreleased
+    // @1.4-@1.6 minors, so the frozen claim is scoped to the released schemas
+    // and the addition set is pinned exactly - a seventh minor or a missing
+    // one fails here rather than sliding through.
+    const baselineEntry = (
+      baseline as {
+        stream: Record<
+          string,
+          { schemas: Record<string, unknown>; majors: unknown }
+        >;
+      }
+    ).stream["epic.subscribe"];
+    for (const released of Object.keys(baselineEntry.schemas)) {
+      expect(mine.stream["epic.subscribe"].schemas[released]).toEqual(
+        baselineEntry.schemas[released],
+      );
+    }
+    expect(Object.keys(mine.stream["epic.subscribe"].schemas).sort()).toEqual([
+      "1.0",
+      "1.1",
+      "1.2",
+      "1.3",
+      "1.4",
+      "1.5",
+      "1.6",
+    ]);
+  });
+
+  it("optionalUnary['epic.listChatRecords'].schemas['1.0'] is unchanged; only 1.1 was added", () => {
+    const baseline: unknown = JSON.parse(readFileSync(fixturePath, "utf8"));
+    const mine = buildProtocolSurface({
+      unary: {
+        "epic.listChatRecords": hostRpcRegistry["epic.listChatRecords"],
+      },
+      unaryFloorMethodNames: RELEASED_FLOOR_METHOD_NAMES,
+      stream: {},
+    });
+
+    const baselineSchemas = (
+      baseline as {
+        optionalUnary: Record<string, { schemas: Record<string, unknown> }>;
+      }
+    ).optionalUnary["epic.listChatRecords"].schemas;
+
+    expect(mine.optionalUnary["epic.listChatRecords"].schemas["1.0"]).toEqual(
+      baselineSchemas["1.0"],
+    );
+    expect(
+      mine.optionalUnary["epic.listChatRecords"].schemas["1.1"],
+    ).toBeDefined();
+  });
+});
+
+// ─── Fixtures shared across the lane describe blocks below ────────────────
+
+const specArtifactFixture = {
+  kind: "spec" as const,
+  id: "artifact-1",
+  folderName: "spec-1",
+  title: "A spec",
+  createdAt: 1,
+  updatedAt: 1,
+  createdManually: false,
+  parentId: null,
+  revision: 0,
+};
+
+const deletedSpecArtifactFixture = {
+  kind: "spec" as const,
+  id: "artifact-1",
+  title: "A spec",
+  artifactRoomId: null,
+  deletedAt: "2026-01-01T00:00:00.000Z",
+  revision: 0,
+};
+
+const commentThreadFixture = {
+  threadId: "thread-1",
+  resolved: false,
+  createdAt: 1,
+  comments: [],
+  data: { createdByUserId: "user-1" },
+  artifactId: "artifact-1",
+  revision: 0,
+};
+
+const commentThreadRemovalFixture = {
+  artifactId: "artifact-1",
+  threadId: "thread-1",
+  revision: 0,
+};
+
+const emptyRoleClaimsProjectionFixture = { revision: 0, claims: [] };
+
+const epicMetaFixture = { title: "An epic", updatedAt: 1 };
+const epicMetaSnapshotFixture = { revision: 0, meta: epicMetaFixture };
+const epicMetaPatchFixture = {
+  revision: 1,
+  meta: { title: "A renamed epic" },
+};
+
+describe("epic.state.subscribe@1.0", () => {
+  describe("the open request's resume cursor is required-and-nullable", () => {
+    it("parses resume: null (a cold open)", () => {
+      const result = epicStateSubscribeOpenRequestSchemaV10.safeParse({
+        epicId: "epic-1",
+        resume: null,
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("parses a resume cursor", () => {
+      const result = epicStateSubscribeOpenRequestSchemaV10.safeParse({
+        epicId: "epic-1",
+        resume: { authorityEpoch: "epoch-1", position: 0 },
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("rejects an open request that omits resume entirely", () => {
+      const result = epicStateSubscribeOpenRequestSchemaV10.safeParse({
+        epicId: "epic-1",
+      });
+      expect(result.success).toBe(false);
+    });
+  });
+
+  it("parses a snapshot frame carrying every row population", () => {
+    const result = epicStateSubscribeServerFrameSchemaV10.safeParse({
+      kind: "snapshot",
+      authorityEpoch: "epoch-1",
+      position: 0,
+      basis: "cold",
+      reconciledWithCloud: false,
+      epicMeta: epicMetaSnapshotFixture,
+      artifactRecords: [specArtifactFixture],
+      deletedArtifacts: [deletedSpecArtifactFixture],
+      roleClaims: emptyRoleClaimsProjectionFixture,
+      commentThreads: [commentThreadFixture],
+      hasBinaryPayload: false,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  describe("the snapshot basis is a closed enum", () => {
+    it.each(["cold", "authorityEpochChanged", "resumeTooOld"] as const)(
+      "accepts %s",
+      (basis) => {
+        expect(epicStateSnapshotBasisSchema.safeParse(basis).success).toBe(
+          true,
+        );
+      },
+    );
+
+    it("rejects a basis this contract version cannot represent", () => {
+      expect(
+        epicStateSnapshotBasisSchema.safeParse("replicaRebuilt").success,
+      ).toBe(false);
+    });
+  });
+
+  it("parses a resumed frame", () => {
+    const result = epicStateSubscribeServerFrameSchemaV10.safeParse({
+      kind: "resumed",
+      authorityEpoch: "epoch-1",
+      position: 5,
+      reconciledWithCloud: false,
+      hasBinaryPayload: false,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("resumed requires reconciledWithCloud - a resuming client cannot inherit trust from its previous session; the host may have restarted seed-only since the cursor was persisted", () => {
+    const result = epicStateSubscribeServerFrameSchemaV10.safeParse({
+      kind: "resumed",
+      authorityEpoch: "epoch-1",
+      position: 5,
+      hasBinaryPayload: false,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  describe("a delta envelope must carry at least one change", () => {
+    const emptyDelta = {
+      kind: "delta",
+      authorityEpoch: "epoch-1",
+      seq: 1,
+      artifactUpserts: [],
+      artifactTombstones: [],
+      commentThreadUpserts: [],
+      commentThreadRemovals: [],
+      epicMeta: null,
+      roleClaims: null,
+      hasBinaryPayload: false,
+    };
+
+    it("rejects an envelope with all six change fields empty/null - it would consume a position for nothing", () => {
+      expect(
+        epicStateSubscribeServerFrameSchemaV10.safeParse(emptyDelta).success,
+      ).toBe(false);
+    });
+
+    it.each([
+      ["artifactUpserts", [specArtifactFixture]],
+      ["artifactTombstones", [deletedSpecArtifactFixture]],
+      ["commentThreadUpserts", [commentThreadFixture]],
+      ["commentThreadRemovals", [commentThreadRemovalFixture]],
+      ["epicMeta", epicMetaPatchFixture],
+      ["roleClaims", emptyRoleClaimsProjectionFixture],
+    ] as const)("accepts a delta carrying only %s", (field, value) => {
+      const delta = { ...emptyDelta, [field]: value };
+      const result = epicStateSubscribeServerFrameSchemaV10.safeParse(delta);
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe("every non-pong server frame is text-only", () => {
+    const frameBodies: ReadonlyArray<
+      readonly [string, Record<string, unknown>]
+    > = [
+      [
+        "snapshot",
+        {
+          authorityEpoch: "epoch-1",
+          position: 0,
+          basis: "cold",
+          reconciledWithCloud: false,
+          epicMeta: epicMetaSnapshotFixture,
+          artifactRecords: [],
+          deletedArtifacts: [],
+          roleClaims: emptyRoleClaimsProjectionFixture,
+          commentThreads: [],
+        },
+      ],
+      [
+        "resumed",
+        { authorityEpoch: "epoch-1", position: 0, reconciledWithCloud: false },
+      ],
+      [
+        "delta",
+        {
+          authorityEpoch: "epoch-1",
+          seq: 1,
+          artifactUpserts: [specArtifactFixture],
+          artifactTombstones: [],
+          commentThreadUpserts: [],
+          commentThreadRemovals: [],
+          epicMeta: null,
+          roleClaims: null,
+        },
+      ],
+      [
+        "trustChanged",
+        { authorityEpoch: "epoch-1", reconciledWithCloud: true },
+      ],
+      ["pong", {}],
+    ];
+
+    it.each(frameBodies)(
+      "declares hasBinaryPayload: false on %s, and rejects true",
+      (kind, body) => {
+        const withFalse = epicStateSubscribeServerFrameSchemaV10.safeParse({
+          kind,
+          ...body,
+          hasBinaryPayload: false,
+        });
+        expect(withFalse.success).toBe(true);
+
+        const withTrue = epicStateSubscribeServerFrameSchemaV10.safeParse({
+          kind,
+          ...body,
+          hasBinaryPayload: true,
+        });
+        expect(withTrue.success).toBe(false);
+      },
+    );
+  });
+
+  it("the server frame kind set is exactly the five documented kinds", () => {
+    const kinds = epicStateSubscribeServerFrameSchemaV10.options.map(
+      (option) => option.shape.kind.value,
+    );
+    expect(kinds).toEqual([
+      "snapshot",
+      "resumed",
+      "delta",
+      "trustChanged",
+      "pong",
+    ]);
+  });
+
+  describe("trustChanged - the seed-trust marker flipped, with no row changed", () => {
+    it.each([true, false])(
+      "parses reconciledWithCloud: %s",
+      (reconciledWithCloud) => {
+        const result = epicStateSubscribeServerFrameSchemaV10.safeParse({
+          kind: "trustChanged",
+          authorityEpoch: "epoch-1",
+          reconciledWithCloud,
+          hasBinaryPayload: false,
+        });
+        expect(result.success).toBe(true);
+      },
+    );
+
+    it("rejects a frame missing reconciledWithCloud", () => {
+      const result = epicStateSubscribeServerFrameSchemaV10.safeParse({
+        kind: "trustChanged",
+        authorityEpoch: "epoch-1",
+        hasBinaryPayload: false,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects a frame missing authorityEpoch", () => {
+      const result = epicStateSubscribeServerFrameSchemaV10.safeParse({
+        kind: "trustChanged",
+        reconciledWithCloud: true,
+        hasBinaryPayload: false,
+      });
+      expect(result.success).toBe(false);
+    });
+  });
+
+  it("the client frame union is exactly ['ping'] - the lane is read-only on the wire", () => {
+    const kinds = epicStateSubscribeClientFrameSchemaV10.options.map(
+      (option) => option.shape.kind.value,
+    );
+    expect(kinds).toEqual(["ping"]);
+  });
+
+  it("strips artifactRoomId off an artifact record - room routing stays host-only", () => {
+    const parsed = epicArtifactRecordSchema.parse({
+      ...specArtifactFixture,
+      artifactRoomId: "room-1",
+    });
+    expect(parsed).not.toHaveProperty("artifactRoomId");
+  });
+
+  it("strips a supplied artifactRoomId off an html lane record too, now that htmlArtifactSchema carries one", () => {
+    const htmlFixture = {
+      kind: "html" as const,
+      id: "html-1",
+      folderName: "page-1",
+      title: "A page",
+      createdAt: 1,
+      updatedAt: 1,
+      createdManually: false,
+      parentId: null,
+      head: { files: {}, capturedAt: 1 },
+      revision: 0,
+    };
+    const parsed = epicArtifactRecordSchema.parse({
+      ...htmlFixture,
+      artifactRoomId: "room-1",
+    });
+    expect(parsed).not.toHaveProperty("artifactRoomId");
+    // Parses just as well with no room supplied at all - htmlArtifactSchema's
+    // own default never reaches the wire either way.
+    expect(epicArtifactRecordSchema.safeParse(htmlFixture).success).toBe(true);
+  });
+
+  it("parses a deleted-artifact tombstone record", () => {
+    expect(
+      epicDeletedArtifactRecordSchema.safeParse(deletedSpecArtifactFixture)
+        .success,
+    ).toBe(true);
+  });
+
+  it("parses a comment-thread row", () => {
+    expect(
+      epicCommentThreadRecordSchema.safeParse(commentThreadFixture).success,
+    ).toBe(true);
+  });
+
+  describe("every row and removal on the lane requires a revision", () => {
+    it("rejects an artifact record with no revision, accepts one with it", () => {
+      const { revision: _revision, ...withoutRevision } = specArtifactFixture;
+      expect(epicArtifactRecordSchema.safeParse(withoutRevision).success).toBe(
+        false,
+      );
+      expect(
+        epicArtifactRecordSchema.safeParse(specArtifactFixture).success,
+      ).toBe(true);
+    });
+
+    it("rejects a deleted-artifact tombstone with no revision, accepts one with it", () => {
+      const { revision: _revision, ...withoutRevision } =
+        deletedSpecArtifactFixture;
+      expect(
+        epicDeletedArtifactRecordSchema.safeParse(withoutRevision).success,
+      ).toBe(false);
+      expect(
+        epicDeletedArtifactRecordSchema.safeParse(deletedSpecArtifactFixture)
+          .success,
+      ).toBe(true);
+    });
+
+    it("rejects a comment-thread removal with no revision, accepts one with it", () => {
+      const { revision: _revision, ...withoutRevision } =
+        commentThreadRemovalFixture;
+      expect(
+        epicCommentThreadRemovalSchema.safeParse(withoutRevision).success,
+      ).toBe(false);
+      expect(
+        epicCommentThreadRemovalSchema.safeParse(commentThreadRemovalFixture)
+          .success,
+      ).toBe(true);
+    });
+  });
+
+  it("a tombstone does not gate absorption on revision ordering - a lower-revision tombstone is a valid frame beside a higher-revision upsert for the same row", () => {
+    // The wire only carries the number; the reconciler's absorbing-removal
+    // semantics (rule 2 in `epicLaneRowRevisionSchema`'s doc comment) are what
+    // makes this pair meaningful, not a schema-level ordering check. The
+    // schema's job here is only to prove it does NOT reject this shape.
+    const upsertAtRevisionFive = { ...specArtifactFixture, revision: 5 };
+    const tombstoneAtRevisionTwo = {
+      ...deletedSpecArtifactFixture,
+      revision: 2,
+    };
+
+    expect(
+      epicArtifactRecordSchema.safeParse(upsertAtRevisionFive).success,
+    ).toBe(true);
+    expect(
+      epicDeletedArtifactRecordSchema.safeParse(tombstoneAtRevisionTwo).success,
+    ).toBe(true);
+  });
+
+  describe("epicStateRoleClaimsProjectionSchema is a revisioned SET, not a bare array", () => {
+    it("accepts {revision, claims}", () => {
+      expect(
+        epicStateRoleClaimsProjectionSchema.safeParse(
+          emptyRoleClaimsProjectionFixture,
+        ).success,
+      ).toBe(true);
+    });
+
+    it("rejects the old bare-array shape", () => {
+      expect(epicStateRoleClaimsProjectionSchema.safeParse([]).success).toBe(
+        false,
+      );
+    });
+  });
+
+  describe("epic meta is a revisioned RECORD - the same racing-cold-read problem epic.getWorkspaceContext's epicLight creates for the title", () => {
+    it("epicStateMetaProjectionSchema parses {revision, meta}", () => {
+      expect(
+        epicStateMetaProjectionSchema.safeParse(epicMetaSnapshotFixture)
+          .success,
+      ).toBe(true);
+    });
+
+    it("epicStateMetaProjectionSchema rejects the bare old {title, updatedAt} shape - the redefine is pinned", () => {
+      expect(
+        epicStateMetaProjectionSchema.safeParse(epicMetaFixture).success,
+      ).toBe(false);
+    });
+
+    it("snapshot.epicMeta without revision is rejected", () => {
+      const { revision: _revision, ...withoutRevision } =
+        epicMetaSnapshotFixture;
+      expect(
+        epicStateMetaProjectionSchema.safeParse(withoutRevision).success,
+      ).toBe(false);
+    });
+
+    it("epicStateMetaPatchSchema parses {revision, meta} where meta is a partial patch", () => {
+      expect(
+        epicStateMetaPatchSchema.safeParse(epicMetaPatchFixture).success,
+      ).toBe(true);
+    });
+
+    it("epicStateMetaPatchSchema accepts {revision, meta: {}} - an entity whose revision advanced without a wire field changing is legal", () => {
+      expect(
+        epicStateMetaPatchSchema.safeParse({ revision: 2, meta: {} }).success,
+      ).toBe(true);
+    });
+
+    it("epicStateMetaPatchSchema rejects the bare old {title, updatedAt} partial - the redefine is pinned", () => {
+      expect(
+        epicStateMetaPatchSchema.safeParse({ title: "A renamed epic" }).success,
+      ).toBe(false);
+    });
+
+    it("a delta meta patch without revision is rejected - .partial() on a revision-extended record would make revision OPTIONAL and silently delete the guard on the frame that most needs it, so the wrapper must never collapse back to an inline form", () => {
+      const { revision: _revision, ...withoutRevision } = epicMetaPatchFixture;
+      expect(epicStateMetaPatchSchema.safeParse(withoutRevision).success).toBe(
+        false,
+      );
+
+      const deltaWithUnrevisionedMeta = {
+        kind: "delta",
+        authorityEpoch: "epoch-1",
+        seq: 1,
+        artifactUpserts: [],
+        artifactTombstones: [],
+        commentThreadUpserts: [],
+        commentThreadRemovals: [],
+        epicMeta: withoutRevision,
+        roleClaims: null,
+        hasBinaryPayload: false,
+      };
+      expect(
+        epicStateSubscribeServerFrameSchemaV10.safeParse(
+          deltaWithUnrevisionedMeta,
+        ).success,
+      ).toBe(false);
+    });
+  });
+
+  it("the completeness sweep: every transition frame kind is readable off a lead frame (snapshot or resumed), and every cited field actually exists there", () => {
+    // Mirrors the completeness sweep built for the status lane. This lane now
+    // has the same shape of contract: `resumed` and `snapshot` are the lead
+    // frames a client can attach to at any point, and every transition kind
+    // (`delta`, `trustChanged`) must be readable off one of them without a
+    // replay. Adding a transition kind without extending this map fails this
+    // test until someone decides where its current state lives.
+    const kindToLeadFrameFields: Readonly<
+      Record<
+        string,
+        {
+          readonly lead: "snapshot" | "resumed" | "both";
+          readonly fields: readonly string[];
+        }
+      >
+    > = {
+      trustChanged: { lead: "both", fields: ["reconciledWithCloud"] },
+      delta: {
+        lead: "snapshot",
+        fields: [
+          "artifactRecords",
+          "deletedArtifacts",
+          "commentThreads",
+          "roleClaims",
+          "epicMeta",
+        ],
+      },
+    };
+
+    const allKinds = epicStateSubscribeServerFrameSchemaV10.options.map(
+      (option) => option.shape.kind.value,
+    );
+    // `snapshot` and `resumed` are the lead frames themselves; `pong` is exempt
+    // for the same reason it is on the status lane - it carries no session
+    // state at all.
+    const transitionKinds = allKinds.filter(
+      (kind) => kind !== "snapshot" && kind !== "resumed" && kind !== "pong",
+    );
+
+    expect(new Set(Object.keys(kindToLeadFrameFields))).toEqual(
+      new Set(transitionKinds),
+    );
+
+    const snapshotOption = epicStateSubscribeServerFrameSchemaV10.options.find(
+      (option) => option.shape.kind.value === "snapshot",
+    );
+    const resumedOption = epicStateSubscribeServerFrameSchemaV10.options.find(
+      (option) => option.shape.kind.value === "resumed",
+    );
+    if (!snapshotOption || !resumedOption) {
+      throw new Error(
+        "no snapshot or resumed variant on epicStateSubscribeServerFrameSchemaV10",
+      );
+    }
+    const snapshotFieldNames = new Set(Object.keys(snapshotOption.shape));
+    const resumedFieldNames = new Set(Object.keys(resumedOption.shape));
+
+    for (const { lead, fields } of Object.values(kindToLeadFrameFields)) {
+      for (const field of fields) {
+        if (lead === "snapshot" || lead === "both") {
+          expect(snapshotFieldNames.has(field)).toBe(true);
+        }
+        if (lead === "resumed" || lead === "both") {
+          expect(resumedFieldNames.has(field)).toBe(true);
+        }
+      }
+    }
+  });
+});
+
+describe("epic.status.subscribe@1.0", () => {
+  const snapshotBase = {
+    authorityEpoch: "epoch-1",
+    securityEpoch: 0,
+    permissionRole: "owner",
+    cloudSyncStatus: "connected",
+    dirty: false,
+    migration: null,
+    deletion: { state: "none" as const },
+  };
+
+  // The pre-open control basis (see the module doc): the host must be able to
+  // emit a truthful snapshot before the epic room is open, during a migration.
+  // `permissionRole` and `cloudSyncStatus` already have truthful pre-open
+  // values; `dirty` and `deletion` are the two fields that needed an explicit
+  // not-established representation to stay honest in that state.
+  const preOpenSnapshotBasis = {
+    authorityEpoch: "epoch-1",
+    securityEpoch: 0,
+    permissionRole: null,
+    cloudSyncStatus: "disconnected" as const,
+    dirty: null,
+    migration: { state: "running" as const, progress: null },
+    deletion: { state: "unknown" as const },
+  };
+
+  it("parses a full snapshot frame", () => {
+    const result = epicStatusSubscribeServerFrameSchemaV10.safeParse({
+      kind: "snapshot",
+      ...snapshotBase,
+      hasBinaryPayload: false,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a snapshot missing dirty - pre-snapshot dirtiness is UNKNOWN, never omitted", () => {
+    const result = epicStatusSubscribeServerFrameSchemaV10.safeParse({
+      kind: "snapshot",
+      authorityEpoch: snapshotBase.authorityEpoch,
+      securityEpoch: snapshotBase.securityEpoch,
+      permissionRole: snapshotBase.permissionRole,
+      cloudSyncStatus: snapshotBase.cloudSyncStatus,
+      migration: snapshotBase.migration,
+      deletion: snapshotBase.deletion,
+      hasBinaryPayload: false,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  describe("migration and deletion are required - a host must not be able to stay silent about them", () => {
+    it("rejects a snapshot omitting migration", () => {
+      const { migration: _migration, ...withoutMigration } = snapshotBase;
+      const result = epicStatusSubscribeServerFrameSchemaV10.safeParse({
+        kind: "snapshot",
+        ...withoutMigration,
+        hasBinaryPayload: false,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects a snapshot omitting deletion", () => {
+      const { deletion: _deletion, ...withoutDeletion } = snapshotBase;
+      const result = epicStatusSubscribeServerFrameSchemaV10.safeParse({
+        kind: "snapshot",
+        ...withoutDeletion,
+        hasBinaryPayload: false,
+      });
+      expect(result.success).toBe(false);
+    });
+  });
+
+  it("parses the pre-open control basis: dirty null, deletion unknown, migration running, mid-migration before the epic is open", () => {
+    const result = epicStatusSubscribeServerFrameSchemaV10.safeParse({
+      kind: "snapshot",
+      ...preOpenSnapshotBasis,
+      hasBinaryPayload: false,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  /**
+   * At `@1.1`, not `@1.0`: cli-v1.3.0 shipped `@1.0` without the legs, so
+   * they were re-minted above it. Parsing these through `@1.0` would not fail
+   * loudly - zod STRIPS unknown keys, so the "refuses an invalid member" case
+   * below would pass while validating nothing at all.
+   */
+  describe("the durability legs ride on the @1.1 snapshot and cloudSyncStatus, every key optional", () => {
+    const legs = {
+      durability: "promoting",
+      promotionState: "active",
+      localProtection: "armed",
+      freshness: { kind: "freshnessUnknown", state: "local-copy" },
+    };
+
+    it("parses a snapshot carrying the legs", () => {
+      const result = epicStatusSubscribeServerFrameSchemaV11.safeParse({
+        kind: "snapshot",
+        ...snapshotBase,
+        ...legs,
+        hasBinaryPayload: false,
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("parses a cloudSyncStatus transition carrying the legs", () => {
+      const result = epicStatusSubscribeServerFrameSchemaV11.safeParse({
+        kind: "cloudSyncStatus",
+        authorityEpoch: "epoch-1",
+        status: "connected",
+        ...legs,
+        pauseReason: undefined,
+        hasBinaryPayload: false,
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("refuses a durability member the @1.6 enum does not have - the lane shares that closed union", () => {
+      const result = epicStatusSubscribeServerFrameSchemaV11.safeParse({
+        kind: "cloudSyncStatus",
+        authorityEpoch: "epoch-1",
+        status: "connected",
+        durability: "a-member-a-newer-host-invented",
+        hasBinaryPayload: false,
+      });
+      expect(result.success).toBe(false);
+    });
+  });
+
+  describe("dirty is a tri-state on the snapshot: null | true | false, never omitted", () => {
+    it.each([null, true, false])("parses dirty: %s", (dirty) => {
+      const result = epicStatusSubscribeServerFrameSchemaV10.safeParse({
+        kind: "snapshot",
+        ...snapshotBase,
+        dirty,
+        hasBinaryPayload: false,
+      });
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe("epicDeletionStatusSchema - unknown / none / deleted, and the redefine is pinned", () => {
+    it("parses unknown", () => {
+      expect(
+        epicDeletionStatusSchema.safeParse({ state: "unknown" }).success,
+      ).toBe(true);
+    });
+
+    it("parses none", () => {
+      expect(
+        epicDeletionStatusSchema.safeParse({ state: "none" }).success,
+      ).toBe(true);
+    });
+
+    it("parses deleted with attribution", () => {
+      expect(
+        epicDeletionStatusSchema.safeParse({
+          state: "deleted",
+          attribution: {
+            deletedByDisplayName: "A user",
+            deletedByTraycerUserId: "user-1",
+          },
+        }).success,
+      ).toBe(true);
+    });
+
+    it("rejects deleted with no attribution", () => {
+      expect(
+        epicDeletionStatusSchema.safeParse({ state: "deleted" }).success,
+      ).toBe(false);
+    });
+
+    it("rejects an unknown discriminator value", () => {
+      expect(
+        epicDeletionStatusSchema.safeParse({ state: "gone" }).success,
+      ).toBe(false);
+    });
+
+    it("rejects the old two-state shapes - bare null and a bare attribution object", () => {
+      expect(epicDeletionStatusSchema.safeParse(null).success).toBe(false);
+      expect(
+        epicDeletionStatusSchema.safeParse({
+          deletedByDisplayName: "A user",
+          deletedByTraycerUserId: "user-1",
+        }).success,
+      ).toBe(false);
+    });
+  });
+
+  it("permissionChanged requires securityEpoch - the stamp is the point of the frame", () => {
+    const withEpoch = epicStatusSubscribeServerFrameSchemaV10.safeParse({
+      kind: "permissionChanged",
+      authorityEpoch: "epoch-1",
+      securityEpoch: 1,
+      permissionRole: "editor",
+      hasBinaryPayload: false,
+    });
+    expect(withEpoch.success).toBe(true);
+
+    const withoutEpoch = epicStatusSubscribeServerFrameSchemaV10.safeParse({
+      kind: "permissionChanged",
+      authorityEpoch: "epoch-1",
+      permissionRole: "editor",
+      hasBinaryPayload: false,
+    });
+    expect(withoutEpoch.success).toBe(false);
+  });
+
+  it("the server frame kind set is exactly the ten documented kinds, on both minors", () => {
+    const kindsOf = (
+      union:
+        | typeof epicStatusSubscribeServerFrameSchemaV10
+        | typeof epicStatusSubscribeServerFrameSchemaV11,
+    ): string[] =>
+      union.options.map((option) => option.shape.kind.value).sort();
+    const documented = [
+      "cloudSyncStatus",
+      "dirtyChanged",
+      "epicDeleted",
+      "migrationFailed",
+      "migrationNotAllowed",
+      "migrationProgress",
+      "migrationStarted",
+      "permissionChanged",
+      "pong",
+      "snapshot",
+    ];
+    expect(kindsOf(epicStatusSubscribeServerFrameSchemaV10)).toEqual(
+      documented,
+    );
+    // The SAME set at `@1.1`: that minor adds fields to two variants, and a
+    // new frame KIND would be a different kind of change entirely - one a
+    // released peer cannot absorb at all.
+    expect(kindsOf(epicStatusSubscribeServerFrameSchemaV11)).toEqual(
+      documented,
+    );
+  });
+
+  /**
+   * `@1.1` is composed as "the two leg-carrying variants, then the rest of
+   * `@1.0`'s tuple", so their position in `@1.0` is load-bearing rather than
+   * cosmetic. Reordering `@1.0` without reading that composition would silently
+   * hand `@1.1` two unextended variants and drop the legs from the wire while
+   * every kind-set assertion above stayed green.
+   */
+  it("keeps the leg-carrying variants at the head of the @1.0 tuple", () => {
+    expect(
+      epicStatusSubscribeServerFrameSchemaV10.options
+        .slice(0, 2)
+        .map((option) => option.shape.kind.value),
+    ).toEqual(["snapshot", "cloudSyncStatus"]);
+  });
+
+  describe("every frame is text-only", () => {
+    const frameBodies: ReadonlyArray<
+      readonly [string, Record<string, unknown>]
+    > = [
+      ["snapshot", snapshotBase],
+      [
+        "permissionChanged",
+        {
+          authorityEpoch: "epoch-1",
+          securityEpoch: 1,
+          permissionRole: "editor",
+        },
+      ],
+      [
+        "cloudSyncStatus",
+        { authorityEpoch: "epoch-1", status: "reconnecting" },
+      ],
+      ["dirtyChanged", { authorityEpoch: "epoch-1", dirty: true }],
+      [
+        "epicDeleted",
+        {
+          authorityEpoch: "epoch-1",
+          attribution: {
+            deletedByDisplayName: "A user",
+            deletedByTraycerUserId: "user-1",
+          },
+        },
+      ],
+      ["migrationStarted", { authorityEpoch: "epoch-1" }],
+      [
+        "migrationProgress",
+        {
+          authorityEpoch: "epoch-1",
+          phase: "upload",
+          chunksDone: 1,
+          chunksTotal: 2,
+        },
+      ],
+      ["migrationFailed", { authorityEpoch: "epoch-1", reason: "boom" }],
+      ["migrationNotAllowed", { authorityEpoch: "epoch-1" }],
+      ["pong", {}],
+    ];
+
+    it.each(frameBodies)(
+      "declares hasBinaryPayload: false on %s, and rejects true",
+      (kind, body) => {
+        const withFalse = epicStatusSubscribeServerFrameSchemaV10.safeParse({
+          kind,
+          ...body,
+          hasBinaryPayload: false,
+        });
+        expect(withFalse.success).toBe(true);
+
+        const withTrue = epicStatusSubscribeServerFrameSchemaV10.safeParse({
+          kind,
+          ...body,
+          hasBinaryPayload: true,
+        });
+        expect(withTrue.success).toBe(false);
+      },
+    );
+  });
+
+  it("the client frame union is exactly ['ping'] - retryMigration became a unary, not a frame", () => {
+    const kinds = epicStatusSubscribeClientFrameSchemaV10.options.map(
+      (option) => option.shape.kind.value,
+    );
+    expect(kinds).toEqual(["ping"]);
+  });
+
+  it("dirtyChanged rejects dirty: null - a transition can only be emitted once the fact is established; the first dirtyChanged after a null snapshot is what establishes it, so this frame never restates 'unknown'", () => {
+    const result = epicStatusSubscribeServerFrameSchemaV10.safeParse({
+      kind: "dirtyChanged",
+      authorityEpoch: "epoch-1",
+      dirty: null,
+      hasBinaryPayload: false,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("cloudSyncStatus has a reachable not-connected member - guards against narrowing away the only truthful pre-open value", () => {
+    expect(epicCloudSyncStatusSchema.safeParse("disconnected").success).toBe(
+      true,
+    );
+    const result = epicStatusSubscribeServerFrameSchemaV10.safeParse({
+      kind: "snapshot",
+      ...snapshotBase,
+      cloudSyncStatus: "disconnected",
+      hasBinaryPayload: false,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  describe("epicMigrationStatusSchema - the snapshot's current-state projection of the migration lifecycle", () => {
+    it.each([
+      [
+        "running with progress null - the real reconnect window before the first migrationProgress",
+        { state: "running" as const, progress: null },
+      ],
+      [
+        "running with progress",
+        {
+          state: "running" as const,
+          progress: { phase: "upload" as const, chunksDone: 1, chunksTotal: 2 },
+        },
+      ],
+      ["failed", { state: "failed" as const, reason: "boom" }],
+      ["notAllowed", { state: "notAllowed" as const }],
+    ])("parses %s", (_label, status) => {
+      expect(epicMigrationStatusSchema.safeParse(status).success).toBe(true);
+    });
+
+    it("rejects a running state with no progress key - progress is required, even though it is nullable", () => {
+      expect(
+        epicMigrationStatusSchema.safeParse({ state: "running" }).success,
+      ).toBe(false);
+    });
+
+    it("rejects a failed state with no reason", () => {
+      expect(
+        epicMigrationStatusSchema.safeParse({ state: "failed" }).success,
+      ).toBe(false);
+    });
+
+    it("rejects a completed state - there is deliberately no terminal-success member", () => {
+      expect(
+        epicMigrationStatusSchema.safeParse({ state: "completed" }).success,
+      ).toBe(false);
+    });
+  });
+
+  describe("epicDeleted carries a nested attribution, not the old flat fields", () => {
+    it("parses with nested attribution", () => {
+      const result = epicStatusSubscribeServerFrameSchemaV10.safeParse({
+        kind: "epicDeleted",
+        authorityEpoch: "epoch-1",
+        attribution: {
+          deletedByDisplayName: "A user",
+          deletedByTraycerUserId: "user-1",
+        },
+        hasBinaryPayload: false,
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("rejects the old flat shape - the two flat fields no longer exist on this frame", () => {
+      const result = epicStatusSubscribeServerFrameSchemaV10.safeParse({
+        kind: "epicDeleted",
+        authorityEpoch: "epoch-1",
+        deletedByDisplayName: "A user",
+        deletedByTraycerUserId: "user-1",
+        hasBinaryPayload: false,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("epicDeletionAttributionSchema is the exact shape shared by the transition frame and the snapshot projection", () => {
+      expect(
+        epicDeletionAttributionSchema.safeParse({
+          deletedByDisplayName: null,
+          deletedByTraycerUserId: null,
+        }).success,
+      ).toBe(true);
+    });
+  });
+
+  it("the completeness sweep: every non-snapshot, non-pong frame kind has a snapshot projection, and every projected field actually exists on the snapshot", () => {
+    // Mirrors the module doc's frame-kind -> snapshot-projection table verbatim.
+    // Adding a frame kind without extending this map fails this test, which is
+    // the point: cursor-less-by-design is only honest if the snapshot stays
+    // complete, and this is what keeps that from silently rotting.
+    const kindToSnapshotFields: Readonly<Record<string, readonly string[]>> = {
+      permissionChanged: ["securityEpoch", "permissionRole"],
+      cloudSyncStatus: ["cloudSyncStatus"],
+      dirtyChanged: ["dirty"],
+      epicDeleted: ["deletion"],
+      migrationStarted: ["migration"],
+      migrationProgress: ["migration"],
+      migrationFailed: ["migration"],
+      migrationNotAllowed: ["migration"],
+    };
+
+    const allKinds = epicStatusSubscribeServerFrameSchemaV10.options.map(
+      (option) => option.shape.kind.value,
+    );
+    const projectableKinds = allKinds.filter(
+      (kind) => kind !== "snapshot" && kind !== "pong",
+    );
+
+    // Every projectable kind is mapped, and the map contains nothing stale.
+    expect(new Set(Object.keys(kindToSnapshotFields))).toEqual(
+      new Set(projectableKinds),
+    );
+
+    const snapshotOption = epicStatusSubscribeServerFrameSchemaV10.options.find(
+      (option) => option.shape.kind.value === "snapshot",
+    );
+    if (!snapshotOption) {
+      throw new Error(
+        "no snapshot variant on epicStatusSubscribeServerFrameSchemaV10",
+      );
+    }
+    const snapshotFieldNames = new Set(Object.keys(snapshotOption.shape));
+
+    for (const fields of Object.values(kindToSnapshotFields)) {
+      for (const field of fields) {
+        expect(snapshotFieldNames.has(field)).toBe(true);
+      }
+    }
+  });
+});
+
+describe("artifact.subscribe@1.0", () => {
+  it("the open request requires authorityEpoch - every attach names its generation", () => {
+    const withEpoch = artifactSubscribeOpenRequestSchemaV10.safeParse({
+      epicId: "epic-1",
+      artifactId: "artifact-1",
+      authorityEpoch: "epoch-1",
+    });
+    expect(withEpoch.success).toBe(true);
+
+    const withoutEpoch = artifactSubscribeOpenRequestSchemaV10.safeParse({
+      epicId: "epic-1",
+      artifactId: "artifact-1",
+    });
+    expect(withoutEpoch.success).toBe(false);
+  });
+
+  describe("seedOffer is both-or-neither", () => {
+    it("parses both knownDocGuid and stateVectorBase64", () => {
+      expect(
+        artifactSubscribeSeedOfferSchema.safeParse({
+          knownDocGuid: "guid-1",
+          stateVectorBase64: "AQ==",
+        }).success,
+      ).toBe(true);
+    });
+
+    it("rejects stateVectorBase64 alone", () => {
+      expect(
+        artifactSubscribeSeedOfferSchema.safeParse({
+          stateVectorBase64: "AQ==",
+        }).success,
+      ).toBe(false);
+    });
+
+    it("rejects knownDocGuid alone", () => {
+      expect(
+        artifactSubscribeSeedOfferSchema.safeParse({
+          knownDocGuid: "guid-1",
+        }).success,
+      ).toBe(false);
+    });
+  });
+
+  describe("doc frame's seededFromOffer has exactly one representation of 'full seed'", () => {
+    const docBase = {
+      kind: "doc" as const,
+      authorityEpoch: "epoch-1",
+      artifactId: "artifact-1",
+      docGuid: "guid-1",
+      stateVectorBase64: "AQ==",
+      hasBinaryPayload: true as const,
+    };
+
+    it("true parses (a delta against the client's offer)", () => {
+      expect(
+        artifactSubscribeServerFrameSchemaV10.safeParse({
+          ...docBase,
+          seededFromOffer: true,
+        }).success,
+      ).toBe(true);
+    });
+
+    it("omitting seededFromOffer parses (a full seed)", () => {
+      expect(
+        artifactSubscribeServerFrameSchemaV10.safeParse(docBase).success,
+      ).toBe(true);
+    });
+
+    it("false is rejected - absence is the only legal spelling of 'full seed'", () => {
+      expect(
+        artifactSubscribeServerFrameSchemaV10.safeParse({
+          ...docBase,
+          seededFromOffer: false,
+        }).success,
+      ).toBe(false);
+    });
+  });
+
+  describe("unavailable.code is a closed enum", () => {
+    it.each([
+      "staleAuthorityEpoch",
+      "artifactNotFound",
+      "bodyUnavailable",
+    ] as const)("accepts %s", (code) => {
+      expect(
+        artifactSubscribeUnavailableCodeSchema.safeParse(code).success,
+      ).toBe(true);
+    });
+
+    it("rejects an unknown code", () => {
+      expect(
+        artifactSubscribeUnavailableCodeSchema.safeParse("docCorrupted")
+          .success,
+      ).toBe(false);
+    });
+  });
+
+  describe("the binary/text split", () => {
+    const binaryFrames: ReadonlyArray<
+      readonly [string, Record<string, unknown>]
+    > = [
+      [
+        "doc",
+        {
+          authorityEpoch: "epoch-1",
+          artifactId: "artifact-1",
+          docGuid: "guid-1",
+          stateVectorBase64: "AQ==",
+        },
+      ],
+      [
+        "docUpdate",
+        {
+          authorityEpoch: "epoch-1",
+          artifactId: "artifact-1",
+          docGuid: "guid-1",
+        },
+      ],
+      ["awareness", { authorityEpoch: "epoch-1", artifactId: "artifact-1" }],
+    ];
+
+    const textFrames: ReadonlyArray<
+      readonly [string, Record<string, unknown>]
+    > = [
+      [
+        "docAck",
+        {
+          authorityEpoch: "epoch-1",
+          artifactId: "artifact-1",
+          docGuid: "guid-1",
+          coverageStateVectorBase64: "AQ==",
+        },
+      ],
+      [
+        "unavailable",
+        {
+          authorityEpoch: "epoch-1",
+          artifactId: "artifact-1",
+          code: "bodyUnavailable",
+          reason: "retrying",
+          terminal: false,
+        },
+      ],
+      ["pong", {}],
+    ];
+
+    it.each(binaryFrames)(
+      "%s declares hasBinaryPayload: true, and rejects false",
+      (kind, body) => {
+        const withTrue = artifactSubscribeServerFrameSchemaV10.safeParse({
+          kind,
+          ...body,
+          hasBinaryPayload: true,
+        });
+        expect(withTrue.success).toBe(true);
+
+        const withFalse = artifactSubscribeServerFrameSchemaV10.safeParse({
+          kind,
+          ...body,
+          hasBinaryPayload: false,
+        });
+        expect(withFalse.success).toBe(false);
+      },
+    );
+
+    it.each(textFrames)(
+      "%s declares hasBinaryPayload: false, and rejects true",
+      (kind, body) => {
+        const withFalse = artifactSubscribeServerFrameSchemaV10.safeParse({
+          kind,
+          ...body,
+          hasBinaryPayload: false,
+        });
+        expect(withFalse.success).toBe(true);
+
+        const withTrue = artifactSubscribeServerFrameSchemaV10.safeParse({
+          kind,
+          ...body,
+          hasBinaryPayload: true,
+        });
+        expect(withTrue.success).toBe(false);
+      },
+    );
+  });
+
+  it("the client frame union is exactly ['applyUpdate', 'awareness', 'ping'] - no attachArtifact/detachArtifact", () => {
+    const kinds = artifactSubscribeClientFrameSchemaV10.options.map(
+      (option) => option.shape.kind.value,
+    );
+    expect(kinds).toEqual(["applyUpdate", "awareness", "ping"]);
+  });
+});
+
+describe("epic.listChatRecords@1.1", () => {
+  it("requires hasDocReplica on the @1.1 request - omitting it is rejected", () => {
+    const withField = listChatRecordsRequestV11Schema.safeParse({
+      epicId: "epic-1",
+      hasDocReplica: false,
+    });
+    expect(withField.success).toBe(true);
+
+    const withoutField = listChatRecordsRequestV11Schema.safeParse({
+      epicId: "epic-1",
+    });
+    expect(withoutField.success).toBe(false);
+  });
+
+  it("chatRecordSummaryV11Schema adds docResident and keeps every @1.0 key", () => {
+    const row = {
+      chatId: "chat-1",
+      ownerUserId: "user-1",
+      originHostId: "host-1",
+      title: "A chat",
+      isTitleEditedByUser: false,
+      parentChatId: null,
+      createdAt: 1,
+      updatedAt: 1,
+      archived: false,
+      archivedAt: null,
+      runSettingsSummary: null,
+      revision: 1,
+      visibility: "private" as const,
+      origin: "own" as const,
+      docResident: true,
+    };
+
+    const parsed = chatRecordSummaryV11Schema.parse(row);
+    expect(parsed).toEqual(row);
+  });
+
+  it("the upgrade path fills hasDocReplica: true and docResident: false as FACTS about a @1.0 peer", () => {
+    const chatRow = {
+      chatId: "chat-1",
+      ownerUserId: "user-1",
+      originHostId: "host-1",
+      title: "A chat",
+      isTitleEditedByUser: false,
+      parentChatId: null,
+      createdAt: 1,
+      updatedAt: 1,
+      archived: false,
+      archivedAt: null,
+      runSettingsSummary: null,
+      revision: 1,
+      visibility: "private" as const,
+      origin: "own" as const,
+    };
+
+    const upgradedRequest = epicListChatRecordsUpgradeV10ToV11.upgradeRequest({
+      epicId: "epic-1",
+    });
+    expect(upgradedRequest).toEqual({
+      epicId: "epic-1",
+      hasDocReplica: true,
+    });
+    expect(
+      listChatRecordsRequestV11Schema.safeParse(upgradedRequest).success,
+    ).toBe(true);
+
+    const upgradedResponse = epicListChatRecordsUpgradeV10ToV11.upgradeResponse(
+      { chats: [chatRow] },
+    );
+    expect(upgradedResponse.chats.map((row) => row.docResident)).toEqual([
+      false,
+    ]);
+    expect(
+      upgradedResponse.chats.every(
+        (row) => chatRecordSummaryV11Schema.safeParse(row).success,
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("lane unaries", () => {
+  it("epic.getWorkspaceContext@1.0 wraps exactly the earlyMeta payload shape", () => {
+    const context = {
+      epicLight: null,
+      permissionRole: null,
+      repos: [],
+      workspaces: [],
+      repoMapping: [],
+      workspaceFolders: [],
+      unresolvedRepos: [],
+    };
+
+    // The same fixture must parse against BOTH the frozen earlyMeta frame's
+    // payload schema and the new response's `context` field, so a future
+    // divergence between them fails here rather than in the field.
+    expect(earlyMetaEpicSchema.safeParse(context).success).toBe(true);
+
+    const response = epicGetWorkspaceContextV10.responseSchema.safeParse({
+      context,
+    });
+    expect(response.success).toBe(true);
+  });
+
+  it("epic.retryMigration@1.0 response is { ok: true }, and { ok: false } is rejected", () => {
+    expect(
+      epicRetryMigrationV10.responseSchema.safeParse({ ok: true }).success,
+    ).toBe(true);
+    expect(
+      epicRetryMigrationV10.responseSchema.safeParse({ ok: false }).success,
+    ).toBe(false);
+  });
+});
+
+describe("epic.state.subscribe@1.1: tombstones carry artifact metadata; @1.0 stays slim", () => {
+  // What the live session builds after #1215: a tombstone that remembers
+  // enough of the artifact to revive it. `@1.0` shipped in 1.3.0 without any
+  // of it, and a released `@1.0` peer strict-decodes the whole frame.
+  const richTicketTombstone = {
+    kind: "ticket" as const,
+    id: "ticket-1",
+    title: "A ticket",
+    deletedAt: "2026-01-01T00:00:00.000Z",
+    revision: 3,
+    folderName: "tickets",
+    parentId: "story-1",
+    createdAt: 1_000,
+    createdManually: true,
+    assignee: "user-1",
+    status: 1,
+  };
+  const richSpecTombstone = {
+    kind: "spec" as const,
+    id: "spec-1",
+    title: "A spec",
+    deletedAt: "2026-01-01T00:00:00.000Z",
+    revision: 4,
+    folderName: null,
+    parentId: null,
+    createdAt: 2_000,
+    createdManually: false,
+    assignee: null,
+    status: null,
+  };
+  const delta = {
+    kind: "delta" as const,
+    authorityEpoch: "epoch-1",
+    seq: 7,
+    artifactUpserts: [],
+    artifactTombstones: [richTicketTombstone, richSpecTombstone],
+    commentThreadUpserts: [],
+    commentThreadRemovals: [],
+    epicMeta: null,
+    roleClaims: null,
+    hasBinaryPayload: false,
+  };
+
+  it("@1.1 admits the rich tombstone on every kind", () => {
+    const parsed = epicStateSubscribeServerFrameSchemaV11.parse(delta);
+    expect(parsed).toEqual(delta);
+  });
+
+  it("reparsing a @1.1 frame through @1.0 yields exactly the 1.3.0 tombstone: metadata stripped, ticket status kept", () => {
+    // The host's per-minor projection for a `@1.0` subscriber is this reparse;
+    // a key the frozen copy does not name must not survive it, and the one key
+    // the released peer REQUIRES on a ticket must.
+    const parsed = epicStateSubscribeServerFrameSchemaV10.parse(delta);
+    expect(parsed).toEqual({
+      ...delta,
+      artifactTombstones: [
+        {
+          kind: "ticket",
+          id: "ticket-1",
+          title: "A ticket",
+          deletedAt: "2026-01-01T00:00:00.000Z",
+          revision: 3,
+          status: 1,
+        },
+        {
+          kind: "spec",
+          id: "spec-1",
+          title: "A spec",
+          deletedAt: "2026-01-01T00:00:00.000Z",
+          revision: 4,
+        },
+      ],
+    });
+  });
+
+  it("@1.0 still refuses a ticket tombstone without a status - the released peer would too", () => {
+    const { status: _dropped, ...ticketWithoutStatus } = richTicketTombstone;
+    const result = epicStateSubscribeServerFrameSchemaV10.safeParse({
+      ...delta,
+      artifactTombstones: [ticketWithoutStatus],
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("epic.state.subscribe@1.3: html, canvas and file artifact records and tombstones", () => {
+  const artifactBase = {
+    folderName: "page-1",
+    title: "A page",
+    createdAt: 1,
+    updatedAt: 2,
+    createdManually: false,
+    parentId: null,
+    revision: 5,
+  };
+  const head = { files: {}, capturedAt: 3 };
+  const sha256 = "a".repeat(64);
+  const htmlRecord = {
+    ...artifactBase,
+    kind: "html" as const,
+    id: "html-1",
+    layout: "folder" as const,
+    head,
+  };
+  // A canvas keeps a Yjs body, but the lane row names no room: the room id
+  // is host-private and the lane omits it for every kind.
+  const canvasRecord = {
+    ...artifactBase,
+    kind: "canvas" as const,
+    id: "canvas-1",
+    layout: "folder" as const,
+    head,
+  };
+  const fileRecord = {
+    ...artifactBase,
+    kind: "file" as const,
+    id: "file-1",
+    layout: "file" as const,
+    object: {
+      sha256,
+      byteLength: 12,
+      mediaType: "image/png",
+      status: "published" as const,
+    },
+  };
+  const markdownRecord = {
+    ...artifactBase,
+    kind: "spec" as const,
+    id: "spec-1",
+    layout: "folder" as const,
+  };
+  const tombstoneBase = {
+    title: "Gone",
+    deletedAt: "2026-01-01T00:00:00.000Z",
+    revision: 6,
+    folderName: "gone-1",
+    parentId: null,
+    createdAt: 1,
+    createdManually: false,
+    assignee: null,
+    status: null,
+  };
+  const tombstones = (["html", "canvas", "file"] as const).map((kind) => ({
+    ...tombstoneBase,
+    kind,
+    id: `${kind}-gone`,
+  }));
+  const newKindDelta = {
+    kind: "delta" as const,
+    authorityEpoch: "epoch-1",
+    seq: 8,
+    artifactUpserts: [htmlRecord, canvasRecord, fileRecord, markdownRecord],
+    artifactTombstones: tombstones,
+    commentThreadUpserts: [],
+    commentThreadRemovals: [],
+    epicMeta: null,
+    roleClaims: null,
+    hasBinaryPayload: false,
+  };
+  const newKindSnapshot = {
+    kind: "snapshot" as const,
+    authorityEpoch: "epoch-1",
+    position: 8,
+    basis: "cold" as const,
+    reconciledWithCloud: false,
+    epicMeta: { revision: 0, meta: { title: "An epic", updatedAt: 1 } },
+    artifactRecords: [htmlRecord, canvasRecord, fileRecord, markdownRecord],
+    deletedArtifacts: tombstones,
+    roleClaims: { revision: 0, claims: [] },
+    commentThreads: [],
+    hasBinaryPayload: false,
+  };
+
+  it("@1.3 parses upserts and tombstones of the three new kinds, with the markdown rows beside them", () => {
+    const parsed = epicStateSubscribeServerFrameSchemaV13.parse(newKindDelta);
+    if (parsed.kind !== "delta") throw new Error("expected a delta frame");
+    expect(parsed.artifactUpserts.map((record) => record.kind)).toEqual([
+      "html",
+      "canvas",
+      "file",
+      "spec",
+    ]);
+    expect(parsed.artifactTombstones.map((record) => record.kind)).toEqual([
+      "html",
+      "canvas",
+      "file",
+    ]);
+  });
+
+  it("@1.3 parses a snapshot holding the three new kinds as records and as tombstones", () => {
+    const parsed =
+      epicStateSubscribeServerFrameSchemaV13.parse(newKindSnapshot);
+    if (parsed.kind !== "snapshot") throw new Error("expected a snapshot");
+    expect(parsed.artifactRecords).toHaveLength(4);
+    expect(parsed.deletedArtifacts.map((record) => record.kind)).toEqual([
+      "html",
+      "canvas",
+      "file",
+    ]);
+  });
+
+  it.each(["html", "canvas", "file"] as const)(
+    "@1.2 refuses the %s kind in an upsert and in a tombstone, where @1.3 accepts it: the released peer cannot decode the kind",
+    (kind) => {
+      const upsert = {
+        html: htmlRecord,
+        canvas: canvasRecord,
+        file: fileRecord,
+      }[kind];
+      const upsertOnly = {
+        ...newKindDelta,
+        artifactUpserts: [upsert],
+        artifactTombstones: [],
+      };
+      const tombstoneOnly = {
+        ...newKindDelta,
+        artifactUpserts: [],
+        artifactTombstones: tombstones.filter((row) => row.kind === kind),
+      };
+      expect(
+        epicStateSubscribeServerFrameSchemaV13.safeParse(upsertOnly).success,
+      ).toBe(true);
+      expect(
+        epicStateSubscribeServerFrameSchemaV12.safeParse(upsertOnly).success,
+      ).toBe(false);
+      expect(
+        epicStateSubscribeServerFrameSchemaV13.safeParse(tombstoneOnly).success,
+      ).toBe(true);
+      expect(
+        epicStateSubscribeServerFrameSchemaV12.safeParse(tombstoneOnly).success,
+      ).toBe(false);
+    },
+  );
+
+  it("@1.2 refuses a snapshot holding a new kind, in records or in tombstones", () => {
+    expect(
+      epicStateSubscribeServerFrameSchemaV12.safeParse({
+        ...newKindSnapshot,
+        deletedArtifacts: [],
+      }).success,
+    ).toBe(false);
+    expect(
+      epicStateSubscribeServerFrameSchemaV12.safeParse({
+        ...newKindSnapshot,
+        artifactRecords: [markdownRecord],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("@1.2 still decodes a frame holding only markdown rows, and @1.3 decodes the same frame", () => {
+    const markdownOnly = {
+      ...newKindDelta,
+      artifactUpserts: [markdownRecord],
+      artifactTombstones: [],
+    };
+    expect(
+      epicStateSubscribeServerFrameSchemaV12.safeParse(markdownOnly).success,
+    ).toBe(true);
+    expect(
+      epicStateSubscribeServerFrameSchemaV13.safeParse(markdownOnly).success,
+    ).toBe(true);
+  });
+
+  it("@1.3 refuses a file record without its object fields", () => {
+    const { sha256: _dropped, ...objectWithoutSha } = fileRecord.object;
+    const fileWithoutSha = { ...fileRecord, object: objectWithoutSha };
+    expect(
+      epicStateSubscribeServerFrameSchemaV13.safeParse({
+        ...newKindDelta,
+        artifactUpserts: [fileWithoutSha],
+        artifactTombstones: [],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("is still installed under the top of the line, with @1.2 below it", () => {
+    expect(epicStateSubscribeV13.schemaVersion).toEqual({ major: 1, minor: 3 });
+    const line = hostStreamRpcRegistry["epic.state.subscribe"][1];
+    expect(line.versions[3].contract).toBe(epicStateSubscribeV13);
+    expect(line.versions[2].contract.serverFrameSchema).toBe(
+      epicStateSubscribeServerFrameSchemaV12,
+    );
+  });
+});
+
+describe("epic.state.subscribe@1.4: comment thread records carry anchor fields; @1.3 stays frozen", () => {
+  const anchorData = {
+    anchorKind: "text" as const,
+    artboard: "board-1",
+    elementId: "tid-1",
+    startOffset: 2,
+    endOffset: 9,
+    label: "Hero heading",
+  };
+  const anchoredThread = {
+    ...commentThreadFixture,
+    data: { ...commentThreadFixture.data, ...anchorData },
+  };
+  const delta = {
+    kind: "delta" as const,
+    authorityEpoch: "epoch-1",
+    seq: 9,
+    artifactUpserts: [],
+    artifactTombstones: [],
+    commentThreadUpserts: [anchoredThread],
+    commentThreadRemovals: [],
+    epicMeta: null,
+    roleClaims: null,
+    hasBinaryPayload: false,
+  };
+  const snapshot = {
+    kind: "snapshot" as const,
+    authorityEpoch: "epoch-1",
+    position: 9,
+    basis: "cold" as const,
+    reconciledWithCloud: false,
+    epicMeta: { revision: 0, meta: { title: "An epic", updatedAt: 1 } },
+    artifactRecords: [],
+    deletedArtifacts: [],
+    roleClaims: { revision: 0, claims: [] },
+    commentThreads: [anchoredThread],
+    hasBinaryPayload: false,
+  };
+
+  it("@1.4 keeps the anchor fields on an upserted thread in a delta and in a snapshot", () => {
+    const parsedDelta = epicStateSubscribeServerFrameSchemaV14.parse(delta);
+    if (parsedDelta.kind !== "delta") throw new Error("expected a delta frame");
+    expect(parsedDelta.commentThreadUpserts[0]?.data).toMatchObject(anchorData);
+    const parsedSnapshot =
+      epicStateSubscribeServerFrameSchemaV14.parse(snapshot);
+    if (parsedSnapshot.kind !== "snapshot") {
+      throw new Error("expected a snapshot frame");
+    }
+    expect(parsedSnapshot.commentThreads[0]?.data).toMatchObject(anchorData);
+  });
+
+  it("@1.3 strips the anchor fields, so a released peer sees the thread it always did", () => {
+    const parsedDelta = epicStateSubscribeServerFrameSchemaV13.parse(delta);
+    if (parsedDelta.kind !== "delta") throw new Error("expected a delta frame");
+    expect(parsedDelta.commentThreadUpserts[0]?.data).toEqual(
+      commentThreadFixture.data,
+    );
+    const parsedSnapshot =
+      epicStateSubscribeServerFrameSchemaV13.parse(snapshot);
+    if (parsedSnapshot.kind !== "snapshot") {
+      throw new Error("expected a snapshot frame");
+    }
+    expect(parsedSnapshot.commentThreads[0]?.data).toEqual(
+      commentThreadFixture.data,
+    );
+  });
+
+  it("@1.4 still reads a thread that carries no anchor", () => {
+    expect(
+      epicStateSubscribeServerFrameSchemaV14.safeParse({
+        ...delta,
+        commentThreadUpserts: [commentThreadFixture],
+      }).success,
+    ).toBe(true);
+  });
+
+  it("stays installed at minor 4, below the @1.5 head, with @1.3 still installed", () => {
+    expect(epicStateSubscribeV14.schemaVersion).toEqual({ major: 1, minor: 4 });
+    const line = hostStreamRpcRegistry["epic.state.subscribe"][1];
+    expect(line.latestMinor).toBe(5);
+    expect(line.versions[4].contract).toBe(epicStateSubscribeV14);
+    expect(line.versions[3].contract.serverFrameSchema).toBe(
+      epicStateSubscribeServerFrameSchemaV13,
+    );
+  });
+});
+
+describe("artifact.subscribe@1.1 bodySync frame (O1)", () => {
+  const bodySyncBase = {
+    kind: "bodySync" as const,
+    authorityEpoch: "epoch-1",
+    artifactId: "artifact-1",
+    hasBinaryPayload: false as const,
+  };
+
+  it.each(["syncing", "synced"] as const)(
+    "@1.1 accepts bodySync state %s",
+    (state) => {
+      expect(
+        artifactSubscribeServerFrameSchemaV11.safeParse({
+          ...bodySyncBase,
+          state,
+        }).success,
+      ).toBe(true);
+    },
+  );
+
+  it.each(["syncing", "synced"] as const)(
+    "@1.0 rejects bodySync state %s: the frame does not exist on the frozen line",
+    (state) => {
+      expect(
+        artifactSubscribeServerFrameSchemaV10.safeParse({
+          ...bodySyncBase,
+          state,
+        }).success,
+      ).toBe(false);
+    },
+  );
+
+  it("rejects hasBinaryPayload: true", () => {
+    expect(
+      artifactSubscribeServerFrameSchemaV11.safeParse({
+        ...bodySyncBase,
+        state: "syncing",
+        hasBinaryPayload: true,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects an unknown state", () => {
+    expect(
+      artifactSubscribeServerFrameSchemaV11.safeParse({
+        ...bodySyncBase,
+        state: "stale",
+      }).success,
+    ).toBe(false);
+  });
+
+  describe("V11 is a strict superset of every @1.0 server frame kind", () => {
+    const base = { authorityEpoch: "epoch-1", artifactId: "artifact-1" };
+    // One valid fixture per @1.0 kind. The kind list below is checked against
+    // the V10 union itself, so a kind added to @1.0 without a fixture here
+    // fails that test rather than going unexercised.
+    const fixtures = {
+      doc: {
+        kind: "doc",
+        ...base,
+        docGuid: "guid-1",
+        stateVectorBase64: "AQ==",
+        hasBinaryPayload: true,
+      },
+      docUpdate: {
+        kind: "docUpdate",
+        ...base,
+        docGuid: "guid-1",
+        hasBinaryPayload: true,
+      },
+      docAck: {
+        kind: "docAck",
+        ...base,
+        docGuid: "guid-1",
+        coverageStateVectorBase64: "AQ==",
+        hasBinaryPayload: false,
+      },
+      awareness: { kind: "awareness", ...base, hasBinaryPayload: true },
+      unavailable: {
+        kind: "unavailable",
+        ...base,
+        code: "bodyUnavailable",
+        reason: "retrying",
+        terminal: false,
+        hasBinaryPayload: false,
+      },
+      pong: { kind: "pong", hasBinaryPayload: false },
+    };
+
+    it("has a fixture for exactly the kinds the V10 union declares", () => {
+      const declared = artifactSubscribeServerFrameSchemaV10.options
+        .map((option) => option.shape.kind.value)
+        .sort();
+      expect(Object.keys(fixtures).sort()).toEqual(declared);
+    });
+
+    it.each(Object.entries(fixtures))(
+      "%s parses under both V10 and V11",
+      (_kind, fixture) => {
+        expect(
+          artifactSubscribeServerFrameSchemaV10.safeParse(fixture).success,
+        ).toBe(true);
+        expect(
+          artifactSubscribeServerFrameSchemaV11.safeParse(fixture).success,
+        ).toBe(true);
+      },
+    );
+  });
+});

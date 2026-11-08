@@ -1,0 +1,361 @@
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+import {
+  listAgentsResponseSchemaV10,
+  listAgentsResponseSchemaV20,
+  listAgentsResponseSchemaV30,
+  listAgentsResponseSchemaV40,
+  listAgentsResponseSchemaV50,
+  listAgentsResponseSchemaV60,
+  listAgentsResponseSchemaV70,
+  listAgentsResponseSchemaV90,
+  listAgentsResponseSchemaV91,
+  listAgentsResponseSchemaV92,
+  listAgentsResponseSchemaV100,
+  listAgentsResponseSchemaV101,
+  listAgentsResponseSchema,
+} from "@traycer/protocol/host/agent/shared";
+import {
+  listGuiHarnessesResponseSchemaV10,
+  listGuiHarnessesResponseSchemaV20,
+  listGuiHarnessesResponseSchemaV21,
+  listGuiHarnessesResponseSchemaV30,
+  listGuiHarnessesResponseSchemaV40,
+  listGuiHarnessesResponseSchemaV50,
+  listGuiHarnessesResponseSchemaV60,
+  listGuiHarnessesResponseSchemaV70,
+  listGuiHarnessesResponseSchemaV71,
+  listGuiHarnessesResponseSchemaV80,
+  listGuiHarnessesResponseSchemaV90,
+  listGuiHarnessesResponseSchemaV91,
+  listGuiHarnessesResponseSchemaV92,
+  listGuiHarnessesResponseSchemaV100,
+  listGuiHarnessesResponseSchema,
+} from "@traycer/protocol/host/agent/gui/unary-schemas";
+import {
+  providersListRequestSchema,
+  providersListRequestSchemaBeforeV70,
+  providersListResponseSchema,
+  providersListResponseSchemaV100Preimage,
+  providersListResponseSchemaV101Preimage,
+  providersListResponseSchemaV102Preimage,
+  providersListResponseSchemaV103Preimage,
+  providersListResponseSchemaV104Preimage,
+  providersListResponseSchemaV105Preimage,
+  providersListResponseSchemaV106Preimage,
+  providersListResponseSchemaV107Preimage,
+  providersUsePackVersionResponseSchema,
+  providersUsePackVersionResponseSchemaV10,
+  providersListResponseSchemaV70,
+  providersListResponseSchemaV90,
+  providersListResponseSchemaV91,
+  providersListResponseSchemaV92,
+  providersListResponseSchemaV80,
+  providersListResponseSchemaV10,
+  providersListResponseSchemaV20,
+  providersListResponseSchemaV30,
+  providersListResponseSchemaV40,
+  providersListResponseSchemaV50,
+  providersListResponseSchemaV60,
+} from "@traycer/protocol/host/provider-schemas";
+import {
+  getChatRunSettingsResponseSchema,
+  getChatRunSettingsResponseSchemaV10,
+  getChatRunSettingsResponseSchemaV20,
+  getChatRunSettingsResponseSchemaV30,
+  getChatRunSettingsBatchResponseSchema,
+  getChatRunSettingsBatchResponseSchemaV10,
+} from "@traycer/protocol/host/epic/chat-records";
+import { FROZEN_CATALOG_LINE_SNAPSHOTS } from "./__fixtures__/frozen-catalog-lines";
+import { toCanonicalJsonSchema } from "@traycer/protocol/framework/json-schema-fingerprint";
+
+/**
+ * Defense-in-depth for the freeze discipline: frozen catalog response schemas
+ * must not silently grow new harness/provider ids. The protocol-compat gate
+ * catches released-line growth across tags; this test catches local drift of
+ * the frozen zod exports in plain `bun run test` without tags.
+ *
+ * When intentionally freezing a new line (e.g. V30 before opening v4.0), add
+ * the export here and regenerate:
+ *   bun run protocol/scripts/compat/snapshot-frozen-catalog-lines.ts > \
+ *     protocol/src/host/__tests__/__fixtures__/frozen-catalog-lines.ts
+ */
+
+function dump(schema: z.ZodType): unknown {
+  return toCanonicalJsonSchema(schema, { unrepresentable: "any" });
+}
+
+const LIVE_FROZEN_EXPORTS = {
+  "agent.gui.listHarnesses@1.0": listGuiHarnessesResponseSchemaV10,
+  "agent.gui.listHarnesses@2.0": listGuiHarnessesResponseSchemaV20,
+  "agent.gui.listHarnesses@2.1": listGuiHarnessesResponseSchemaV21,
+  "agent.gui.listHarnesses@3.0": listGuiHarnessesResponseSchemaV30,
+  "agent.gui.listHarnesses@4.0": listGuiHarnessesResponseSchemaV40,
+  "agent.gui.listHarnesses@5.0": listGuiHarnessesResponseSchemaV50,
+  "agent.gui.listHarnesses@6.0": listGuiHarnessesResponseSchemaV60,
+  // v7.0 froze when v7.1 opened for the auth-aware enablement row fields.
+  // Until then the 2.1-6.0 rows above pinned only the id over a LIVE body, so
+  // they were half-frozen; they now share the hand-frozen
+  // `guiHarnessOptionBaseShapeV70` and dump exactly as they did before.
+  "agent.gui.listHarnesses@7.0": listGuiHarnessesResponseSchemaV70,
+  // 7.1 froze when 8.0 opened for Reasonix - a released 7.0 forbids ANY minor
+  // of major 7 from growing the id enum (`versioned-rpc.ts` refuses it), so
+  // 7.1 could not absorb the id even though no tag has shipped 7.1 itself.
+  "agent.gui.listHarnesses@7.1": listGuiHarnessesResponseSchemaV71,
+  // Two freezes, one line apart. 8.0 froze when 9.0 opened for Antigravity
+  // (`cli-v1.3.0` shipped 8.0 at the twenty-id row); 9.0 then froze when 9.1
+  // opened for the `auto` permission mode and the `nativeAutoJudge` row field.
+  // Both give the same response as when they were head - each names its frozen
+  // schema now and its dump is unchanged, so neither row was regenerated.
+  "agent.gui.listHarnesses@8.0": listGuiHarnessesResponseSchemaV80,
+  "agent.gui.listHarnesses@9.0": listGuiHarnessesResponseSchemaV90,
+  // 9.1 froze at the pre-`judgeDefaultModel` row when 9.2 opened, exactly as
+  // 9.0 froze when 9.1 opened - its dump did not change from its freeze.
+  "agent.gui.listHarnesses@9.1": listGuiHarnessesResponseSchemaV91,
+  // 9.2 froze when `commandcode` opened 10.0 (`1.5.0` shipped 9.2); its dump
+  // did not change by the freeze.
+  "agent.gui.listHarnesses@9.2": listGuiHarnessesResponseSchemaV92,
+  // 10.0 froze when the sandbox credential keys opened 10.1 (`host-v1.5.1`
+  // shipped 10.0); its dump did not change by the freeze.
+  "agent.gui.listHarnesses@10.0": listGuiHarnessesResponseSchemaV100,
+  // The head line, holding 10.0's old job: it names the LIVE schema, so the
+  // next attempt to grow the row fails here first.
+  "agent.gui.listHarnesses@10.1": listGuiHarnessesResponseSchema,
+  "agent.list@1.0": listAgentsResponseSchemaV10,
+  "agent.list@2.0": listAgentsResponseSchemaV20,
+  "agent.list@3.0": listAgentsResponseSchemaV30,
+  "agent.list@4.0": listAgentsResponseSchemaV40,
+  "agent.list@5.0": listAgentsResponseSchemaV50,
+  "agent.list@6.0": listAgentsResponseSchemaV60,
+  // v7.0 froze when the v1.2.0 tags shipped it. Until then it pointed at the
+  // live schema and `agent.list` had NO head-line row here at all, so nothing
+  // local could have caught the growth - only the tag-based gate.
+  "agent.list@7.0": listAgentsResponseSchemaV70,
+  // This row was the head line, pinned so the next growth attempt fails here
+  // first - keyed at the head VERSION. It read `agent.list@8.0` while major 8
+  // was head and was not re-keyed when major 9 opened against live, so it
+  // pinned the MAJOR-9 head under a major-8 name until the row was re-keyed.
+  //
+  // `@9.0` is the shape this row held until the session facet landed. Major 9
+  // was UNRELEASED then (`host-v1.3.0` registers `agent.list` 1.0 through 8.0
+  // and no 9), so by the release-status rule spelled out on `providers.list@8.0`
+  // below, growing it regenerated rather than froze - and the pre-facet
+  // bytes are kept anyway, under the reserved `V90` name the head-contract
+  // rule forced out when `@9.1` took the canonical alias. Nothing leaves the
+  // fixture; the rows are simply named what they are.
+  "agent.list@9.0": listAgentsResponseSchemaV90,
+  // 9.1 froze when 9.2 opened to put `archived` on the row. It is RELEASED
+  // (`host-v1.4.2` registers `agent.list@9.1`), so it names its own frozen
+  // schema and must not regenerate.
+  "agent.list@9.1": listAgentsResponseSchemaV91,
+  // 9.2 froze when `commandcode` opened 10.0 (`1.5.0` shipped 9.1); its dump
+  // did not change by the freeze.
+  "agent.list@9.2": listAgentsResponseSchemaV92,
+  // 10.0 froze when 10.1 opened to put the run tuple on the row. It is
+  // RELEASED (`host-v1.5.1` registers `agent.list@10.0`), so it names its own
+  // frozen schema and must not regenerate.
+  "agent.list@10.0": listAgentsResponseSchemaV100,
+  // 10.1 froze when 10.2 opened to put `reach` and `hostConnectivity` on the
+  // row. Its dump did not change by the freeze.
+  "agent.list@10.1": listAgentsResponseSchemaV101,
+  // The head line, holding 10.1's old job: it names the LIVE schema, so the
+  // next attempt to grow the agent summary fails here first.
+  "agent.list@10.2": listAgentsResponseSchema,
+  "providers.list@1.0": providersListResponseSchemaV10,
+  "providers.list@2.0": providersListResponseSchemaV20,
+  "providers.list@3.0": providersListResponseSchemaV30,
+  "providers.list@4.0": providersListResponseSchemaV40,
+  "providers.list@5.0": providersListResponseSchemaV50,
+  "providers.list@6.0": providersListResponseSchemaV60,
+  // v7.0 was pinned here while it was still the head line, so that growth of
+  // the live shape would fail on its FIRST attempt rather than on the release
+  // that shipped it. That is what happened: the auth-aware enablement fields
+  // turned this row red, v7.0 was hand-frozen under the reserved `V70` names,
+  // and a 7.1 opened against live. This row was NOT regenerated - it names the
+  // frozen schema now and its dump is unchanged. It stayed unchanged when
+  // those same two fields were later REMOVED and took 7.1 with them: a freeze
+  // records what a line served, so undoing the growth that triggered it does
+  // not un-freeze it.
+  "providers.list@7.0": providersListResponseSchemaV70,
+  // The head line holds v7.0's old job, and today that is `providers.list@10.0`
+  // below: it names the LIVE schema, so the next attempt to grow it fails there
+  // first.
+  //
+  // What that red means depends on whether the line has SHIPPED, and the two
+  // answers are opposites - read this before reaching for either:
+  //
+  //  - RELEASED: peers in the field already speak it, so the RESPONSE it serves
+  //    is fixed forever. Freeze the line that stopped being head under reserved
+  //    `VNN` names, open the next one against live, and do NOT regenerate. That
+  //    is what v7.0 above records.
+  //
+  //    One carve-out, and it is a row in this very list. A REQUEST row whose
+  //    contract BINDS the live schema has nothing to freeze, so it is
+  //    regenerated instead - `providers.list@7.0 request` already has been,
+  //    twice, for `reasonix` and `antigravity`. That is safe for the reason the
+  //    response side is not: a request travels client to host, and a client
+  //    only ever names a provider the host itself just reported, so a new id
+  //    cannot reach an older host's decoder. Growth in the other direction has
+  //    no such argument, which is why the rule above is about responses. See
+  //    `providersListRequestSchema`, whose docblock records that v7.0 binds it.
+  //  - UNRELEASED: no peer can have negotiated it, so there is no contract to
+  //    break, and additive growth regenerates this fixture. `enabled` and
+  //    `launchCommand` on `providerProfileSchema` both did exactly that, and
+  //    `launchCommand`'s comment says so at the field.
+  //
+  // **A line is RELEASED when a HOST that advertises it has been published** -
+  // not when a tag contains the commit that opened it. Check it with
+  // `gh release list --repo traycerai/traycer-internal` INCLUDING prereleases,
+  // and read the release's uploaded `protocol-surface.json`, which states the
+  // canonical version and the exact response shape that host serves.
+  //
+  // The repo in that command is load-bearing, not decoration. Hosts are
+  // published from the INTERNAL repo; run it against THIS one and the newest
+  // host you can see is `host-v1.3.1`, which is the very answer the discredited
+  // tag recipe below gave. A reader who omits the flag reaches the wrong
+  // conclusion while believing they followed the rule.
+  //
+  // That wording is this precise because the older recipe here - "it appears in
+  // a non-rc `host-v*`/`cli-v*`/`desktop-v*` tag at or above
+  // `support-floor.json`", confirmed with
+  // `git show <newest non-rc tag>:protocol/src/host/registry.ts` - returned the
+  // WRONG ANSWER for `providers.list@9.1` and licensed widening it in place.
+  // Every clause of it was true; it just asked about tags. The published host
+  // `host-v1.3.2-staging.39.g3a73077` advertises 9.1, carries no matching tag
+  // (`git ls-remote --tags origin | grep staging` is empty), and is not an rc.
+  //
+  // Note that the compat gate's own baseline discovery
+  // (`protocol/scripts/compat/resolve-baselines.ts`) matches that same tag
+  // pattern, so it could not have caught this either and cannot catch the next
+  // one. Until that is reconciled, a staging-only line is guarded by THIS file
+  // and by the reader
+  // - which is why the rule above is stated here rather than left implied.
+  //
+  // So the red is a PROMPT to check release status, not a verdict on its own.
+  //
+  // There is no `providers.list@7.1` row because there is no such line: the
+  // enablement pair was its entire delta over 7.0 and both were removed. This
+  // list and the snapshot's key set are held equal below, so deleting a row
+  // here without deleting the fixture (or the reverse) fails rather than
+  // silently narrowing what is guarded.
+  // Four freezes here as well: 8.0 froze when 9.0 opened, 9.0 froze at the
+  // pre-`autoJudge` state when 9.1 opened, 9.1 froze at the pre-marker login
+  // capability when 9.2 opened, and 9.2 froze when `commandcode` opened 10.0.
+  // None of those dumps was changed BY its freeze.
+  //
+  // 9.0 and 9.1 DID move once, wrongly, and that is worth keeping rather than
+  // tidying away. An earlier revision of this comment licensed it: "Major 9 is
+  // unreleased: no tag contains the commit that opened 9.1, release candidates
+  // INCLUDED, and the newest non-rc OSS tag (`host-v1.3.1`) registers
+  // `providers.list` only to 8.0." Every clause of that was true and the
+  // conclusion was false, because it asked the wrong question. A line is
+  // released when a HOST that advertises it has been published, not when an OSS
+  // tag contains the commit that opened it: the host release
+  // `host-v1.3.2-staging.39.g3a73077` is published and not a draft, and its
+  // uploaded `protocol-surface.json` advertises `providers.list` canonical 9.1.
+  // So 9.0 and 9.1 were both already in users' hands, `providerCliStateSchemaV*`
+  // reached the LIVE capability by reference, and adding two keys to that
+  // capability silently widened two released lines - which this snapshot then
+  // recorded as the new truth instead of refusing.
+  //
+  // Read the release status off published host releases (prereleases included),
+  // and treat a frozen alias that points at a live nested schema as unfrozen
+  // whatever its own docblock says. 8.0 is the worked example of getting it
+  // right: `providerCliStateBaseShapeV80` was re-pointed at the hand-frozen
+  // four-key `providerLoginCapabilitySchemaV70`, so it stayed byte-identical
+  // through the same change that moved the other two.
+  "providers.list@8.0": providersListResponseSchemaV80,
+  "providers.list@9.0": providersListResponseSchemaV90,
+  "providers.list@9.1": providersListResponseSchemaV91,
+  // 9.2 froze when `commandcode` opened 10.0 (`1.5.0` shipped 9.2); its dump
+  // did not change by the freeze.
+  "providers.list@9.2": providersListResponseSchemaV92,
+  // The head line, holding 9.2's old job: it names the LIVE schema, so the next
+  // attempt to grow the provider state fails here first. Note what that guard
+  // could NOT do while 9.1 held this job - it moves with the live schema by
+  // design, so the two markers landing on the live capability regenerated it
+  // without complaint. The rows above are the ones that refuse; a line earns
+  // one the moment a host advertising it is published.
+  // 10.0 froze when MCP remedies and notices opened 10.1: its MCP rows, notices
+  // and `applyRemedy` capability scopes are the pre-remedy shape, so a released
+  // 10.0 reader never sees a field it cannot spell. Its dump did not change by
+  // the freeze.
+  "providers.list@10.0": providersListResponseSchemaV100Preimage,
+  // 10.1 froze when `macosRequirement` opened 10.2: its row is the pre-field
+  // shape, so a released 10.1 reader never sees a key it cannot spell. Its dump
+  // did not change by the freeze.
+  "providers.list@10.1": providersListResponseSchemaV101Preimage,
+  // 10.2 froze when MCP origin, coverage and decidedBy opened 10.3: its MCP rows
+  // are the pre-field shape. Its dump did not change by the freeze.
+  "providers.list@10.2": providersListResponseSchemaV102Preimage,
+  // Kilo's published 10.3 retains its MCP result and error values.
+  "providers.list@10.3": providersListResponseSchemaV103Preimage,
+  // 10.4 froze when `credentialsManagedInAccount`, `scope` and `onHostOnly`
+  // opened 10.5: its envelope is the two-key shape. Its dump did not change by
+  // the freeze.
+  "providers.list@10.4": providersListResponseSchemaV104Preimage,
+  // 10.5 froze when `managedLines` and the selection's `line` opened 10.6. Its
+  // dump did not change by the freeze.
+  "providers.list@10.5": providersListResponseSchemaV105Preimage,
+  // 10.6 froze when `chatsFollow` opened 10.7. Its dump did not change by the
+  // freeze.
+  "providers.list@10.6": providersListResponseSchemaV106Preimage,
+  // 10.7 froze when `nativeMemory` and `nativeMemorySupported` opened 10.8.
+  // Its dump did not change by the freeze.
+  "providers.list@10.7": providersListResponseSchemaV107Preimage,
+  // The head line: it names the LIVE schema, so the next growth of the provider
+  // state fails here first.
+  "providers.list@10.8": providersListResponseSchema,
+  // 1.0 is hand-frozen at the three-code failure arm when `macos-ineligible`
+  // opened 1.1; its dump did not change by the freeze.
+  "providers.usePackVersion@1.0": providersUsePackVersionResponseSchemaV10,
+  // The head line: it names the LIVE response, so the next arm fails here first.
+  "providers.usePackVersion@1.1": providersUsePackVersionResponseSchema,
+  // The fourth method (see the snapshot script for why it is here): its
+  // response carries the PERSISTED harness enum, it is off the released floor,
+  // and nothing local guarded it until Reasonix grew it and only the tag gate
+  // noticed.
+  "epic.getChatRunSettings@1.0": getChatRunSettingsResponseSchemaV10,
+  // 2.0 is RELEASED (the `1.3.0` tags shipped it), so it is frozen pre-`auto`
+  // rather than widened in place: it names its own hand-copied
+  // `chatRunSettingsSchemaV20`, whose `permissionMode` is pinned to
+  // `permissionModeSchemaPreAuto` for the same half-freeze reason its harness
+  // id is. Majors 3 and 4 are the only lines that may spell `auto`. What
+  // protects the released 1.0 reader is the identical pin on
+  // `chatRunSettingsSchemaV10` plus the V2->V1 bridge's existing
+  // `DOWNGRADE_UNSUPPORTED` refusal, which covers the mode dimension for free.
+  "epic.getChatRunSettings@2.0": getChatRunSettingsResponseSchemaV20,
+  // 3.0 froze when `commandcode` opened 4.0 (`1.5.0` shipped 3.0); its dump
+  // did not change by the freeze.
+  "epic.getChatRunSettings@3.0": getChatRunSettingsResponseSchemaV30,
+  // The head line: it names the LIVE response, so the next attempt to grow the
+  // settings tuple fails here first.
+  "epic.getChatRunSettings@4.0": getChatRunSettingsResponseSchema,
+  // 1.0 froze when `commandcode` opened 2.0 (`1.5.0` shipped 1.0); its dump did
+  // not change by the freeze.
+  "epic.getChatRunSettingsBatch@1.0": getChatRunSettingsBatchResponseSchemaV10,
+  // The head line: it names the LIVE response, so the next attempt to grow a
+  // batch entry fails here first.
+  "epic.getChatRunSettingsBatch@2.0": getChatRunSettingsBatchResponseSchema,
+  "providers.list@1.0..6.0 request": providersListRequestSchemaBeforeV70,
+  "providers.list@7.0 request": providersListRequestSchema,
+} as const;
+
+describe("frozen catalog line snapshots", () => {
+  it("covers every live frozen export", () => {
+    expect(Object.keys(LIVE_FROZEN_EXPORTS).sort()).toEqual(
+      Object.keys(FROZEN_CATALOG_LINE_SNAPSHOTS.fixtures).sort(),
+    );
+  });
+
+  Object.entries(LIVE_FROZEN_EXPORTS).forEach(([key, schema]) => {
+    it(`${key} still serializes byte-identically to the committed snapshot`, () => {
+      const current = dump(schema);
+      const expected =
+        FROZEN_CATALOG_LINE_SNAPSHOTS.fixtures[
+          key as keyof typeof FROZEN_CATALOG_LINE_SNAPSHOTS.fixtures
+        ];
+      expect(current).toEqual(expected);
+    });
+  });
+});

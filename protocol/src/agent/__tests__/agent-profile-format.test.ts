@@ -1,0 +1,505 @@
+import { describe, expect, it } from "vitest";
+import {
+  formatAgentConfigureResponse,
+  formatAgentProviderProfileRateLimitsResponse,
+  formatAgentProviderProfilesResponse,
+  formatProfileSelection,
+} from "../agent-profile-format";
+import type {
+  AgentConfigureSettings,
+  AgentGetProviderProfileRateLimitsResponse,
+  AgentListProviderProfilesResponse,
+} from "@traycer/protocol/host";
+
+const CAPTURED_AT = Date.UTC(2026, 6, 13, 9, 30, 0);
+
+const PROFILES: AgentListProviderProfilesResponse = {
+  providerId: "claude-code",
+  profiles: [
+    {
+      selection: { kind: "ambient" },
+      label: "Terminal login",
+      authStatus: "authenticated",
+      rateLimitStatus: "ok",
+      usageUpdatedAt: CAPTURED_AT,
+      isEffectiveLastUsed: false,
+    },
+    {
+      selection: { kind: "profile", profileId: "prof_work" },
+      label: "Work subscription",
+      authStatus: "authenticated",
+      rateLimitStatus: "hard_limit",
+      usageUpdatedAt: CAPTURED_AT,
+      isEffectiveLastUsed: true,
+    },
+    {
+      selection: { kind: "profile", profileId: "prof_personal" },
+      label: "Personal subscription",
+      authStatus: "unauthenticated",
+      rateLimitStatus: "unknown",
+      usageUpdatedAt: null,
+      isEffectiveLastUsed: false,
+    },
+  ],
+};
+
+describe("provider-profile list formatting", () => {
+  it("renders every row as the --profile token that reselects it", () => {
+    const human = formatAgentProviderProfilesResponse(PROFILES);
+
+    expect(human).toContain(
+      "--profile ambient - Terminal login [auth: authenticated] [limits: ok, captured 2026-07-13T09:30:00.000Z]",
+    );
+    expect(human).toContain(
+      "--profile prof_work - Work subscription [auth: authenticated] [limits: hard_limit, captured 2026-07-13T09:30:00.000Z] [last-used]",
+    );
+    expect(human).toContain("Provider profiles for 'claude-code':");
+  });
+
+  it("marks only the effective last-used profile", () => {
+    const rows = formatAgentProviderProfilesResponse(PROFILES)
+      .split("\n")
+      .filter((line) => line.startsWith("--profile "));
+
+    expect(rows.filter((row) => row.includes("[last-used]"))).toEqual([
+      expect.stringContaining("--profile prof_work"),
+    ]);
+  });
+
+  it("reports a never-captured cached status as such rather than as a reading", () => {
+    const human = formatAgentProviderProfilesResponse(PROFILES);
+
+    expect(human).toContain(
+      "--profile prof_personal - Personal subscription [auth: unauthenticated] [limits: unknown, captured never]",
+    );
+    expect(human).not.toContain("1970-01-01");
+  });
+
+  it("says so when a provider exposes no profiles", () => {
+    const human = formatAgentProviderProfilesResponse({
+      providerId: "codex",
+      profiles: [],
+    });
+
+    expect(human).toContain("No provider profiles found for provider 'codex'.");
+  });
+
+  it("round-trips both concrete selections to their --profile value", () => {
+    expect(formatProfileSelection({ kind: "ambient" })).toBe("ambient");
+    expect(
+      formatProfileSelection({ kind: "profile", profileId: "prof_work" }),
+    ).toBe("prof_work");
+  });
+});
+
+describe("detailed rate-limit formatting", () => {
+  it("renders an available Claude Code read with the profile it was read for", () => {
+    const response: AgentGetProviderProfileRateLimitsResponse = {
+      rateLimits: {
+        provider: "claude-code",
+        available: true,
+        subscriptionType: "max",
+        fiveHour: {
+          usedPercent: 42,
+          resetsAt: CAPTURED_AT,
+          durationMinutes: 300,
+        },
+        sevenDay: { usedPercent: 12, resetsAt: null, durationMinutes: null },
+        sevenDayOpus: null,
+        sevenDaySonnet: null,
+        modelScoped: [],
+        extraUsage: null,
+      },
+      usageUpdatedAt: CAPTURED_AT,
+    };
+
+    const human = formatAgentProviderProfileRateLimitsResponse(
+      { kind: "profile", profileId: "prof_work" },
+      response,
+    );
+
+    expect(human).toContain(
+      "Rate limits for provider 'claude-code' [--profile prof_work], captured 2026-07-13T09:30:00.000Z:",
+    );
+    expect(human).toContain("plan: max");
+    expect(human).toContain(
+      "5-hour: 42% used, resets 2026-07-13T09:30:00.000Z, 300m window",
+    );
+    expect(human).toContain("7-day: 12% used");
+  });
+
+  it("reports an unreported window as unknown, never as 0% used", () => {
+    const response: AgentGetProviderProfileRateLimitsResponse = {
+      rateLimits: {
+        provider: "codex",
+        available: true,
+        planType: null,
+        limitId: null,
+        limitName: null,
+        primary: null,
+        secondary: null,
+        extraWindows: [],
+        credits: null,
+        individualLimit: null,
+        resetCredits: null,
+        rateLimitReachedType: null,
+      },
+      usageUpdatedAt: null,
+    };
+
+    const human = formatAgentProviderProfileRateLimitsResponse(
+      { kind: "ambient" },
+      response,
+    );
+
+    expect(human).toContain(
+      "Rate limits for provider 'codex' [--profile ambient], captured never:",
+    );
+    expect(human).toContain("primary: unknown");
+    expect(human).toContain("secondary: unknown");
+    expect(human).toContain("plan: unknown");
+    expect(human).not.toContain("0% used");
+  });
+
+  it("preserves known Grok billing dates for an unmeasured period", () => {
+    const response: AgentGetProviderProfileRateLimitsResponse = {
+      rateLimits: {
+        provider: "grok",
+        available: true,
+        subscriptionTier: "SuperGrok",
+        periodType: "USAGE_PERIOD_TYPE_WEEKLY",
+        periodStart: CAPTURED_AT,
+        periodEnd: Date.UTC(2026, 6, 20, 9, 30, 0),
+        period: null,
+        monthlyLimit: null,
+        onDemandCap: null,
+        onDemandUsed: null,
+        prepaidBalance: null,
+      },
+      usageUpdatedAt: CAPTURED_AT,
+    };
+
+    const human = formatAgentProviderProfileRateLimitsResponse(
+      { kind: "ambient" },
+      response,
+    );
+
+    expect(human).toContain("period (USAGE_PERIOD_TYPE_WEEKLY): unknown");
+    expect(human).toContain(
+      "billing period: 2026-07-13T09:30:00.000Z - 2026-07-20T09:30:00.000Z",
+    );
+  });
+
+  it("keeps Cursor's known spend when the included limit was not reported", () => {
+    // The money fields are independently nullable (proto3 omits zero-valued
+    // fields), so a payload can carry spend without a limit. A missing
+    // denominator must not hide the spend that IS known - the same spend-only
+    // fallback the Hugging Face arm uses.
+    const response: AgentGetProviderProfileRateLimitsResponse = {
+      rateLimits: {
+        provider: "cursor",
+        available: true,
+        cycleStart: CAPTURED_AT,
+        cycleEnd: Date.UTC(2026, 7, 12, 9, 30, 0),
+        cursorModels: null,
+        otherModels: null,
+        includedLimitUsd: null,
+        usedUsd: 325.37,
+        remainingUsd: null,
+        bonusUsedUsd: null,
+        onDemandLimitType: null,
+        onDemandLimitUsd: null,
+        onDemandUsedUsd: null,
+        onDemandRemainingUsd: null,
+        displayMessage: null,
+      },
+      usageUpdatedAt: CAPTURED_AT,
+    };
+
+    const human = formatAgentProviderProfileRateLimitsResponse(
+      { kind: "ambient" },
+      response,
+    );
+
+    expect(human).toContain("spend: 325.37 this cycle");
+    expect(human).not.toContain("included usage:");
+    expect(human).not.toContain("unknown remaining");
+  });
+
+  it("renders the unavailable arm with its reason instead of inventing limits", () => {
+    const response: AgentGetProviderProfileRateLimitsResponse = {
+      rateLimits: {
+        provider: "codex",
+        available: false,
+        reason: "cli_not_found",
+      },
+      usageUpdatedAt: null,
+    };
+
+    const human = formatAgentProviderProfileRateLimitsResponse(
+      { kind: "ambient" },
+      response,
+    );
+
+    expect(human).toContain("unavailable (cli_not_found)");
+    expect(human).not.toContain("% used");
+  });
+
+  it("renders Antigravity's plan line and one line per window, labelled by group and window kind", () => {
+    const response: AgentGetProviderProfileRateLimitsResponse = {
+      rateLimits: {
+        provider: "antigravity",
+        available: true,
+        planName: "Google AI Pro",
+        groups: [
+          {
+            displayName: "Gemini Models",
+            description: "Gemini 3 Pro and Gemini 3 Flash",
+            windows: [
+              {
+                usedPercent: 12,
+                resetsAt: CAPTURED_AT,
+                durationMinutes: 300,
+                bucketId: "gemini-5h",
+                windowKind: "5h",
+              },
+              {
+                usedPercent: 40,
+                resetsAt: CAPTURED_AT,
+                durationMinutes: 10_080,
+                bucketId: "gemini-weekly",
+                windowKind: "weekly",
+              },
+            ],
+          },
+          {
+            displayName: "Claude and GPT models",
+            description: null,
+            windows: [],
+          },
+        ],
+      },
+      usageUpdatedAt: CAPTURED_AT,
+    };
+
+    const human = formatAgentProviderProfileRateLimitsResponse(
+      { kind: "ambient" },
+      response,
+    );
+
+    expect(human).toContain("plan: Google AI Pro");
+    expect(human).toContain(
+      "Gemini Models 5h: 12% used, resets 2026-07-13T09:30:00.000Z, 300m window",
+    );
+    expect(human).toContain(
+      "Gemini Models weekly: 40% used, resets 2026-07-13T09:30:00.000Z, 10080m window",
+    );
+    // A group that reports no windows still gets a line, so it isn't
+    // silently dropped.
+    expect(human).toContain("Claude and GPT models: no limits reported");
+  });
+
+  it("falls back to the bucket id when a window's windowKind is null, and to 'unknown' for a missing plan", () => {
+    const response: AgentGetProviderProfileRateLimitsResponse = {
+      rateLimits: {
+        provider: "antigravity",
+        available: true,
+        planName: null,
+        groups: [
+          {
+            displayName: "Gemini Models",
+            description: null,
+            windows: [
+              {
+                usedPercent: 5,
+                resetsAt: null,
+                durationMinutes: null,
+                bucketId: "gemini-mystery",
+                windowKind: null,
+              },
+            ],
+          },
+        ],
+      },
+      usageUpdatedAt: null,
+    };
+
+    const human = formatAgentProviderProfileRateLimitsResponse(
+      { kind: "ambient" },
+      response,
+    );
+
+    expect(human).toContain("plan: unknown");
+    expect(human).toContain("Gemini Models gemini-mystery: 5% used");
+  });
+
+  it("renders OpenCode Go windows with each upstream status", () => {
+    const response: AgentGetProviderProfileRateLimitsResponse = {
+      rateLimits: {
+        provider: "opencode",
+        available: true,
+        credentialGeneration: "gen-1",
+        fiveHour: {
+          status: "ok",
+          usedPercent: 12,
+          resetsAt: CAPTURED_AT,
+          durationMinutes: 300,
+        },
+        weekly: {
+          status: "rate-limited",
+          usedPercent: 8,
+          resetsAt: CAPTURED_AT,
+          durationMinutes: 10_080,
+        },
+        monthly: {
+          status: "ok",
+          usedPercent: 4,
+          resetsAt: null,
+          durationMinutes: null,
+        },
+      },
+      usageUpdatedAt: CAPTURED_AT,
+    };
+
+    const human = formatAgentProviderProfileRateLimitsResponse(
+      { kind: "ambient" },
+      response,
+    );
+
+    expect(human).toContain(
+      "5-hour: 12% used, resets 2026-07-13T09:30:00.000Z, 300m window [ok]",
+    );
+    expect(human).toContain(
+      "weekly: 8% used, resets 2026-07-13T09:30:00.000Z, 10080m window [rate-limited]",
+    );
+    expect(human).toContain("monthly: 4% used [ok]");
+  });
+
+  it("renders one line per Kimi window the backend served, in 5-hour, weekly, monthly order", () => {
+    const response: AgentGetProviderProfileRateLimitsResponse = {
+      rateLimits: {
+        provider: "kimi",
+        available: true,
+        fiveHour: {
+          usedPercent: 12,
+          resetsAt: CAPTURED_AT,
+          durationMinutes: 300,
+        },
+        weekly: {
+          usedPercent: 40,
+          resetsAt: CAPTURED_AT,
+          durationMinutes: 10_080,
+        },
+        monthly: { usedPercent: 4, resetsAt: null, durationMinutes: null },
+      },
+      usageUpdatedAt: CAPTURED_AT,
+    };
+
+    expect(
+      formatAgentProviderProfileRateLimitsResponse(
+        { kind: "ambient" },
+        response,
+      ),
+    ).toBe(
+      [
+        "Rate limits for provider 'kimi' [--profile ambient], captured 2026-07-13T09:30:00.000Z:",
+        "5-hour: 12% used, resets 2026-07-13T09:30:00.000Z, 300m window",
+        "weekly: 40% used, resets 2026-07-13T09:30:00.000Z, 10080m window",
+        "monthly: 4% used",
+      ].join("\n"),
+    );
+  });
+
+  it("leaves a Kimi window the plan does not carry out instead of printing it as unknown", () => {
+    const response: AgentGetProviderProfileRateLimitsResponse = {
+      rateLimits: {
+        provider: "kimi",
+        available: true,
+        fiveHour: null,
+        weekly: { usedPercent: 40, resetsAt: null, durationMinutes: null },
+        monthly: null,
+      },
+      usageUpdatedAt: CAPTURED_AT,
+    };
+
+    const human = formatAgentProviderProfileRateLimitsResponse(
+      { kind: "ambient" },
+      response,
+    );
+
+    expect(human).toBe(
+      [
+        "Rate limits for provider 'kimi' [--profile ambient], captured 2026-07-13T09:30:00.000Z:",
+        "weekly: 40% used",
+      ].join("\n"),
+    );
+  });
+
+  it("says no limits were reported for a Kimi snapshot with no windows", () => {
+    const response: AgentGetProviderProfileRateLimitsResponse = {
+      rateLimits: {
+        provider: "kimi",
+        available: true,
+        fiveHour: null,
+        weekly: null,
+        monthly: null,
+      },
+      usageUpdatedAt: CAPTURED_AT,
+    };
+
+    expect(
+      formatAgentProviderProfileRateLimitsResponse(
+        { kind: "ambient" },
+        response,
+      ),
+    ).toBe(
+      [
+        "Rate limits for provider 'kimi' [--profile ambient], captured 2026-07-13T09:30:00.000Z:",
+        "no limits reported",
+      ].join("\n"),
+    );
+  });
+});
+
+describe("configure formatting", () => {
+  const settings: AgentConfigureSettings = {
+    harnessId: "codex",
+    model: "gpt-5.6-codex",
+    profileSelection: { kind: "profile", profileId: "prof_work" },
+    reasoningEffort: "high",
+    fastMode: false,
+    permissionMode: "supervised",
+    agentMode: "regular",
+  };
+
+  it("renders the committed tuple with a reusable --profile value", () => {
+    const human = formatAgentConfigureResponse("agent_1", {
+      settings,
+      warnings: [],
+    });
+
+    expect(human).toContain("Agent agent_1 configured for future turns:");
+    expect(human).toContain("harness: codex");
+    expect(human).toContain("model: gpt-5.6-codex");
+    expect(human).toContain("profile: --profile prof_work");
+    expect(human).toContain("reasoningEffort: high");
+    expect(human).toContain("fastMode: off");
+    expect(human).not.toContain("Warnings:");
+  });
+
+  it("lists the warnings a normalized setting produced", () => {
+    const human = formatAgentConfigureResponse("agent_1", {
+      settings: {
+        ...settings,
+        fastMode: false,
+        profileSelection: { kind: "ambient" },
+      },
+      warnings: ["Fast mode is not available for 'gpt-5.6-codex'."],
+    });
+
+    expect(human).toContain("profile: --profile ambient");
+    expect(human).toContain(
+      "Warnings:\n- Fast mode is not available for 'gpt-5.6-codex'.",
+    );
+  });
+});

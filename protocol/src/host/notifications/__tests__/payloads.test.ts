@@ -1,0 +1,524 @@
+import { describe, expect, it } from "vitest";
+import {
+  deriveHostNotificationStoppedReason,
+  HOST_NOTIFICATION_STOPPED_REASONS,
+  HOST_OPERATION_MANAGED_COMMAND_DELIVERY,
+  isBotConversationAttention,
+  parseKnownHostNotificationPayload,
+  parseKnownHostNotificationPayloadForKind,
+} from "@traycer/protocol/host/notifications/payloads";
+
+const MANAGED_COMMAND_DELIVERY_PARKED = {
+  kind: "managed_command_delivery_parked",
+  operation: HOST_OPERATION_MANAGED_COMMAND_DELIVERY,
+  title: "Command output is waiting",
+  message: "A managed command finished but the chat couldn't receive it.",
+  commandId: "2f1d0a2c-0000-4000-8000-000000000002",
+  epicId: "epic-1",
+  chatId: "chat-1",
+};
+
+const CHAT_STOPPED = {
+  kind: "chat",
+  epicId: "epic-1",
+  chatId: "chat-1",
+  agentName: "Deploy checkout fix",
+  taskTitle: "Checkout notifications",
+  outcome: "completed",
+};
+
+const APPROVAL = {
+  kind: "approval",
+  epicId: "epic-1",
+  chatId: "chat-1",
+  chatTitle: "Deploy checkout fix",
+  taskTitle: "Checkout notifications",
+  approvalId: "approval-1",
+};
+
+describe("parseKnownHostNotificationPayload", () => {
+  it("parses every known payload kind", () => {
+    expect(parseKnownHostNotificationPayload(CHAT_STOPPED)).toMatchObject({
+      kind: "chat",
+      agentName: "Deploy checkout fix",
+    });
+    expect(
+      parseKnownHostNotificationPayload({
+        kind: "epic",
+        epicId: "epic-1",
+        tuiAgentId: "tui-1",
+        agentName: "Terminal agent",
+        taskTitle: "Checkout notifications",
+        outcome: "errored",
+        code: "RATE_LIMIT",
+        message: "rate limited",
+      }),
+    ).toMatchObject({ kind: "epic", tuiAgentId: "tui-1" });
+    expect(
+      parseKnownHostNotificationPayload({
+        kind: "agent_stalled",
+        epicId: "epic-1",
+        chatId: "chat-1",
+        agentId: "chat-1",
+        agentName: "Deploy checkout fix",
+        taskTitle: "Checkout notifications",
+        reason: "provider_buffering",
+        title: "Provider is buffering",
+        outcome: "errored",
+      }),
+    ).toMatchObject({ kind: "agent_stalled", reason: "provider_buffering" });
+    expect(
+      parseKnownHostNotificationPayload({
+        kind: "workspace_operation_failed",
+        epicId: "epic-1",
+        chatId: "chat-1",
+        chatTitle: "Deploy checkout fix",
+        taskTitle: "Checkout notifications",
+        operation: "setup",
+        title: "Workspace setup failed",
+        message: "Setup exited with code 1.",
+        setupExitCode: 1,
+        outcome: "errored",
+      }),
+    ).toMatchObject({
+      kind: "workspace_operation_failed",
+      operation: "setup",
+      setupExitCode: 1,
+    });
+    expect(parseKnownHostNotificationPayload(APPROVAL)).toMatchObject({
+      kind: "approval",
+      approvalId: "approval-1",
+    });
+    expect(
+      parseKnownHostNotificationPayload({
+        kind: "interview",
+        epicId: "epic-1",
+        chatId: "chat-1",
+        chatTitle: "Deploy checkout fix",
+        taskTitle: "Checkout notifications",
+        interviewBlockId: "block-1",
+      }),
+    ).toMatchObject({ kind: "interview", interviewBlockId: "block-1" });
+  });
+
+  // Forward compatibility: a payload written by a NEWER producer with extra
+  // fields must still parse, and the extras must survive the round trip so
+  // an enrichment pass cannot strip data a newer reader relies on.
+  it("keeps unknown extra fields through parse", () => {
+    const parsed = parseKnownHostNotificationPayload({
+      ...CHAT_STOPPED,
+      futureField: "future-value",
+    });
+    expect(parsed).not.toBeNull();
+    if (parsed === null) return;
+    expect(parsed).toMatchObject({ futureField: "future-value" });
+  });
+
+  it("accepts additive stopped reason and provider attribution fields", () => {
+    expect(
+      parseKnownHostNotificationPayload({
+        ...CHAT_STOPPED,
+        outcome: "errored",
+        code: "auth",
+        reason: "auth",
+        providerId: "claude-code",
+      }),
+    ).toMatchObject({
+      kind: "chat",
+      code: "auth",
+      reason: "auth",
+      providerId: "claude-code",
+    });
+  });
+
+  it("keeps a future provider id without invalidating the known payload", () => {
+    expect(
+      parseKnownHostNotificationPayload({
+        ...CHAT_STOPPED,
+        providerId: "future-provider",
+      }),
+    ).toMatchObject({
+      kind: "chat",
+      providerId: "future-provider",
+    });
+  });
+
+  it("retains the literal-true unverified marker on a chat payload", () => {
+    expect(
+      parseKnownHostNotificationPayload({ ...CHAT_STOPPED, unverified: true }),
+    ).toMatchObject({ kind: "chat", unverified: true });
+  });
+
+  it("accepts a chat payload without the unverified marker", () => {
+    const parsed = parseKnownHostNotificationPayload(CHAT_STOPPED);
+    expect(parsed).toMatchObject({ kind: "chat" });
+    expect(parsed).not.toHaveProperty("unverified");
+  });
+
+  it.each([
+    ["false", false],
+    ["a string", "true"],
+    ["a number", 1],
+    ["null", null],
+    ["an object", { value: true }],
+    ["an array", [true]],
+  ])("rejects an unverified marker that is %s", (_label, unverified) => {
+    expect(
+      parseKnownHostNotificationPayload({ ...CHAT_STOPPED, unverified }),
+    ).toBeNull();
+  });
+
+  // A malformed row with empty identifiers must degrade rather than mint an
+  // unusable deep-link.
+  it("rejects empty identifier fields", () => {
+    expect(
+      parseKnownHostNotificationPayload({ ...CHAT_STOPPED, epicId: "" }),
+    ).toBeNull();
+    expect(
+      parseKnownHostNotificationPayload({ ...APPROVAL, approvalId: "" }),
+    ).toBeNull();
+    expect(
+      parseKnownHostNotificationPayload({ ...APPROVAL, chatId: "" }),
+    ).toBeNull();
+  });
+
+  // Degradation contract: unknown discriminators, wrong field types, and
+  // non-object payloads all produce null (generic rendering), never a throw.
+  it("returns null for unknown kinds, wrong types, and non-objects", () => {
+    expect(
+      parseKnownHostNotificationPayload({
+        kind: "future_shape",
+        epicId: "epic-1",
+      }),
+    ).toBeNull();
+    expect(
+      parseKnownHostNotificationPayload({ ...CHAT_STOPPED, agentName: 42 }),
+    ).toBeNull();
+    expect(
+      parseKnownHostNotificationPayload({ ...APPROVAL, approvalId: null }),
+    ).toBeNull();
+    expect(parseKnownHostNotificationPayload("not a record")).toBeNull();
+    expect(parseKnownHostNotificationPayload(null)).toBeNull();
+    expect(parseKnownHostNotificationPayload(undefined)).toBeNull();
+    expect(parseKnownHostNotificationPayload([CHAT_STOPPED])).toBeNull();
+  });
+});
+
+describe("deriveHostNotificationStoppedReason", () => {
+  it.each([
+    ["auth", "auth"],
+    ["rate_limit", "rate_limit"],
+    ["RATE_LIMIT", "rate_limit"],
+    ["usage_limit_exceeded", "rate_limit"],
+    ["billing_error", "billing"],
+    ["model_not_found", "model_unavailable"],
+    ["overloaded", "provider_unavailable"],
+    ["server_error", "provider_unavailable"],
+    ["CLAUDE_CODE_TRANSPORT", "provider_connection_failed"],
+    ["connection_failed", "provider_connection_failed"],
+    ["CONNECTION_FAILED", "provider_connection_failed"],
+    ["context_window_exceeded", "context_exhausted"],
+    ["CONTEXT_WINDOW_EXCEEDED", "context_exhausted"],
+    ["invalid_request", "request_rejected"],
+    ["INVALID_REQUEST", "request_rejected"],
+    ["TURN_START_TIMEOUT", "turn_start_timeout"],
+    ["MISSING_TERMINAL_EVENT", "missing_terminal_event"],
+    ["background_work_died", "background_work_failed"],
+  ])("normalizes %s to %s", (code, reason) => {
+    expect(deriveHostNotificationStoppedReason(code)).toBe(reason);
+  });
+
+  // `policy_refusal` is stamped as a code for the chat error badge and the A2A
+  // errored detail, but deliberately carries NO taxonomy row: the meaningful
+  // part is the raw refusal prose, which never belongs in durable copy.
+  it.each([
+    null,
+    "MISSING_API_KEY",
+    "policy_refusal",
+    "refusal",
+    "RUNTIME_THROWN",
+    "TURN_FINALIZATION_FAILED",
+    "future_error",
+  ])("keeps unsafe or unknown code %s generic", (code) => {
+    expect(deriveHostNotificationStoppedReason(code)).toBeNull();
+  });
+
+  // Its own case rather than a row in the normalization list above, because
+  // what is being pinned is which of FOUR answers this code gets, and three of
+  // them are wrong in a way the list cannot express.
+  //
+  // Codex emits it with "Start a new session or compact the conversation": a
+  // session-local stop, on an account that is fine.
+  //
+  //   - NOT `rate_limit`, which it was: that made it fallback-eligible for
+  //     `profile`, `tier` and `wait` (`REASON_ELIGIBLE_RUNGS`), so the engine
+  //     could relaunch the turn on a different account that was never the
+  //     problem and attach that account's reset as this failure's `resetsAt`.
+  //   - NOT `context_exhausted`: "budget" is ambiguous between spend and
+  //     context and we have not established which Codex means, which is why the
+  //     reason it does get claims neither.
+  //   - NOT `null`, which was the stopgap: no derived reason means no typed
+  //     failure, no failed-attempt envelope, and therefore no manual `retry` on
+  //     the error card - and a fresh session is precisely what `retry` does.
+  //
+  // What keeps the engine out of it is `EXCLUDED_FALLBACK_REASONS`, asserted in
+  // `fallback-reason-matrix.test.ts`, not the absence of a reason here.
+  it("classifies a Codex session-budget stop as its own session_budget reason", () => {
+    expect(deriveHostNotificationStoppedReason("session_budget_exceeded")).toBe(
+      "session_budget",
+    );
+    expect(deriveHostNotificationStoppedReason("SESSION_BUDGET_EXCEEDED")).toBe(
+      "session_budget",
+    );
+  });
+
+  // The negative half of the same decision, and the one a rename would break
+  // silently: the reason must not be either neighbour it was nearly given.
+  it("keeps the session-budget reason distinct from rate_limit and context_exhausted", () => {
+    const reason = deriveHostNotificationStoppedReason(
+      "session_budget_exceeded",
+    );
+    expect(reason).not.toBe("rate_limit");
+    expect(reason).not.toBe("context_exhausted");
+    expect(HOST_NOTIFICATION_STOPPED_REASONS).toContain("session_budget");
+  });
+});
+
+describe("parseKnownHostNotificationPayloadForKind", () => {
+  it("accepts only the payload arms belonging to the notification kind", () => {
+    expect(
+      parseKnownHostNotificationPayloadForKind("agent.stopped", CHAT_STOPPED),
+    ).toMatchObject({ kind: "chat" });
+    expect(
+      parseKnownHostNotificationPayloadForKind("agent.stopped", {
+        kind: "epic",
+        epicId: "epic-1",
+        tuiAgentId: "tui-1",
+        agentName: "Terminal agent",
+        taskTitle: "Checkout notifications",
+        outcome: "completed",
+      }),
+    ).toMatchObject({ kind: "epic" });
+    expect(
+      parseKnownHostNotificationPayloadForKind("approval.requested", APPROVAL),
+    ).toMatchObject({ kind: "approval" });
+    expect(
+      parseKnownHostNotificationPayloadForKind("workspace.operation.failed", {
+        kind: "workspace_operation_failed",
+        epicId: "epic-1",
+        chatId: "chat-1",
+        chatTitle: "Deploy checkout fix",
+        taskTitle: "Checkout notifications",
+        operation: "provision",
+        title: "Worktree creation failed",
+        message: "Couldn't create worktree.",
+        outcome: "errored",
+      }),
+    ).toMatchObject({
+      kind: "workspace_operation_failed",
+      operation: "provision",
+    });
+    expect(
+      parseKnownHostNotificationPayloadForKind(
+        "host.operation.finished",
+        MANAGED_COMMAND_DELIVERY_PARKED,
+      ),
+    ).toMatchObject({
+      kind: "managed_command_delivery_parked",
+      epicId: "epic-1",
+      chatId: "chat-1",
+    });
+  });
+
+  // Forward compatibility: an extra field a newer producer stamped on the
+  // row (here, a failure detail) must survive the catchall rather than be
+  // stripped or rejected.
+  it("keeps a catchall extra field on the parked-delivery arm", () => {
+    expect(
+      parseKnownHostNotificationPayloadForKind("host.operation.finished", {
+        ...MANAGED_COMMAND_DELIVERY_PARKED,
+        failure: "queue_paused",
+      }),
+    ).toMatchObject({
+      kind: "managed_command_delivery_parked",
+      failure: "queue_paused",
+    });
+  });
+
+  // Cross-kind corruption: a valid payload shape under the WRONG notification
+  // kind is malformed row data and must take the generic/null path instead of
+  // minting contradictory presentation, navigation, or webhook output.
+  it("rejects a valid payload shape under a mismatched notification kind", () => {
+    expect(
+      parseKnownHostNotificationPayloadForKind(
+        "approval.requested",
+        CHAT_STOPPED,
+      ),
+    ).toBeNull();
+    expect(
+      parseKnownHostNotificationPayloadForKind("agent.stopped", APPROVAL),
+    ).toBeNull();
+    expect(
+      parseKnownHostNotificationPayloadForKind("agent.stalled", CHAT_STOPPED),
+    ).toBeNull();
+    expect(
+      parseKnownHostNotificationPayloadForKind("interview.requested", APPROVAL),
+    ).toBeNull();
+    expect(
+      parseKnownHostNotificationPayloadForKind(
+        "workspace.operation.failed",
+        APPROVAL,
+      ),
+    ).toBeNull();
+    expect(
+      parseKnownHostNotificationPayloadForKind(
+        "agent.stopped",
+        MANAGED_COMMAND_DELIVERY_PARKED,
+      ),
+    ).toBeNull();
+  });
+
+  // A legacy row minted before epicId/chatId existed on this arm must
+  // degrade rather than parse into a payload the deep-link mapper cannot
+  // route from.
+  it("rejects a legacy parked-delivery row missing epicId/chatId", () => {
+    const legacy = {
+      kind: MANAGED_COMMAND_DELIVERY_PARKED.kind,
+      operation: MANAGED_COMMAND_DELIVERY_PARKED.operation,
+      title: MANAGED_COMMAND_DELIVERY_PARKED.title,
+      message: MANAGED_COMMAND_DELIVERY_PARKED.message,
+      commandId: MANAGED_COMMAND_DELIVERY_PARKED.commandId,
+    };
+    expect(
+      parseKnownHostNotificationPayloadForKind(
+        "host.operation.finished",
+        legacy,
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("a bot's row under host.operation.finished", () => {
+  const FINISHED = "host.operation.finished";
+  const VERDICT = {
+    kind: "bot_thread_verdict",
+    operation: "bot.thread.verdict",
+    title: "Tracy answered",
+    message: "Your question about the release",
+    botId: "bot-1",
+    threadId: "thread-1",
+    replyMessageId: "reply-1",
+  };
+  const CONVERSATION = {
+    kind: "bot_conversation",
+    event: "bot.reply",
+    operation: "bot.reply",
+    title: "Tracy",
+    message: "Something in the thread",
+    botId: "bot-1",
+    conversationId: "conversation-1",
+    threadId: null,
+    messageId: "message-1",
+    authorUserId: null,
+    mention: false,
+    botTitle: "Tracy",
+  };
+
+  it("parses a thread verdict", () => {
+    expect(
+      parseKnownHostNotificationPayloadForKind(FINISHED, VERDICT),
+    ).toMatchObject({
+      kind: "bot_thread_verdict",
+      botId: "bot-1",
+      threadId: "thread-1",
+      replyMessageId: "reply-1",
+    });
+  });
+
+  it("parses a conversation row, keeping a field a newer producer added", () => {
+    expect(
+      parseKnownHostNotificationPayloadForKind(FINISHED, CONVERSATION),
+    ).toMatchObject({
+      kind: "bot_conversation",
+      conversationId: "conversation-1",
+      threadId: null,
+      botTitle: "Tracy",
+    });
+  });
+
+  it("rejects each under another notification kind", () => {
+    expect(
+      parseKnownHostNotificationPayloadForKind("agent.stopped", VERDICT),
+    ).toBeNull();
+    expect(
+      parseKnownHostNotificationPayloadForKind("agent.stopped", CONVERSATION),
+    ).toBeNull();
+  });
+
+  it("leaves an unrelated finished operation with an unknown payload unparsed", () => {
+    expect(
+      parseKnownHostNotificationPayloadForKind(FINISHED, {
+        kind: "test_box",
+        operation: "testbox.provision",
+        title: "Test box ready",
+        message: "Provisioned 1 test box.",
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("isBotConversationAttention", () => {
+  const FINISHED = "host.operation.finished";
+
+  function conversation(operation: string, mention: boolean): unknown {
+    return { kind: "bot_conversation", operation, mention };
+  }
+
+  it("is true for a reply in a bot's thread, mention or not", () => {
+    expect(
+      isBotConversationAttention({
+        kind: FINISHED,
+        payload: conversation("bot.reply", false),
+      }),
+    ).toBe(true);
+  });
+
+  it("is true for a row that mentions the person", () => {
+    expect(
+      isBotConversationAttention({
+        kind: FINISHED,
+        payload: conversation("bot.post", true),
+      }),
+    ).toBe(true);
+  });
+
+  it("is false for a post that mentions no one", () => {
+    expect(
+      isBotConversationAttention({
+        kind: FINISHED,
+        payload: conversation("bot.post", false),
+      }),
+    ).toBe(false);
+  });
+
+  it("is false for another payload kind that carries a mention, another entry kind, or no payload", () => {
+    expect(
+      isBotConversationAttention({
+        kind: FINISHED,
+        payload: { kind: "bot_thread_verdict", operation: "x", mention: true },
+      }),
+    ).toBe(false);
+    expect(
+      isBotConversationAttention({
+        kind: "chat.stopped",
+        payload: conversation("bot.reply", true),
+      }),
+    ).toBe(false);
+    expect(isBotConversationAttention({ kind: FINISHED, payload: null })).toBe(
+      false,
+    );
+    expect(
+      isBotConversationAttention({ kind: FINISHED, payload: "bot.reply" }),
+    ).toBe(false);
+  });
+});

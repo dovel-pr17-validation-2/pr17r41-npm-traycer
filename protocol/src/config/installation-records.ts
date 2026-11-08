@@ -1,0 +1,304 @@
+import { z } from "zod";
+import { lazySchema } from "@traycer/protocol/framework/lazy-schema";
+
+/**
+ * The browser-safe half of the shared installation contracts: the record
+ * schemas themselves, with no filesystem, path or os imports.
+ *
+ * Split out because `@traycer/protocol/host/maintenance` puts these records on
+ * the WIRE, and the RPC registry that references them is imported by the
+ * renderer. While the schemas lived beside the readers, every renderer build
+ * externalized `node:fs/promises`, `node:os` and `node:path` for browser
+ * compatibility - harmless only for as long as nobody called a reader from the
+ * renderer, where those stubs throw. The readers stay Node-only in
+ * `./installation`, which re-exports everything here, so existing importers
+ * are unaffected.
+ */
+
+export const hostInstallPlatformSchema = lazySchema(() =>
+  z.enum(["darwin", "win32", "linux"]),
+);
+export type HostInstallPlatform = z.infer<typeof hostInstallPlatformSchema>;
+
+export const hostInstallArchSchema = lazySchema(() => z.enum(["arm64", "x64"]));
+export type HostInstallArch = z.infer<typeof hostInstallArchSchema>;
+
+export const hostInstallSourceKindSchema = lazySchema(() =>
+  z.enum(["registry", "local-file"]),
+);
+export type HostInstallSourceKind = z.infer<typeof hostInstallSourceKindSchema>;
+
+export const hostInstallSourceSchema = lazySchema(() =>
+  z.object({
+    kind: hostInstallSourceKindSchema,
+    value: z.string(),
+  }),
+);
+export type HostInstallSource = z.infer<typeof hostInstallSourceSchema>;
+
+// Historical install records deliberately normalized a corrupt/mis-typed
+// optional identity to null. Keep that reader compatibility: an older record
+// must not make an otherwise usable installed host invisible.
+const tolerantNullableStringSchema = lazySchema(() =>
+  z.preprocess(
+    (value) => (typeof value === "string" || value === null ? value : null),
+    z.string().nullable(),
+  ),
+);
+
+// `executableSha256` was added after the original install/stage records had
+// shipped.  Keep older records readable for their existing lifecycle paths,
+// but normalize a missing or malformed attestation to `null` so recovery can
+// deliberately refuse to treat it as proof of placed bytes.
+//
+// No `.optional()` on the inner schema: the preprocess step always hands it a
+// matching string or `null`, so `undefined` could never reach it — an
+// optional arm would only widen the inferred record types with an
+// `undefined` no reader or writer produces.
+const SHA256_HEX = /^[a-f0-9]{64}$/;
+const tolerantOptionalSha256Schema = lazySchema(() =>
+  z.preprocess(
+    (value) =>
+      typeof value === "string" && SHA256_HEX.test(value) ? value : null,
+    z.string().regex(SHA256_HEX).nullable(),
+  ),
+);
+
+/** The installed host record. Missing legacy `installId`/`runtimeVersion` read as null. */
+export const hostInstallRecordSchema = lazySchema(() =>
+  z.object({
+    installId: tolerantNullableStringSchema,
+    version: z.string(),
+    runtimeVersion: tolerantNullableStringSchema,
+    platform: hostInstallPlatformSchema,
+    arch: hostInstallArchSchema,
+    installedAt: z.string(),
+    source: hostInstallSourceSchema,
+    archiveSha256: z.string().nullable(),
+    signatureVerifiedAt: z.string(),
+    signatureKeyId: z.string(),
+    sizeBytes: z.number().finite(),
+    executablePath: z.string(),
+    // Attests the extracted executable, not the source archive. New writers
+    // always populate it; a null legacy value is intentionally insufficient
+    // for crash recovery to conclude that a target generation is installed.
+    executableSha256: tolerantOptionalSha256Schema,
+  }),
+);
+export type HostInstallRecord = z.infer<typeof hostInstallRecordSchema>;
+
+export const HOST_STAGED_RECORD_SCHEMA_VERSION = 1;
+
+const SEMVER_PATTERN =
+  /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+/** Mirrors the CLI's registry-version acceptance, including leading-zero rules. */
+export function isValidHostStagedVersion(value: string): boolean {
+  if (!SEMVER_PATTERN.test(value)) return false;
+  const withoutBuild = value.split("+")[0];
+  const dashIndex = withoutBuild.indexOf("-");
+  const core = (
+    dashIndex === -1 ? withoutBuild : withoutBuild.slice(0, dashIndex)
+  ).split(".");
+  if (
+    core.length !== 3 ||
+    core.some((part) => part !== "0" && part.startsWith("0"))
+  ) {
+    return false;
+  }
+  const pre =
+    dashIndex === -1 ? [] : withoutBuild.slice(dashIndex + 1).split(".");
+  return !pre.some(
+    (part) => /^\d+$/.test(part) && part !== "0" && part.startsWith("0"),
+  );
+}
+
+// The pre-transform object, split out so the frozen `@1.0` WIRE projection can
+// `.omit()` a field from it. `.omit()` does not exist on the transformed schema
+// (a `ZodEffects`), and reconstructing the field list by hand would be a second
+// copy of this record free to drift from the first.
+const hostStagedRecordObjectSchema = lazySchema(() =>
+  z.object({
+    schemaVersion: z.literal(HOST_STAGED_RECORD_SCHEMA_VERSION),
+    // Absent is the pre-fingerprint legacy form; explicit null is corrupt.
+    stageId: z.string().min(1).optional(),
+    version: z
+      .string()
+      .refine(isValidHostStagedVersion, "must be valid SemVer"),
+    runtimeVersion: z.string().nullable(),
+    archiveSha256: z.string().nullable(),
+    sizeBytes: z.number().finite(),
+    source: hostInstallSourceSchema,
+    signatureKeyId: z.string(),
+    signatureVerifiedAt: z.string(),
+    executablePath: z.string().min(1),
+    platform: hostInstallPlatformSchema,
+    arch: hostInstallArchSchema,
+    // Mirrors the install-side attestation. A stage without it can still be
+    // cleaned/replaced by legacy reconciliation but is never recovery proof.
+    executableSha256: tolerantOptionalSha256Schema,
+  }),
+);
+
+/** A verified staged host tree, ready for the CLI to apply. */
+export const hostStagedRecordSchema = lazySchema(() =>
+  hostStagedRecordObjectSchema.transform((record) => ({
+    ...record,
+    stageId: record.stageId ?? null,
+  })),
+);
+export type HostStagedRecord = z.infer<typeof hostStagedRecordSchema>;
+
+// ---- Frozen `@1.0` WIRE projections -----------------------------------------
+//
+// `host.getInstallationInfo@1.0` shipped in v1.2.0 BEFORE `executableSha256`
+// existed, so the released line's payload never carries that key. These two
+// schemas are that released shape, and they exist so the `@1.0` slot can be
+// served from its own contract rather than by filtering the richer record after
+// the fact.
+//
+// Why omission is the whole mechanism: the dispatcher parses a resolver's
+// canonical result against the CALLER's schema and ships the parsed value, and
+// a non-strict `z.object` DROPS keys it does not declare. So a `@1.0` peer
+// structurally cannot receive `executableSha256` — the guarantee comes from the
+// negotiated contract, not from a post-hoc filter someone must remember to
+// apply. Same mechanism the `host.update.install@1.0` gate already relies on.
+//
+// These are WIRE-only. The on-disk readers keep `executableSha256`: T3's
+// crash-recovery attestation depends on it, and narrowing persistence to match
+// an old wire version would delete the field's actual purpose.
+
+/** `installRecord` exactly as the released `@1.0` line carries it. */
+export const hostInstallRecordWireV10Schema = lazySchema(() =>
+  hostInstallRecordSchema.omit({
+    executableSha256: true,
+  }),
+);
+export type HostInstallRecordWireV10 = z.infer<
+  typeof hostInstallRecordWireV10Schema
+>;
+
+/** `stagedRecord` exactly as the released `@1.0` line carries it. */
+export const hostStagedRecordWireV10Schema = lazySchema(() =>
+  hostStagedRecordObjectSchema
+    .omit({ executableSha256: true })
+    .transform((record) => ({ ...record, stageId: record.stageId ?? null })),
+);
+export type HostStagedRecordWireV10 = z.infer<
+  typeof hostStagedRecordWireV10Schema
+>;
+
+/**
+ * The CLI-owned "held host version" record: names a host version the user
+ * DELIBERATELY installed - a downgrade below what was already installed - and
+ * that no IMPLICIT path may move off as a matter of client PREFERENCE: the
+ * background liveness converge, the Desktop's launch-time staged-apply, and a
+ * Doctor "converge-ready" repair all honour it. Curation is the one exception:
+ * a held host the registry has since YANKED is not viable, so the launch-time
+ * apply (and `host apply --respect-hold`) applies the eligible stage over it,
+ * failing open to "not yanked" when the registry cannot be read.
+ *
+ * BOUND TO A SPECIFIC INSTALL INSTANCE by `installId` (the per-install UUID
+ * minted at every commit), not to the version alone. The consulting gate fires
+ * only while `held.installId === installedRecord.installId` and the installed
+ * host is still viable, so a LATER install
+ * of the same version - whether an implicit yanked-pin replacement or an
+ * explicit re-install - has a fresh `installId` and can never inherit a stale
+ * hold. This is what makes "set at a committed downgrade, never cleared on a
+ * forward move" safe: a forward move installs a new instance whose id no longer
+ * matches, and a re-downgrade writes a new record for its own instance.
+ *
+ * The CLI is the sole writer; every reader treats a missing OR malformed record
+ * as "nothing held", so the hold always fails safe toward the normal update
+ * path rather than wedging a converge.
+ */
+export const hostHeldVersionRecordSchema = lazySchema(() =>
+  z.object({
+    version: z.string().min(1),
+    installId: z.string().min(1),
+  }),
+);
+export type HostHeldVersionRecord = z.infer<typeof hostHeldVersionRecordSchema>;
+
+export const cliInstallSourceSchema = lazySchema(() =>
+  z.enum([
+    "desktop",
+    "homebrew",
+    "npm",
+    "winget",
+    "scoop",
+    "apt",
+    "rpm",
+    "manual",
+  ]),
+);
+export type CliInstallSource = z.infer<typeof cliInstallSourceSchema>;
+
+// THE WIRE SHAPE, and it is frozen. This schema is the `cliManifest` of
+// `host.getInstallationInfo`, a released host->client slot at @1.0 and @1.1,
+// so a property added here diverges from every released peer at an
+// already-released version - a default does not save it, because a released
+// peer's payload simply never carries the key. Growth that only a local
+// reader needs belongs on the on-disk schema below, never here.
+export const cliPendingUpgradeSchema = lazySchema(() =>
+  z.object({
+    version: z.string(),
+    stagedBinaryPath: z.string(),
+    stagedAt: z.string(),
+    reason: z.enum(["binary-locked", "awaiting-service-restart"]),
+  }),
+);
+export type CliPendingUpgrade = z.infer<typeof cliPendingUpgradeSchema>;
+
+// THE ON-DISK SHAPE. Same file, read only by the process that owns it, so it
+// may carry fields the wire does not. `readStoredCliInstallManifestAtPath`
+// uses this one; the wire response keeps the frozen schema above and zod
+// drops the extra key on its way out, which is the downgrade bridge the
+// compatibility gate asks for rather than a new major of a released method.
+//
+// `allowDowngrade`: whether the person asked for THIS version by name with
+// `--allow-downgrade`. It has to be persisted because the publish happens in
+// a later process - staging defers the swap when the live binary is locked,
+// and by the time `host restart` publishes it, the only thing left of the
+// request is this file. Without the bit, a consented downgrade and a
+// pre-floor accidental one (an older `cli upgrade` that staged the feed's
+// stable over an installed prerelease) are the same two versions in the same
+// two fields, and no publisher can honour one while refusing the other.
+//
+// Defaulted rather than required, which covers both writers that omit it: an
+// older CLI that predates the field, and desktop's reconcile, which stages
+// only when its bundled build is NEWER and so has no downgrade to consent
+// to. FALSE is the safe direction - an unconsented backwards publish is the
+// defect, and a consented one the person can always ask for again.
+export const cliPendingUpgradeOnDiskSchema = lazySchema(() =>
+  cliPendingUpgradeSchema.extend({
+    allowDowngrade: z.boolean().default(false),
+  }),
+);
+export type CliPendingUpgradeOnDisk = z.infer<
+  typeof cliPendingUpgradeOnDiskSchema
+>;
+
+/** The persisted per-slot CLI manifest; package-manager fallbacks stay CLI-owned. */
+export const storedCliInstallManifestSchema = lazySchema(() =>
+  z.object({
+    version: z.string(),
+    installedAt: z.string(),
+    binaryPath: z.string(),
+    source: cliInstallSourceSchema,
+    pendingUpgrade: cliPendingUpgradeSchema.nullable().default(null),
+  }),
+);
+export type StoredCliInstallManifest = z.infer<
+  typeof storedCliInstallManifestSchema
+>;
+
+/** The same manifest as read from disk, with the fields only its owner needs. */
+export const storedCliInstallManifestOnDiskSchema = lazySchema(() =>
+  storedCliInstallManifestSchema.extend({
+    pendingUpgrade: cliPendingUpgradeOnDiskSchema.nullable().default(null),
+  }),
+);
+export type StoredCliInstallManifestOnDisk = z.infer<
+  typeof storedCliInstallManifestOnDiskSchema
+>;

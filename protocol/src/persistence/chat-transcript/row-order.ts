@@ -1,0 +1,359 @@
+import { z } from "zod";
+import {
+  chatImportedMetadataSchema,
+  type ChatImportedMetadata,
+} from "@traycer/protocol/persistence/epic/chat-events";
+import { lazySchema } from "@traycer/protocol/framework/lazy-schema";
+
+import type { OpenChatEvent } from "@traycer/protocol/persistence/epic/open-harness-records";
+
+/**
+ * # Canonical transcript row order
+ *
+ * The comparator and the row-materializing event predicates, shared by the host
+ * (which numbers rows for the windowed `chat.subscribe` line) and the renderer
+ * (which draws them).
+ *
+ * ## The ENUMERATION lives in `row-projection.ts`, not here
+ *
+ * This module briefly claimed to be "the one definition of row order" and
+ * shipped a `buildCanonicalTranscriptRows` that mapped one persisted record to
+ * one row. A cold review found that false three ways over - records to rows is
+ * many-to-many, rows exist that no record produces, and an assistant row's sort
+ * key is `rowAnchorAt` rather than the record timestamp. What survived is what
+ * this file is now: a comparator, and the two content-dependent predicates that
+ * decide whether an event draws a row at all.
+ *
+ * ## Why this has to be shared code rather than two agreeing implementations
+ *
+ * Under the windowed transcript a row is addressed by its ORDINAL - its index
+ * in this order under a given transcript epoch. The host resolves
+ * `loadRange {fromOrdinal, toOrdinal}` against its own ordering and the client
+ * places the returned bodies against its own. If the two ever disagree by one
+ * row, the client renders bodies under the wrong rows, and nothing about that
+ * failure is loud: it looks like a chat whose messages are subtly shuffled.
+ *
+ * Two implementations that agree by inspection is exactly the arrangement that
+ * drifts the first time someone adds a row-materializing event kind on one
+ * side. So the comparator lives here and both sides call it.
+ *
+ * ## What the order IS
+ *
+ * `createdAt` ascending, STABLY - ties keep their input order, which is the
+ * order the projection assembled its rows in.
+ *
+ * Stability is load-bearing rather than incidental here. Every row of one
+ * assistant turn carries the SAME `createdAt` (the turn's `rowAnchorAt`), so a
+ * turn's internal order - slice, steer bubble, slice - is carried entirely by
+ * the sort keeping input order. Breaking ties on anything would scramble it.
+ *
+ * ### Why NOT the authority's own array order
+ *
+ * It is tempting, because the host already holds it and it needs no sort. It
+ * is also wrong. `applyChatOp`'s `upsertEntry` appends a record it has not
+ * seen before at the TAIL, and a checkpoint restore removes a record and later
+ * re-adds it - so a restored row's projection position is the end of the chat
+ * while its `timestamp` is unchanged. The renderer sorts it back into place
+ * today; serving projection order would durably move it to the bottom of the
+ * transcript.
+ */
+
+/**
+ * The row's sort key. `Message` and `ChatEvent` spell it differently
+ * (`timestamp` on both, but they are separate unions), so the comparator takes
+ * this rather than either record type - and the renderer, whose rows carry it
+ * as `createdAt` alongside synthesized rows the host has no knowledge of, can
+ * use the same comparator without converting back.
+ */
+export interface CanonicalRowOrderKey {
+  readonly createdAt: number;
+}
+
+/**
+ * Compares two rows by canonical order.
+ *
+ * Returns 0 for equal `createdAt`, which is what makes a stable sort keep the
+ * input order for ties - `Array.prototype.sort` has been required to be stable
+ * since ES2019. Do not "improve" this by breaking ties on id: that would
+ * reorder existing transcripts, because the input order it would displace is
+ * the projection's insert order, which is meaningful.
+ */
+export function compareCanonicalRowOrder(
+  a: CanonicalRowOrderKey,
+  b: CanonicalRowOrderKey,
+): number {
+  return a.createdAt - b.createdAt;
+}
+
+/**
+ * Sorts into canonical order without mutating the input.
+ *
+ * Takes the sort key as a projection so callers can order their own row types
+ * (the host orders a union of persisted messages and events; the renderer
+ * orders view models) through the one comparator.
+ */
+export function sortIntoCanonicalRowOrder<T>(
+  rows: readonly T[],
+  keyOf: (row: T) => CanonicalRowOrderKey,
+): readonly T[] {
+  return [...rows].sort((a, b) => compareCanonicalRowOrder(keyOf(a), keyOf(b)));
+}
+
+/**
+ * A metadata value the renderer would accept as present.
+ *
+ * Mirrors `metadataString` in `rendered-messages.ts`, and the EMPTY-STRING case
+ * is the whole reason this is a named function rather than a `typeof` check
+ * inline: the renderer treats `""` as absent. A predicate that accepted it
+ * would materialize a row the renderer does not draw, and every ordinal after
+ * that event would be off by one - bodies under the wrong rows, silently, for
+ * the rest of the transcript.
+ */
+function renderableMetadataString(
+  metadata: Readonly<Record<string, unknown>>,
+  key: string,
+): string | null {
+  const value = metadata[key];
+  if (typeof value !== "string") return null;
+  return value.length > 0 ? value : null;
+}
+
+/** The origin a forked-chat link row points at. */
+export interface ForkedChatLinkRowSource {
+  readonly sourceChatId: string;
+  readonly sourceHostId: string;
+  /**
+   * The source chat's title as captured at fork time, or `null` when the event
+   * carried none. Rides along because it comes out of the same metadata bag -
+   * extracting it separately would put a second reader of these keys beside the
+   * one that decides whether the row exists. The placeholder for `null` is the
+   * renderer's to choose.
+   */
+  readonly sourceChatTitle: string | null;
+}
+
+/**
+ * The forked-chat link row's source, or `null` when this event draws no row.
+ *
+ * Returns the extracted fields rather than a boolean so the renderer can use
+ * THIS as its filter instead of writing an equivalent one beside it. That is
+ * not a stylistic preference: the first version of this module tested
+ * `typeof value === "string"` while the renderer's `metadataString` also
+ * rejects the EMPTY string, so an event carrying `sourceChatId: ""` would have
+ * occupied an ordinal here and drawn nothing there - putting every later row's
+ * body under the wrong row, silently, for the rest of the transcript.
+ *
+ * A predicate that can disagree with its consumer is the failure this module
+ * exists to prevent, so it does not get to have one.
+ */
+export function forkedChatLinkRowSource(
+  event: OpenChatEvent,
+): ForkedChatLinkRowSource | null {
+  if (event.type !== "chat.forked") return null;
+  const metadata = event.metadata;
+  if (metadata === null) return null;
+  const sourceChatId = renderableMetadataString(metadata, "sourceChatId");
+  const sourceHostId = renderableMetadataString(metadata, "sourceHostId");
+  if (sourceChatId === null || sourceHostId === null) return null;
+  return {
+    sourceChatId,
+    sourceHostId,
+    sourceChatTitle: renderableMetadataString(metadata, "sourceChatTitle"),
+  };
+}
+
+/** What a notification-anchor error row renders. */
+export interface NotificationAnchorRowSource {
+  readonly message: string;
+  /** Provider error code, when the event carried one. */
+  readonly code: string | null;
+}
+
+/**
+ * The notification-anchor error row's content, or `null` when this event draws
+ * no row.
+ *
+ * A plain `send.failed` is history with no row; only one carrying a message and
+ * an explicit `notificationAnchor` marker occupies an ordinal. Shaped like
+ * {@link forkedChatLinkRowSource} and for the same reason - the renderer filters
+ * on this rather than on a copy of it.
+ */
+export function notificationAnchorRowSource(
+  event: OpenChatEvent,
+): NotificationAnchorRowSource | null {
+  if (event.type !== "send.failed") return null;
+  const metadata = event.metadata;
+  if (metadata === null) return null;
+  if (metadata.notificationAnchor !== true) return null;
+  if (event.message === null) return null;
+  return {
+    message: event.message,
+    code: renderableMetadataString(metadata, "code"),
+  };
+}
+
+/**
+ * The imported-chat provenance row's content, or `null` when this event draws
+ * no row.
+ *
+ * Parsed through the metadata schema rather than read field by field: the bag
+ * is untyped on the wire, and a half-written one must produce no row at all
+ * rather than a row that says "Imported from undefined". Shaped like
+ * {@link forkedChatLinkRowSource} for the same reason - the renderer filters on
+ * this rather than on a copy of it. Until this existed the marker was a
+ * renderer-side pin with no ordinal, and the windowed transcript - which serves
+ * only the events some row needs - never delivered the event on reopen, so the
+ * row silently vanished (spec `session-import.md` §8e).
+ */
+export function importedChatMarkerRowSource(
+  event: OpenChatEvent,
+): ChatImportedMetadata | null {
+  if (event.type !== "chat.imported") return null;
+  const parsed = chatImportedMetadataSchema.safeParse(event.metadata);
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * The ONE gate on the unattended-refusal row, and it is deliberately narrow.
+ *
+ * A judge refusal in a chat nobody was watching is journaled as an ordinary
+ * `approval.denied`, and so are the human denials that have always been there.
+ * Only the `agent-created` attendance reason draws a row, so:
+ *
+ *  - every `approval.denied` already on disk carries no `attendanceReason` at
+ *    all and keeps drawing nothing, which means no existing transcript's
+ *    ordinals move;
+ *  - a host that has not yet shipped the attendance fact writes no such value
+ *    either, so a new client against an old host renders exactly what it
+ *    rendered before this row existed;
+ *  - the other two reasons name chats a human WAS given a card for
+ *    (`human-subscribed`) or is expected to answer (`human-away-parked`) - the
+ *    card is the record there, and a transcript line beside it would be the
+ *    same fact twice.
+ *
+ * `rule` / `reason` are carried, not gated on: the row exists because of the
+ * attendance fact alone, and the renderer appends their sentence only when
+ * both are present. Gating on three fields would be three ways to silently
+ * draw nothing where the host meant to say something.
+ */
+const autoJudgeUnattendedDenialMetadataSchema = lazySchema(() =>
+  z.object({
+    autoJudge: z.object({
+      attendanceReason: z.literal("agent-created"),
+      // `.catch(null)` rather than a required string: a half-written bag must
+      // cost the SENTENCE, never the row, because the row's existence is what an
+      // ordinal is numbered from. `.catch` covers `undefined` too - an absent key
+      // is a failed parse of a non-optional schema - so no `.default` beside it.
+      // `.min(1)` is the same empty-string rule `renderableMetadataString`
+      // enforces above: `""` reads as absent, here as there.
+      rule: z.string().min(1).nullable().catch(null),
+      reason: z.string().min(1).nullable().catch(null),
+    }),
+  }),
+);
+
+/** What an unattended auto-mode refusal row renders. */
+export interface AutoJudgeUnattendedDenialRowSource {
+  /** The rule the judge matched, when the journal recorded one. */
+  readonly rule: string | null;
+  /** The judge's own reasoning, when the journal recorded it. */
+  readonly reason: string | null;
+}
+
+/**
+ * The unattended auto-mode refusal row's content, or `null` when this event
+ * draws no row.
+ *
+ * Under the attendance rule a chat running for another agent gets a tool error
+ * instead of a card: the model learns why, and a human who opens that chat
+ * tomorrow is the only other reader it will ever have - and today they get
+ * nothing that distinguishes "refused without asking anyone" from "a judge
+ * simply refused". This is that row. Shaped like
+ * {@link forkedChatLinkRowSource} for the same reason: the renderer filters on
+ * this rather than on a copy of it.
+ */
+export function autoJudgeUnattendedDenialRowSource(
+  event: OpenChatEvent,
+): AutoJudgeUnattendedDenialRowSource | null {
+  if (event.type !== "approval.denied") return null;
+  const parsed = autoJudgeUnattendedDenialMetadataSchema.safeParse(
+    event.metadata,
+  );
+  if (!parsed.success) return null;
+  return {
+    rule: parsed.data.autoJudge.rule,
+    reason: parsed.data.autoJudge.reason,
+  };
+}
+
+/**
+ * The markers a host stamps on an auto-mode judge notice, one per kind:
+ * `unavailable` (the judge could not run, so commands go to the user),
+ * `policy-not-applied` (a policy file is not, or not wholly, the one deciding)
+ * and `fallback` (Automatic's judge switched from Traycer inference to the
+ * conversation's own provider, billed there). The host writes exactly these
+ * three and nothing else under `metadata.autoJudge` as a string
+ * (`autoJudgeNoticeMarker` in its session manager).
+ */
+export const AUTO_JUDGE_NOTICE_MARKERS = [
+  "unavailable",
+  "policy-not-applied",
+  "fallback",
+] as const;
+
+export type AutoJudgeNoticeMarker = (typeof AUTO_JUDGE_NOTICE_MARKERS)[number];
+
+const autoJudgeNoticeMetadataSchema = lazySchema(() =>
+  z.object({ autoJudge: z.enum(AUTO_JUDGE_NOTICE_MARKERS) }),
+);
+
+/** What an auto-mode judge notice row renders. */
+export interface AutoJudgeNoticeRowSource {
+  readonly marker: AutoJudgeNoticeMarker;
+  /** The host's notice, verbatim - the row's whole body. */
+  readonly message: string;
+}
+
+/**
+ * The auto-mode judge notice row's content, or `null` when this event draws no
+ * row.
+ *
+ * Hosts USED to write each notice as a `permission.blocked` event carrying
+ * the text as its `message` and one of {@link AUTO_JUDGE_NOTICE_MARKERS}
+ * under `metadata.autoJudge` - once per session per kind. No host writes them
+ * any more: the judge's reason rides the approval card it escalated to, and a
+ * durable line read as a present fault long after the mode was switched. The
+ * reader stays because rows already on disk keep their ORDINAL - this
+ * function is part of `eventMaterializesTranscriptRow`, and dropping the row
+ * would renumber every transcript holding one. Clients paint the row as
+ * nothing.
+ *
+ * Gated on the MARKER, never on the event type alone: the host has older
+ * `permission.blocked` emitters that carry no marker and draw no row, and they
+ * must keep drawing none or every transcript holding one would renumber. An
+ * empty or absent message draws nothing either - the notice text is the row -
+ * which is the same empty-string rule {@link renderableMetadataString}
+ * enforces. `turnId` is deliberately not read: a notice emitted with no turn
+ * running carries `null`, and the row sorts on the event's own timestamp.
+ * Shaped like {@link forkedChatLinkRowSource} for the same reason - the
+ * renderer filters on this rather than on a copy of it.
+ */
+export function autoJudgeNoticeRowSource(
+  event: OpenChatEvent,
+): AutoJudgeNoticeRowSource | null {
+  if (event.type !== "permission.blocked") return null;
+  if (event.message === null || event.message.length === 0) return null;
+  const parsed = autoJudgeNoticeMetadataSchema.safeParse(event.metadata);
+  if (!parsed.success) return null;
+  return { marker: parsed.data.autoJudge, message: event.message };
+}
+
+export function eventMaterializesTranscriptRow(event: OpenChatEvent): boolean {
+  return (
+    forkedChatLinkRowSource(event) !== null ||
+    notificationAnchorRowSource(event) !== null ||
+    importedChatMarkerRowSource(event) !== null ||
+    autoJudgeUnattendedDenialRowSource(event) !== null ||
+    autoJudgeNoticeRowSource(event) !== null
+  );
+}

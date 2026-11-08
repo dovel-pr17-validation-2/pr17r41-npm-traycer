@@ -1,0 +1,686 @@
+import { describe, expect, it } from "vitest";
+import { hostRpcRegistry } from "@traycer/protocol/host/index";
+import {
+  hostBusyBreakdownV1Schema,
+  hostStatusUpgradeV10ToV11,
+  hostStatusUpgradeV11ToV12,
+  hostStatusUpgradeV12ToV13,
+  hostStatusUpgradeV13ToV14,
+  hostStatusUpgradeV14ToV15,
+  hostStatusUpgradeV15ToV16,
+  hostStatusUpgradeV16ToV17,
+  hostStatusUpgradeV17ToV18,
+  hostStatusUpgradeV18ToV19,
+  hostStatusUpgradeV19ToV110,
+  hostStatusUpgradeV110ToV111,
+  hostStatusV10,
+  hostStatusV11,
+  hostStatusV12,
+  hostStatusV13,
+  hostStatusV14,
+  hostStatusV15,
+  hostStatusV16,
+  hostStatusV17,
+  hostStatusV18,
+  hostStatusV19,
+  hostStatusV110,
+  hostStatusV111,
+} from "../contracts";
+
+const V10_RESPONSE = {
+  ready: true,
+  hostVersion: "1.3.0",
+  protocolVersion: { major: 1, minor: 0 },
+};
+
+describe("hostStatusUpgradeV10ToV11", () => {
+  it("upgrades a v1.0 response with busySessionCount: null, NOT a fabricated 0", () => {
+    const parsed = hostStatusV10.responseSchema.parse(V10_RESPONSE);
+    const upgraded = hostStatusUpgradeV10ToV11.upgradeResponse(parsed);
+    expect(upgraded.busySessionCount).toBeNull();
+    expect(upgraded.busy).toBe(false);
+    expect(upgraded.updateProgress).toBeNull();
+    // The upgraded shape must itself satisfy v1.1's schema — a nullable
+    // count is only useful downstream if the contract it upgrades INTO
+    // actually accepts it.
+    expect(() => hostStatusV11.responseSchema.parse(upgraded)).not.toThrow();
+  });
+
+  it("leaves the request identity-mapped", () => {
+    expect(hostStatusUpgradeV10ToV11.upgradeRequest({})).toEqual({});
+  });
+
+  // The review's point: a test that asserts the SAME observable shape for
+  // both an upgraded (never-reported) count and a genuine zero would still
+  // pass if the upgrade normalized `null` back to `0` with `?? 0`. These
+  // assert two DIFFERENT fields of the parsed result — presence-ness via
+  // `toBeNull`/`toBe(0)`, and the raw value each round-trips to — so a
+  // regression collapsing them back together fails at least one assertion
+  // here, not zero.
+  describe("null vs a genuine zero — different claims, asserted as different fields", () => {
+    it("an upgraded v1.0 host's count is null (never reported), not zero", () => {
+      const parsed = hostStatusV10.responseSchema.parse(V10_RESPONSE);
+      const upgraded = hostStatusUpgradeV10ToV11.upgradeResponse(parsed);
+      expect(upgraded.busySessionCount).toBeNull();
+      expect(upgraded.busySessionCount).not.toBe(0);
+    });
+
+    it("a real v1.1 host reporting zero parses as the number 0, not null", () => {
+      const genuineZero = hostStatusV11.responseSchema.parse({
+        ...V10_RESPONSE,
+        busy: false,
+        busySessionCount: 0,
+        updateProgress: null,
+      });
+      expect(genuineZero.busySessionCount).toBe(0);
+      expect(genuineZero.busySessionCount).not.toBeNull();
+    });
+
+    it("the two results are not interchangeable under strict equality", () => {
+      const parsed = hostStatusV10.responseSchema.parse(V10_RESPONSE);
+      const upgraded = hostStatusUpgradeV10ToV11.upgradeResponse(parsed);
+      const genuineZero = hostStatusV11.responseSchema.parse({
+        ...V10_RESPONSE,
+        busy: false,
+        busySessionCount: 0,
+        updateProgress: null,
+      });
+      expect(upgraded).not.toEqual(genuineZero);
+      expect(
+        Object.is(upgraded.busySessionCount, genuineZero.busySessionCount),
+      ).toBe(false);
+    });
+  });
+
+  it("rejects a v1.1 response schema that still fabricates 0 for an absent count", () => {
+    // Documents WHY the upgrade must not go back to `?? 0`: v1.1's schema
+    // itself accepts a real 0 as valid data (it is not distinguishable at
+    // the wire level), so the guarantee has to live in the upgrade function,
+    // not in something the schema can catch. This pins the function's
+    // output directly rather than relying on a schema rejection that does
+    // not exist.
+    const parsed = hostStatusV10.responseSchema.parse(V10_RESPONSE);
+    const upgraded = hostStatusUpgradeV10ToV11.upgradeResponse(parsed);
+    expect(upgraded.busySessionCount).not.toBe(0);
+  });
+});
+
+const V11_RESPONSE = {
+  ...V10_RESPONSE,
+  busy: true,
+  busySessionCount: 3,
+  updateProgress: null,
+};
+
+const BUSY_BREAKDOWN = {
+  workingAgents: 2,
+  activeTerminalAgents: 1,
+  busyTerminals: 0,
+};
+
+describe("hostStatusUpgradeV11ToV12", () => {
+  it("upgrades a v1.1 response with busyBreakdown: null, NOT a fabricated zero object", () => {
+    const parsed = hostStatusV11.responseSchema.parse(V11_RESPONSE);
+    const upgraded = hostStatusUpgradeV11ToV12.upgradeResponse(parsed);
+    expect(upgraded.busyBreakdown).toBeNull();
+    expect(upgraded.busySessionCount).toBe(3);
+    expect(upgraded.busy).toBe(true);
+    expect(() => hostStatusV12.responseSchema.parse(upgraded)).not.toThrow();
+  });
+
+  it("leaves the request identity-mapped", () => {
+    expect(hostStatusUpgradeV11ToV12.upgradeRequest({})).toEqual({});
+  });
+
+  describe("null vs a genuine zero breakdown — different claims", () => {
+    it("an upgraded v1.1 host's breakdown is null (never reported), not zeros", () => {
+      const parsed = hostStatusV11.responseSchema.parse(V11_RESPONSE);
+      const upgraded = hostStatusUpgradeV11ToV12.upgradeResponse(parsed);
+      expect(upgraded.busyBreakdown).toBeNull();
+      expect(upgraded.busyBreakdown).not.toEqual({
+        workingAgents: 0,
+        activeTerminalAgents: 0,
+        busyTerminals: 0,
+      });
+    });
+
+    it("a real v1.2 host reporting a zero breakdown parses as zeros, not null", () => {
+      const genuineZero = hostStatusV12.responseSchema.parse({
+        ...V11_RESPONSE,
+        busy: false,
+        busySessionCount: 0,
+        busyBreakdown: {
+          workingAgents: 0,
+          activeTerminalAgents: 0,
+          busyTerminals: 0,
+        },
+      });
+      expect(genuineZero.busyBreakdown).toEqual({
+        workingAgents: 0,
+        activeTerminalAgents: 0,
+        busyTerminals: 0,
+      });
+      expect(genuineZero.busyBreakdown).not.toBeNull();
+    });
+  });
+});
+
+describe("host.status@1.2 busyBreakdown", () => {
+  it("round-trips a populated breakdown", () => {
+    const payload = {
+      ...V11_RESPONSE,
+      busyBreakdown: BUSY_BREAKDOWN,
+    };
+    const parsed = hostStatusV12.responseSchema.parse(payload);
+    expect(parsed.busyBreakdown).toEqual(BUSY_BREAKDOWN);
+    expect(hostBusyBreakdownV1Schema.parse(BUSY_BREAKDOWN)).toEqual(
+      BUSY_BREAKDOWN,
+    );
+  });
+
+  it("round-trips busyBreakdown: null", () => {
+    const parsed = hostStatusV12.responseSchema.parse({
+      ...V11_RESPONSE,
+      busyBreakdown: null,
+    });
+    expect(parsed.busyBreakdown).toBeNull();
+  });
+
+  it("rejects a negative component", () => {
+    expect(
+      hostStatusV12.responseSchema.safeParse({
+        ...V11_RESPONSE,
+        busyBreakdown: { ...BUSY_BREAKDOWN, busyTerminals: -1 },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+const STORE_FORMATS = {
+  chatDb: {
+    current: 9,
+    onDiskMax: 9,
+    epicCount: 2,
+    survey: "complete",
+  },
+};
+
+describe("host.status@1.4 storeFormats", () => {
+  it("round-trips the current chat format and the completed survey", () => {
+    const parsed = hostStatusV14.responseSchema.parse({
+      ...V11_RESPONSE,
+      busyBreakdown: BUSY_BREAKDOWN,
+      updateOperation: null,
+      updateTransaction: null,
+      storeFormats: STORE_FORMATS,
+    });
+    expect(parsed.storeFormats).toEqual(STORE_FORMATS);
+  });
+
+  it("preserves null as an unknown survey, rather than an empty store", () => {
+    const parsed = hostStatusV14.responseSchema.parse({
+      ...V11_RESPONSE,
+      busyBreakdown: null,
+      updateOperation: null,
+      updateTransaction: null,
+      storeFormats: null,
+    });
+    expect(parsed.storeFormats).toBeNull();
+  });
+
+  it("upgrades a v1.3 response with storeFormats: null", () => {
+    const parsed = hostStatusV13.responseSchema.parse({
+      ...V11_RESPONSE,
+      busyBreakdown: BUSY_BREAKDOWN,
+      updateOperation: null,
+      updateTransaction: null,
+    });
+    const upgraded = hostStatusUpgradeV13ToV14.upgradeResponse(parsed);
+    expect(upgraded.storeFormats).toBeNull();
+    expect(() => hostStatusV14.responseSchema.parse(upgraded)).not.toThrow();
+  });
+
+  it("rejects non-positive current formats and negative survey counts", () => {
+    expect(
+      hostStatusV14.responseSchema.safeParse({
+        ...V11_RESPONSE,
+        busyBreakdown: null,
+        updateOperation: null,
+        updateTransaction: null,
+        storeFormats: {
+          chatDb: {
+            current: 0,
+            onDiskMax: null,
+            epicCount: 0,
+            survey: "complete",
+          },
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      hostStatusV14.responseSchema.safeParse({
+        ...V11_RESPONSE,
+        busyBreakdown: null,
+        updateOperation: null,
+        updateTransaction: null,
+        storeFormats: {
+          chatDb: {
+            current: 9,
+            onDiskMax: null,
+            epicCount: -1,
+            survey: "complete",
+          },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("distinguishes a failed survey from a completed empty survey", () => {
+    const base = {
+      ...V11_RESPONSE,
+      busyBreakdown: null,
+      updateOperation: null,
+      updateTransaction: null,
+    };
+    const failed = hostStatusV14.responseSchema.parse({
+      ...base,
+      storeFormats: {
+        chatDb: { current: 9, onDiskMax: null, epicCount: 1, survey: "failed" },
+      },
+    });
+    const empty = hostStatusV14.responseSchema.parse({
+      ...base,
+      storeFormats: {
+        chatDb: {
+          current: 9,
+          onDiskMax: null,
+          epicCount: 0,
+          survey: "complete",
+        },
+      },
+    });
+    expect(failed.storeFormats?.chatDb.survey).toBe("failed");
+    expect(empty.storeFormats?.chatDb.survey).toBe("complete");
+    expect(failed.storeFormats).not.toEqual(empty.storeFormats);
+  });
+});
+
+describe("host.status@1.5 install", () => {
+  const V14_RESPONSE = {
+    ...V11_RESPONSE,
+    busyBreakdown: BUSY_BREAKDOWN,
+    updateOperation: null,
+    updateTransaction: null,
+    storeFormats: STORE_FORMATS,
+  };
+
+  it("round-trips the install record's provenance and the sidecar's declaration", () => {
+    const install = {
+      source: "local-file" as const,
+      version: "1.3.0-rc.4",
+      declaredFormats: { chatDb: 9 },
+    };
+    const parsed = hostStatusV15.responseSchema.parse({
+      ...V14_RESPONSE,
+      install,
+    });
+    expect(parsed.install).toEqual(install);
+  });
+
+  it("carries an undeclared installed tree as declaredFormats: null under a registry source", () => {
+    const parsed = hostStatusV15.responseSchema.parse({
+      ...V14_RESPONSE,
+      install: {
+        source: "registry",
+        version: "1.2.0",
+        declaredFormats: null,
+      },
+    });
+    expect(parsed.install?.declaredFormats).toBeNull();
+  });
+
+  it("preserves null as no install record, never as a registry install", () => {
+    const parsed = hostStatusV15.responseSchema.parse({
+      ...V14_RESPONSE,
+      install: null,
+      processMemory: null,
+    });
+    expect(parsed.install).toBeNull();
+  });
+
+  it("upgrades a v1.4 response with install: null", () => {
+    const parsed = hostStatusV14.responseSchema.parse(V14_RESPONSE);
+    const upgraded = hostStatusUpgradeV14ToV15.upgradeResponse(parsed);
+    expect(upgraded.install).toBeNull();
+    expect(() => hostStatusV15.responseSchema.parse(upgraded)).not.toThrow();
+  });
+
+  it("rejects a source outside the install record's vocabulary, an empty version, and a non-positive declared format", () => {
+    const base = { ...V14_RESPONSE };
+    expect(
+      hostStatusV15.responseSchema.safeParse({
+        ...base,
+        install: { source: "bundled", version: "1.0.0", declaredFormats: null },
+      }).success,
+    ).toBe(false);
+    expect(
+      hostStatusV15.responseSchema.safeParse({
+        ...base,
+        install: { source: "registry", version: "", declaredFormats: null },
+      }).success,
+    ).toBe(false);
+    expect(
+      hostStatusV15.responseSchema.safeParse({
+        ...base,
+        install: {
+          source: "registry",
+          version: "1.0.0",
+          declaredFormats: { chatDb: 0 },
+        },
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("host.status registry membership", () => {
+  it("v1.4 through v1.8 reuse the previous line's request schema by identity", () => {
+    expect(hostStatusV14.requestSchema).toBe(hostStatusV13.requestSchema);
+    expect(hostStatusV15.requestSchema).toBe(hostStatusV14.requestSchema);
+    expect(hostStatusV16.requestSchema).toBe(hostStatusV15.requestSchema);
+    expect(hostStatusV17.requestSchema).toBe(hostStatusV16.requestSchema);
+    expect(hostStatusV18.requestSchema).toBe(hostStatusV17.requestSchema);
+  });
+
+  it("installs @1.0 through @1.11 on the unary registry at major 1", () => {
+    const entry = hostRpcRegistry["host.status"];
+    expect(entry).toBeDefined();
+    expect(entry[1].latestMinor).toBe(11);
+    expect(entry[1].versions[0].contract).toBe(hostStatusV10);
+    expect(entry[1].versions[1].contract).toBe(hostStatusV11);
+    expect(entry[1].versions[2].contract).toBe(hostStatusV12);
+    expect(entry[1].versions[2].upgradeFromPreviousVersion).toBe(
+      hostStatusUpgradeV11ToV12,
+    );
+    expect(entry[1].versions[3].contract).toBe(hostStatusV13);
+    expect(entry[1].versions[3].upgradeFromPreviousVersion).toBe(
+      hostStatusUpgradeV12ToV13,
+    );
+    expect(entry[1].versions[4].contract).toBe(hostStatusV14);
+    expect(entry[1].versions[4].upgradeFromPreviousVersion).toBe(
+      hostStatusUpgradeV13ToV14,
+    );
+    expect(entry[1].versions[5].contract).toBe(hostStatusV15);
+    expect(entry[1].versions[5].upgradeFromPreviousVersion).toBe(
+      hostStatusUpgradeV14ToV15,
+    );
+    expect(entry[1].versions[6].contract).toBe(hostStatusV16);
+    expect(entry[1].versions[6].upgradeFromPreviousVersion).toBe(
+      hostStatusUpgradeV15ToV16,
+    );
+    expect(entry[1].versions[7].contract).toBe(hostStatusV17);
+    expect(entry[1].versions[7].upgradeFromPreviousVersion).toBe(
+      hostStatusUpgradeV16ToV17,
+    );
+    expect(entry[1].versions[8].contract).toBe(hostStatusV18);
+    expect(entry[1].versions[8].upgradeFromPreviousVersion).toBe(
+      hostStatusUpgradeV17ToV18,
+    );
+    expect(entry[1].versions[9].contract).toBe(hostStatusV19);
+    expect(entry[1].versions[9].upgradeFromPreviousVersion).toBe(
+      hostStatusUpgradeV18ToV19,
+    );
+    expect(entry[1].versions[10].contract).toBe(hostStatusV110);
+    expect(entry[1].versions[10].upgradeFromPreviousVersion).toBe(
+      hostStatusUpgradeV19ToV110,
+    );
+    expect(entry[1].versions[11].contract).toBe(hostStatusV111);
+    expect(entry[1].versions[11].upgradeFromPreviousVersion).toBe(
+      hostStatusUpgradeV110ToV111,
+    );
+  });
+});
+
+const V16_RESPONSE = {
+  ...V10_RESPONSE,
+  busy: false,
+  busySessionCount: 0,
+  updateProgress: null,
+  busyBreakdown: null,
+  updateOperation: null,
+  updateTransaction: null,
+  storeFormats: null,
+  install: null,
+  processMemory: null,
+};
+
+describe("hostStatusUpgradeV16ToV17", () => {
+  it("upgrades a v1.6 response with processMemory: null, NOT zeroed counters", () => {
+    const parsed = hostStatusV16.responseSchema.parse(V16_RESPONSE);
+    const upgraded = hostStatusUpgradeV16ToV17.upgradeResponse(parsed);
+    expect(upgraded.processMemory).toBeNull();
+    expect(() => hostStatusV17.responseSchema.parse(upgraded)).not.toThrow();
+  });
+
+  it("leaves the request identity-mapped", () => {
+    expect(hostStatusUpgradeV16ToV17.upgradeRequest({})).toEqual({});
+  });
+
+  it("accepts a reported reading and keeps it byte-for-byte", () => {
+    const processMemory = {
+      heapLimitBytes: 4_831_838_208,
+      heapUsedBytes: 4_100_000_000,
+      rssBytes: 4_750_000_000,
+    };
+    const parsed = hostStatusV17.responseSchema.parse({
+      ...V16_RESPONSE,
+      processMemory,
+    });
+    expect(parsed.processMemory).toEqual(processMemory);
+  });
+
+  it("refuses a negative or fractional counter", () => {
+    for (const bad of [-1, 1.5]) {
+      expect(
+        hostStatusV17.responseSchema.safeParse({
+          ...V16_RESPONSE,
+          processMemory: {
+            heapLimitBytes: bad,
+            heapUsedBytes: 0,
+            rssBytes: 0,
+          },
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("strips processMemory when a v1.6 caller re-parses the reply", () => {
+    const parsed = hostStatusV16.responseSchema.parse({
+      ...V16_RESPONSE,
+      processMemory: { heapLimitBytes: 1, heapUsedBytes: 1, rssBytes: 1 },
+    });
+    expect("processMemory" in parsed).toBe(false);
+  });
+});
+
+const V17_RESPONSE = { ...V16_RESPONSE };
+
+describe("hostStatusUpgradeV17ToV18", () => {
+  it("upgrades a v1.7 response with crossHostMessaging: null, NOT a fabricated ok", () => {
+    const parsed = hostStatusV17.responseSchema.parse(V17_RESPONSE);
+    const upgraded = hostStatusUpgradeV17ToV18.upgradeResponse(parsed);
+    expect(upgraded.crossHostMessaging).toBeNull();
+    expect(() => hostStatusV18.responseSchema.parse(upgraded)).not.toThrow();
+  });
+
+  it("leaves the request identity-mapped", () => {
+    expect(hostStatusUpgradeV17ToV18.upgradeRequest({})).toEqual({});
+  });
+
+  it("keeps a paused reading byte-for-byte", () => {
+    const crossHostMessaging = {
+      state: "paused" as const,
+      pausedSince: 1_700_000_000_000,
+      nextRetryAt: 1_700_000_060_000,
+      cause: "breaker-open",
+    };
+    const parsed = hostStatusV18.responseSchema.parse({
+      ...V17_RESPONSE,
+      crossHostMessaging,
+    });
+    expect(parsed.crossHostMessaging).toEqual(crossHostMessaging);
+  });
+
+  it("accepts ok with null times and cause", () => {
+    const crossHostMessaging = {
+      state: "ok" as const,
+      pausedSince: null,
+      nextRetryAt: null,
+      cause: null,
+    };
+    const parsed = hostStatusV18.responseSchema.parse({
+      ...V17_RESPONSE,
+      crossHostMessaging,
+    });
+    expect(parsed.crossHostMessaging).toEqual(crossHostMessaging);
+  });
+
+  it("refuses an unknown state and a negative or fractional time", () => {
+    const base = {
+      state: "paused",
+      pausedSince: 1,
+      nextRetryAt: 2,
+      cause: null,
+    };
+    for (const bad of [
+      { ...base, state: "stalled" },
+      { ...base, pausedSince: -1 },
+      { ...base, nextRetryAt: 1.5 },
+    ]) {
+      expect(
+        hostStatusV18.responseSchema.safeParse({
+          ...V17_RESPONSE,
+          crossHostMessaging: bad,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("requires the key at 1.8 (null is the only 'did not report')", () => {
+    expect(hostStatusV18.responseSchema.safeParse(V17_RESPONSE).success).toBe(
+      false,
+    );
+  });
+
+  it("strips crossHostMessaging when a v1.7 caller re-parses the reply", () => {
+    const parsed = hostStatusV17.responseSchema.parse({
+      ...V17_RESPONSE,
+      crossHostMessaging: {
+        state: "paused",
+        pausedSince: 1,
+        nextRetryAt: null,
+        cause: "transient",
+      },
+    });
+    expect("crossHostMessaging" in parsed).toBe(false);
+  });
+});
+
+const V19_RESPONSE = {
+  ...V17_RESPONSE,
+  crossHostMessaging: null,
+  sessions: null,
+};
+
+describe("hostStatusUpgradeV19ToV110", () => {
+  it("upgrades a v1.9 response with updatesExternallyManaged: null, NOT a fabricated false", () => {
+    const parsed = hostStatusV19.responseSchema.parse(V19_RESPONSE);
+    const upgraded = hostStatusUpgradeV19ToV110.upgradeResponse(parsed);
+    expect(upgraded.updatesExternallyManaged).toBeNull();
+    expect(() => hostStatusV110.responseSchema.parse(upgraded)).not.toThrow();
+  });
+
+  it("leaves the request identity-mapped", () => {
+    expect(hostStatusUpgradeV19ToV110.upgradeRequest({})).toEqual({});
+  });
+
+  it("requires the key at 1.10 and keeps a reported answer either way", () => {
+    expect(hostStatusV110.responseSchema.safeParse(V19_RESPONSE).success).toBe(
+      false,
+    );
+    for (const reported of [true, false]) {
+      const parsed = hostStatusV110.responseSchema.parse({
+        ...V19_RESPONSE,
+        updatesExternallyManaged: reported,
+      });
+      expect(parsed.updatesExternallyManaged).toBe(reported);
+    }
+  });
+
+  it("strips updatesExternallyManaged when a v1.9 caller re-parses the reply", () => {
+    const parsed = hostStatusV19.responseSchema.parse({
+      ...V19_RESPONSE,
+      updatesExternallyManaged: true,
+    });
+    expect("updatesExternallyManaged" in parsed).toBe(false);
+  });
+});
+
+const V110_RESPONSE = {
+  ...V19_RESPONSE,
+  updatesExternallyManaged: null,
+};
+
+const PREVIOUS_EXIT = {
+  kind: "out-of-memory",
+  endedAt: 1_700_000_000_000,
+  heapLimitBytes: 4_831_838_208,
+  heapUsedBytes: null,
+} as const;
+
+describe("hostStatusUpgradeV110ToV111", () => {
+  it("upgrades a v1.10 response with previousExit: null, NOT a fabricated clean exit", () => {
+    const parsed = hostStatusV110.responseSchema.parse(V110_RESPONSE);
+    const upgraded = hostStatusUpgradeV110ToV111.upgradeResponse(parsed);
+    expect(upgraded.previousExit).toBeNull();
+    expect(() => hostStatusV111.responseSchema.parse(upgraded)).not.toThrow();
+  });
+
+  it("leaves the request identity-mapped", () => {
+    expect(hostStatusUpgradeV110ToV111.upgradeRequest({})).toEqual({});
+  });
+
+  it("requires the key at 1.11 and round-trips a reported exit", () => {
+    expect(hostStatusV111.responseSchema.safeParse(V110_RESPONSE).success).toBe(
+      false,
+    );
+    const parsed = hostStatusV111.responseSchema.parse({
+      ...V110_RESPONSE,
+      previousExit: PREVIOUS_EXIT,
+    });
+    expect(parsed.previousExit).toEqual(PREVIOUS_EXIT);
+  });
+
+  it("refuses an unknown kind and a negative or fractional number", () => {
+    for (const bad of [
+      { ...PREVIOUS_EXIT, kind: "melted" },
+      { ...PREVIOUS_EXIT, endedAt: -1 },
+      { ...PREVIOUS_EXIT, endedAt: 1.5 },
+      { ...PREVIOUS_EXIT, heapLimitBytes: -1 },
+    ]) {
+      expect(
+        hostStatusV111.responseSchema.safeParse({
+          ...V110_RESPONSE,
+          previousExit: bad,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("strips previousExit when a v1.10 caller re-parses the reply", () => {
+    const parsed = hostStatusV110.responseSchema.parse({
+      ...V110_RESPONSE,
+      previousExit: PREVIOUS_EXIT,
+    });
+    expect("previousExit" in parsed).toBe(false);
+  });
+});

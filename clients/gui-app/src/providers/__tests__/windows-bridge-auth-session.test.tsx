@@ -1,0 +1,613 @@
+import { act, cleanup, render } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { WindowsBridgeAuthSessionBridge } from "@/providers/windows-bridge-auth-session";
+import type {
+  AuthSessionSnapshot,
+  RevokedCloudAuthorization,
+} from "@/lib/auth/auth-service";
+import type {
+  DesktopLocalAuthSessionRestoreResult,
+  DesktopAuthSessionSetResult,
+  DesktopAuthSessionSnapshot,
+} from "@/lib/windows/types";
+import type { Mock } from "vitest";
+
+const toast = vi.hoisted(() => ({
+  warning: vi.fn<(message: string) => void>(),
+}));
+
+vi.mock("sonner", () => ({ toast }));
+
+const mockUseAuthService = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/host", () => ({ useAuthService: mockUseAuthService }));
+
+const mockUseWindowsBridge = vi.hoisted(() => vi.fn());
+vi.mock("@/providers/windows-bridge-context", () => ({
+  useWindowsBridge: mockUseWindowsBridge,
+}));
+
+const SIGNED_IN_TOKEN = "bearer-token";
+const SIGNED_IN_SNAPSHOT: AuthSessionSnapshot = {
+  status: "signed-in",
+  token: SIGNED_IN_TOKEN,
+  profile: { userId: "u1", userName: "Ada", email: "ada@example.com" },
+  contextMetadata: null,
+};
+
+const UNVERIFIED_SNAPSHOT: AuthSessionSnapshot = {
+  ...SIGNED_IN_SNAPSHOT,
+  status: "unverified",
+};
+
+const SIGNED_OUT_DESKTOP_SNAPSHOT: DesktopAuthSessionSnapshot = {
+  status: "signed-out",
+  token: null,
+  profile: null,
+};
+
+const UNVERIFIED_DESKTOP_SNAPSHOT: DesktopAuthSessionSnapshot = {
+  status: "unverified",
+  token: SIGNED_IN_TOKEN,
+  profile: SIGNED_IN_SNAPSHOT.profile,
+};
+
+/** What the cross-window revoke channel says about a refusal. */
+type RevocationScope = "user-epoch" | null;
+
+type RenderWithFakesOptions = {
+  readonly replayOutboundSnapshot?: AuthSessionSnapshot;
+  readonly deferSet?: boolean;
+  readonly omitRestoreLocal?: boolean;
+};
+
+type AuthSessionSetResolution =
+  | { readonly kind: "resolve"; readonly result: DesktopAuthSessionSetResult }
+  | { readonly kind: "reject"; readonly cause: Error };
+
+interface AuthSessionBridgeTestHarness {
+  readonly emitInbound: (snapshot: DesktopAuthSessionSnapshot) => void;
+  readonly emitOutbound: (snapshot: AuthSessionSnapshot) => void;
+  readonly emitRevoked: (token: string, revocation: RevocationScope) => void;
+  readonly emitVerificationRevoked: (
+    token: string,
+    revocation: RevocationScope,
+  ) => void;
+  readonly get: Mock<() => Promise<DesktopAuthSessionSnapshot>>;
+  readonly ingest: Mock<(snapshot: AuthSessionSnapshot) => Promise<void>>;
+  readonly ingestRevoked: Mock<
+    (rejectedToken: string, revocation: RevocationScope) => void
+  >;
+  readonly restoreLocal: Mock<
+    (expected: {
+      readonly userId: string;
+      readonly token: string;
+    }) => Promise<DesktopLocalAuthSessionRestoreResult>
+  >;
+  readonly inboundDispose: Mock<() => void>;
+  readonly outboundDispose: Mock<() => void>;
+  readonly resolveSet: (resolution: AuthSessionSetResolution) => void;
+  readonly revoke: Mock<
+    (rejectedToken: string, revocation: RevocationScope) => Promise<void>
+  >;
+  readonly set: Mock<
+    (
+      snapshot: DesktopAuthSessionSnapshot,
+    ) => Promise<DesktopAuthSessionSetResult>
+  >;
+  readonly unmount: () => void;
+}
+
+/**
+ * A faithful boundary fake for the real startup race:
+ *
+ * - AuthService replays its restored session synchronously when the outbound
+ *   subscription is installed.
+ * - Main still reports its default signed-out snapshot from `get()` while the
+ *   asynchronous bearer verification in `set()` is pending.
+ * - The bridge can deliver live sibling-window changes through `onChange`.
+ */
+function renderWithFakes(
+  setResult: DesktopAuthSessionSetResult,
+  options: RenderWithFakesOptions,
+): AuthSessionBridgeTestHarness {
+  let outboundListener: ((snapshot: AuthSessionSnapshot) => void) | null = null;
+  let inboundListener: ((snapshot: DesktopAuthSessionSnapshot) => void) | null =
+    null;
+  let revokedListener: ((revoked: RevokedCloudAuthorization) => void) | null =
+    null;
+  let verificationRevokedListener:
+    | ((rejectedToken: string, revocation: RevocationScope) => void)
+    | null = null;
+  let resolveSetPromise:
+    | ((resolution: AuthSessionSetResolution) => void)
+    | null = null;
+  let mainSnapshot = SIGNED_OUT_DESKTOP_SNAPSHOT;
+  const inboundDispose = vi.fn(() => {
+    inboundListener = null;
+  });
+  const outboundDispose = vi.fn(() => {
+    outboundListener = null;
+  });
+
+  const ingest = vi.fn((_snapshot: AuthSessionSnapshot): Promise<void> =>
+    Promise.resolve(),
+  );
+  const ingestRevoked = vi.fn(
+    (_rejectedToken: string, _revocation: RevocationScope): void => undefined,
+  );
+  mockUseAuthService.mockReturnValue({
+    onSessionSnapshotChange: (
+      handler: (snapshot: AuthSessionSnapshot) => void,
+    ) => {
+      outboundListener = handler;
+      if (options.replayOutboundSnapshot !== undefined) {
+        handler(options.replayOutboundSnapshot);
+      }
+      return {
+        dispose: outboundDispose,
+      };
+    },
+    onCloudAuthorizationRevoked: (
+      handler: (revoked: RevokedCloudAuthorization) => void,
+    ) => {
+      revokedListener = handler;
+      return {
+        dispose: () => {
+          revokedListener = null;
+        },
+      };
+    },
+    getIdentityGeneration: () => 0,
+    ingestProjectedSessionSnapshot: ingest,
+    ingestCloudAuthorizationRevoked: ingestRevoked,
+  });
+
+  const revoke = vi.fn((_rejectedToken: string, _revocation: RevocationScope) =>
+    Promise.resolve(),
+  );
+  const set = vi.fn((snapshot: DesktopAuthSessionSnapshot) => {
+    if (!options.deferSet) {
+      if (setResult.outcome === "accepted") {
+        mainSnapshot = snapshot;
+      }
+      return Promise.resolve(setResult);
+    }
+    return new Promise<DesktopAuthSessionSetResult>((resolve, reject) => {
+      resolveSetPromise = (resolution) => {
+        if (resolution.kind === "resolve") {
+          if (resolution.result.outcome === "accepted") {
+            mainSnapshot = snapshot;
+          }
+          resolve(resolution.result);
+        } else {
+          reject(resolution.cause);
+        }
+      };
+    });
+  });
+  const get = vi.fn(() => Promise.resolve(mainSnapshot));
+  const restoreLocal = vi.fn(
+    (_expected: { readonly userId: string; readonly token: string }) =>
+      Promise.resolve("restored" as const),
+  );
+  mockUseWindowsBridge.mockReturnValue({
+    authSession: {
+      get,
+      set,
+      revoke,
+      ...(options.omitRestoreLocal === true ? {} : { restoreLocal }),
+      onChange: (handler: (snapshot: DesktopAuthSessionSnapshot) => void) => {
+        inboundListener = handler;
+        return { dispose: inboundDispose };
+      },
+      onVerificationRevoked: (
+        handler: (rejectedToken: string, revocation: RevocationScope) => void,
+      ) => {
+        verificationRevokedListener = handler;
+        return {
+          dispose: () => {
+            verificationRevokedListener = null;
+          },
+        };
+      },
+    },
+  });
+
+  const rendered = render(
+    <WindowsBridgeAuthSessionBridge>
+      <div>content</div>
+    </WindowsBridgeAuthSessionBridge>,
+  );
+
+  return {
+    get,
+    ingest,
+    ingestRevoked,
+    restoreLocal,
+    inboundDispose,
+    outboundDispose,
+    resolveSet: (resolution) => {
+      if (resolveSetPromise === null) {
+        throw new Error("set is not pending");
+      }
+      resolveSetPromise(resolution);
+      resolveSetPromise = null;
+    },
+    set,
+    revoke,
+    unmount: rendered.unmount,
+    emitInbound: (snapshot) => {
+      act(() => inboundListener?.(snapshot));
+    },
+    emitOutbound: (snapshot) => {
+      act(() => outboundListener?.(snapshot));
+    },
+    emitRevoked: (token, revocation) => {
+      if (revokedListener === null) throw new Error("no revoke listener");
+      act(() => revokedListener?.({ token, revocation }));
+    },
+    emitVerificationRevoked: (token, revocation) => {
+      if (verificationRevokedListener === null) {
+        throw new Error("no verification-revoked listener");
+      }
+      act(() => verificationRevokedListener?.(token, revocation));
+    },
+  };
+}
+
+async function drainMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+describe("<WindowsBridgeAuthSessionBridge />", () => {
+  afterEach(() => {
+    cleanup();
+    toast.warning.mockClear();
+  });
+
+  it("asks main to drop its verification on a terminal verdict loss, without projecting a session transition", async () => {
+    const { emitOutbound, emitRevoked, set, revoke } = renderWithFakes(
+      { outcome: "accepted" },
+      {},
+    );
+    await act(async () => {
+      emitOutbound(SIGNED_IN_SNAPSHOT);
+      await Promise.resolve();
+    });
+    expect(set).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      emitRevoked(SIGNED_IN_TOKEN, null);
+      await Promise.resolve();
+    });
+
+    // The revoke, and ONLY the revoke: no `signed-out` (which siblings apply
+    // unconditionally) and no published `unverified` transition. Local
+    // unverified restoration uses its separate file-backed IPC path.
+    // Revoke names the rejected bearer, which is main's fence against a
+    // revoke that lands after a sibling window's fresh sign-in.
+    expect(revoke).toHaveBeenCalledTimes(1);
+    expect(revoke).toHaveBeenCalledWith(SIGNED_IN_TOKEN, null);
+    expect(set).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes the user-epoch revocation scope through to main, so the other windows can be told", async () => {
+    const { emitOutbound, emitRevoked, set, revoke } = renderWithFakes(
+      { outcome: "accepted" },
+      {},
+    );
+    await act(async () => {
+      emitOutbound(SIGNED_IN_SNAPSHOT);
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      emitRevoked(SIGNED_IN_TOKEN, "user-epoch");
+      await Promise.resolve();
+    });
+
+    expect(revoke).toHaveBeenCalledTimes(1);
+    expect(revoke).toHaveBeenCalledWith(SIGNED_IN_TOKEN, "user-epoch");
+    // Still only the revoke: the scope does not turn it into a session write.
+    expect(set).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { label: "a user-epoch revocation", revocation: "user-epoch" as const },
+    { label: "a revocation without a scope", revocation: null },
+  ])(
+    "hands a sibling window's verdict loss to the service with its scope: $label",
+    ({ revocation }) => {
+      const { emitVerificationRevoked, ingestRevoked, ingest, set } =
+        renderWithFakes({ outcome: "accepted" }, {});
+
+      emitVerificationRevoked(SIGNED_IN_TOKEN, revocation);
+
+      expect(ingestRevoked).toHaveBeenCalledTimes(1);
+      expect(ingestRevoked).toHaveBeenCalledWith(SIGNED_IN_TOKEN, revocation);
+      // It is a verdict-loss edge, not a session projection either way.
+      expect(ingest).not.toHaveBeenCalled();
+      expect(set).not.toHaveBeenCalled();
+    },
+  );
+
+  it("surfaces a toast naming the reason when main refuses the pushed session", async () => {
+    const { emitOutbound } = renderWithFakes(
+      {
+        outcome: "refused",
+        reason: "expired",
+      },
+      {},
+    );
+
+    await act(async () => {
+      emitOutbound(SIGNED_IN_SNAPSHOT);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(toast.warning).toHaveBeenCalledTimes(1);
+    const [message] = toast.warning.mock.calls[0] ?? [];
+    expect(message).toContain("could not verify this sign-in");
+    expect(message).toContain("the sign-in token had expired");
+    expect(message).not.toContain("bearer-token");
+  });
+
+  it("re-attempts the same session after a refusal instead of latching it", async () => {
+    // The refusal is the transient case that matters: authn unreachable at
+    // launch. A latch held over a write that landed nowhere makes the next
+    // projection of the same snapshot a no-op, and the jar plane stays closed
+    // until an unrelated rotation changes the bytes.
+    const { emitOutbound, set } = renderWithFakes(
+      {
+        outcome: "refused",
+        reason: "key-source-unavailable",
+      },
+      {},
+    );
+
+    await act(async () => {
+      emitOutbound(SIGNED_IN_SNAPSHOT);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(set).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      emitOutbound(SIGNED_IN_SNAPSHOT);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(set).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows nothing when main accepts the pushed session", async () => {
+    const { emitOutbound } = renderWithFakes({ outcome: "accepted" }, {});
+
+    await act(async () => {
+      emitOutbound(SIGNED_IN_SNAPSHOT);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(toast.warning).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "while verification is pending",
+      resolution: null,
+    },
+    {
+      label: "after main accepts it",
+      resolution: {
+        kind: "resolve" as const,
+        result: { outcome: "accepted" as const },
+      },
+    },
+    {
+      label: "after main refuses it",
+      resolution: {
+        kind: "resolve" as const,
+        result: { outcome: "refused" as const, reason: "expired" as const },
+      },
+    },
+    {
+      label: "after the bridge write rejects",
+      resolution: {
+        kind: "reject" as const,
+        cause: new Error("bridge closed"),
+      },
+    },
+  ])(
+    "does not ingest main's default signed-out snapshot $label",
+    async ({ resolution }) => {
+      const harness = renderWithFakes(
+        { outcome: "accepted" },
+        {
+          deferSet: true,
+          replayOutboundSnapshot: SIGNED_IN_SNAPSHOT,
+        },
+      );
+
+      expect(harness.set).toHaveBeenCalledWith({
+        status: "signed-in",
+        token: SIGNED_IN_SNAPSHOT.token,
+        profile: SIGNED_IN_SNAPSHOT.profile,
+      });
+
+      await act(async () => {
+        await drainMicrotasks();
+      });
+      expect(harness.ingest).not.toHaveBeenCalled();
+
+      if (resolution !== null) {
+        harness.resolveSet(resolution);
+        await act(async () => {
+          await drainMicrotasks();
+        });
+        expect(harness.ingest).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("keeps a synchronously accepted restored session without a startup sign-out", async () => {
+    const harness = renderWithFakes(
+      { outcome: "accepted" },
+      { replayOutboundSnapshot: SIGNED_IN_SNAPSHOT },
+    );
+
+    await act(async () => {
+      await drainMicrotasks();
+    });
+
+    expect(harness.ingest).not.toHaveBeenCalled();
+  });
+
+  it("asks main to restore this window's unverified local identity without publishing a session transition", async () => {
+    const harness = renderWithFakes(
+      { outcome: "accepted" },
+      { replayOutboundSnapshot: UNVERIFIED_SNAPSHOT },
+    );
+
+    await act(async () => {
+      await drainMicrotasks();
+    });
+
+    expect(harness.restoreLocal).toHaveBeenCalledOnce();
+    expect(harness.restoreLocal).toHaveBeenCalledWith({
+      userId: "u1",
+      token: SIGNED_IN_TOKEN,
+    });
+    expect(harness.set).not.toHaveBeenCalled();
+    expect(harness.ingest).not.toHaveBeenCalled();
+  });
+
+  it("publishes the same bearer again when local restoration is promoted", async () => {
+    const harness = renderWithFakes({ outcome: "accepted" }, {});
+
+    await act(async () => {
+      harness.emitOutbound(SIGNED_IN_SNAPSHOT);
+      await drainMicrotasks();
+    });
+    expect(harness.set).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      harness.emitOutbound(UNVERIFIED_SNAPSHOT);
+      await drainMicrotasks();
+    });
+    expect(harness.restoreLocal).toHaveBeenCalledWith({
+      userId: "u1",
+      token: SIGNED_IN_TOKEN,
+    });
+
+    await act(async () => {
+      harness.emitOutbound(SIGNED_IN_SNAPSHOT);
+      await drainMicrotasks();
+    });
+
+    expect(harness.set).toHaveBeenCalledTimes(2);
+    expect(harness.set).toHaveBeenLastCalledWith({
+      status: "signed-in",
+      token: SIGNED_IN_TOKEN,
+      profile: SIGNED_IN_SNAPSHOT.profile,
+    });
+  });
+
+  it("ignores an inbound unverified snapshot from another window", async () => {
+    const harness = renderWithFakes({ outcome: "accepted" }, {});
+
+    harness.emitInbound(UNVERIFIED_DESKTOP_SNAPSHOT);
+    await act(async () => {
+      await drainMicrotasks();
+    });
+
+    expect(harness.ingest).not.toHaveBeenCalled();
+  });
+
+  it("keeps old shells without local restore support on the existing unverified path", async () => {
+    const harness = renderWithFakes(
+      { outcome: "accepted" },
+      {
+        replayOutboundSnapshot: UNVERIFIED_SNAPSHOT,
+        omitRestoreLocal: true,
+      },
+    );
+
+    await act(async () => {
+      await drainMicrotasks();
+    });
+
+    expect(harness.set).not.toHaveBeenCalled();
+    expect(harness.ingest).not.toHaveBeenCalled();
+  });
+
+  it("ingests a live signed-out update from a sibling window", async () => {
+    const harness = renderWithFakes(
+      { outcome: "accepted" },
+      {
+        deferSet: true,
+        replayOutboundSnapshot: SIGNED_IN_SNAPSHOT,
+      },
+    );
+
+    harness.emitInbound(SIGNED_OUT_DESKTOP_SNAPSHOT);
+    await act(async () => {
+      await drainMicrotasks();
+    });
+
+    expect(harness.ingest).toHaveBeenCalledTimes(1);
+    expect(harness.ingest).toHaveBeenCalledWith({
+      status: "signed-out",
+      token: null,
+      profile: null,
+      contextMetadata: null,
+    });
+
+    harness.resolveSet({
+      kind: "resolve",
+      result: { outcome: "accepted" },
+    });
+  });
+
+  it("suppresses an accepted write's echo and cleans up both subscriptions", async () => {
+    const harness = renderWithFakes(
+      { outcome: "accepted" },
+      {
+        deferSet: true,
+        replayOutboundSnapshot: SIGNED_IN_SNAPSHOT,
+      },
+    );
+
+    harness.resolveSet({
+      kind: "resolve",
+      result: { outcome: "accepted" },
+    });
+    await act(async () => {
+      await drainMicrotasks();
+    });
+
+    harness.emitInbound({
+      status: "signed-in",
+      token: SIGNED_IN_SNAPSHOT.token,
+      profile: SIGNED_IN_SNAPSHOT.profile,
+    });
+    expect(harness.ingest).not.toHaveBeenCalled();
+
+    harness.unmount();
+    expect(harness.outboundDispose).toHaveBeenCalledTimes(1);
+    expect(harness.inboundDispose).toHaveBeenCalledTimes(1);
+
+    harness.emitInbound(SIGNED_OUT_DESKTOP_SNAPSHOT);
+    harness.emitOutbound({
+      status: "signed-out",
+      token: null,
+      profile: null,
+      contextMetadata: null,
+    });
+    expect(harness.ingest).not.toHaveBeenCalled();
+    expect(harness.set).toHaveBeenCalledTimes(1);
+  });
+});

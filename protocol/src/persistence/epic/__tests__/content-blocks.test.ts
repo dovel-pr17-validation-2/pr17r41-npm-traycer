@@ -1,0 +1,1596 @@
+import { describe, expect, it } from "vitest";
+import { z } from "zod";
+import {
+  agentFailureSchema,
+  contentBlockSchema,
+  contentBlockSchemaPreBrowser,
+  contentBlockSchemaPreFallback,
+  contentBlockSchemaPreHtml,
+  contentBlockSchemaPreImage,
+  contentBlockSchemaPreMcpApp,
+  contentBlockSchemaPreReasonix,
+  contentBlockSchemaPreReceipt,
+  contentBlockSchemaPreSettlement,
+  contentBlockSchemaPreShellHost,
+  contentBlockSchemaV18,
+  decodeAutonomousResumeBlock,
+  encodeAutonomousResumeBlock,
+  errorBlockSchema,
+  errorBlockSchemaPreFallback,
+  providerNoticeKindSchema,
+  providerNoticeKindSchemaPreFallback,
+  autonomousResumeBlockSchema,
+  autonomousResumeBlockSchemaV18,
+  providerNoticeMetadataSchema,
+  providerNoticeNormalizedMetadataSchema,
+  interviewQuestionSchema,
+  subAgentBlockSchema,
+  textBlockSchema,
+  toolCallBlockSchema,
+  toolCallBlockSchemaPreDelivery,
+  type ApprovalBlock,
+  type AutonomousResumeBlock,
+  type FileChangeBlock,
+  type InterviewBlock,
+  type SubAgentBlock,
+  type TextBlock,
+  type ToolCallBlock,
+  type ToolCallManagedCommandRestarted,
+} from "@traycer/protocol/persistence/epic/content-blocks";
+import { validateVersionedStreamRpcRegistry } from "@traycer/protocol/framework/versioned-stream-rpc";
+import { hostStreamRpcRegistry } from "@traycer/protocol/host/index";
+import {
+  chatSubscribeV18,
+  chatSubscribeV19,
+} from "@traycer/protocol/host/agent/gui/subscribe";
+import { toCanonicalJsonSchema } from "@traycer/protocol/framework/json-schema-fingerprint";
+
+describe("fileChangeBlockSchema backward-compat", () => {
+  it("parses a pre-compaction file_change block (no hashes/counts) via defaults", () => {
+    // A block persisted before the payload-compaction change: it carries the
+    // old inline beforeContent/afterContent (now unknown keys, stripped) and
+    // lacks beforeHash/afterHash/additions/deletions. It must parse cleanly -
+    // a hard ZodError here would break agent.getTranscript for the whole chat.
+    const legacy = {
+      type: "file_change",
+      blockId: "blk-legacy",
+      status: "completed",
+      timestamp: 1,
+      filePath: "/repo/src/app.ts",
+      operation: "edit",
+      diffSource: "snapshot",
+      beforeContent: "old\n",
+      afterContent: "new\n",
+      reason: "snapshot",
+    };
+
+    const parsed = contentBlockSchema.parse(legacy);
+    expect(parsed.type).toBe("file_change");
+    const block = parsed as FileChangeBlock;
+    expect(block.beforeHash).toBeNull();
+    expect(block.afterHash).toBeNull();
+    expect(block.additions).toBe(0);
+    expect(block.deletions).toBe(0);
+    // The dropped inline content is not retained.
+    expect("beforeContent" in block).toBe(false);
+  });
+
+  it("parses a pre-refactor tool_call block (raw input, no summary/detail) via defaults", () => {
+    // A block persisted before the structured-input refactor: it carries the
+    // old inline `input` (now an unknown key, stripped) and lacks
+    // inputSummary/inputDetail/taskTodoItems. It must parse cleanly - a hard
+    // ZodError here would break agent.getTranscript for the whole chat.
+    const legacy = {
+      type: "tool_call",
+      blockId: "tc-legacy",
+      status: "completed",
+      timestamp: 1,
+      toolName: "Edit",
+      input: { file_path: "/repo/a.ts", old_string: "x", new_string: "y" },
+      error: null,
+    };
+
+    const block = contentBlockSchema.parse(legacy) as ToolCallBlock;
+    expect(block.type).toBe("tool_call");
+    expect(block.inputSummary).toBeNull();
+    expect(block.inputDetail).toBeNull();
+    expect(block.taskTodoItems).toBeNull();
+    expect(block.endedAt).toBeNull();
+    // The dropped raw input - the bloat carrier - is not retained.
+    expect("input" in block).toBe(false);
+  });
+
+  it("round-trips a current tool_call block with structured input fields", () => {
+    const block = contentBlockSchema.parse({
+      type: "tool_call",
+      blockId: "tc-current",
+      status: "completed",
+      timestamp: 2,
+      toolName: "TaskUpdate",
+      inputSummary: "1",
+      inputDetail: {
+        kind: "fields",
+        entries: [{ key: "id", label: "Id", value: "1" }],
+      },
+      taskTodoItems: [
+        {
+          id: "1",
+          text: null,
+          status: "completed",
+          priority: null,
+          activeForm: null,
+          action: "update",
+        },
+      ],
+      error: null,
+    }) as ToolCallBlock;
+    expect(block.inputSummary).toBe("1");
+    expect(block.inputDetail).toEqual({
+      kind: "fields",
+      entries: [{ key: "id", label: "Id", value: "1" }],
+    });
+    expect(block.taskTodoItems).toEqual([
+      {
+        id: "1",
+        text: null,
+        status: "completed",
+        priority: null,
+        activeForm: null,
+        action: "update",
+      },
+    ]);
+  });
+
+  it("parses a pre-refactor approval block (raw input) via defaults", () => {
+    const block = contentBlockSchema.parse({
+      type: "approval",
+      blockId: "ap-legacy",
+      status: "completed",
+      timestamp: 1,
+      toolName: "Edit",
+      description: null,
+      input: { file_path: "/repo/a.ts", old_string: "x" },
+      decision: { approved: true, reason: null },
+    }) as ApprovalBlock;
+    expect(block.type).toBe("approval");
+    expect(block.inputSummary).toBeNull();
+    expect(block.inputDetail).toBeNull();
+    expect("input" in block).toBe(false);
+  });
+
+  it("parses a pre-refactor interview block (raw input/output stripped)", () => {
+    const block = contentBlockSchema.parse({
+      type: "interview",
+      blockId: "iv-legacy",
+      status: "completed",
+      timestamp: 1,
+      toolName: "AskUserQuestion",
+      title: null,
+      description: null,
+      questions: [],
+      answers: [],
+      input: { questions: [{ question: "Q?" }] },
+      output: { answer: "A" },
+      error: null,
+      metadata: null,
+    }) as InterviewBlock;
+    expect(block.type).toBe("interview");
+    expect("input" in block).toBe(false);
+    expect("output" in block).toBe(false);
+  });
+
+  it("round-trips a current file_change block with hashes and counts", () => {
+    const current = {
+      type: "file_change",
+      blockId: "blk-current",
+      status: "completed",
+      timestamp: 2,
+      filePath: "/repo/src/app.ts",
+      operation: "edit",
+      diffSource: "snapshot",
+      beforeHash: "a".repeat(64),
+      afterHash: "b".repeat(64),
+      additions: 3,
+      deletions: 1,
+      reason: "snapshot",
+    };
+
+    const block = contentBlockSchema.parse(current) as FileChangeBlock;
+    expect(block.beforeHash).toBe("a".repeat(64));
+    expect(block.afterHash).toBe("b".repeat(64));
+    expect(block.additions).toBe(3);
+    expect(block.deletions).toBe(1);
+  });
+
+  it("round-trips a plan block with source, preview, actions, and approval linkage", () => {
+    const parsed = contentBlockSchema.parse({
+      type: "plan",
+      blockId: "plan-block-1",
+      status: "completed",
+      timestamp: 3,
+      planStatus: "awaiting_approval",
+      planId: "plan-1",
+      harnessId: "codex",
+      source: {
+        harnessId: "codex",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        kind: "provider-plan",
+      },
+      title: "Protocol plan",
+      summary: "Add first-class plan protocol support.",
+      markdownPreview: "## Plan\n- Add schemas",
+      fullContentRef: { kind: "plan_content", hash: "hash-1" },
+      steps: [
+        {
+          id: "step-1",
+          text: "Add schemas",
+          status: "completed",
+          activeForm: null,
+        },
+      ],
+      actions: [
+        {
+          id: "implement",
+          label: "Implement",
+          decision: "approve",
+          variant: "primary",
+        },
+      ],
+      approvalId: "approval-1",
+      supersededByPlanId: null,
+      metadata: { providerEvent: "turn/plan/updated" },
+    });
+
+    if (parsed.type !== "plan") {
+      throw new Error("Expected parsed block to be a plan");
+    }
+    expect(parsed.planStatus).toBe("awaiting_approval");
+    expect(parsed.source.turnId).toBe("turn-1");
+    expect(parsed.fullContentRef).toEqual({
+      kind: "plan_content",
+      hash: "hash-1",
+    });
+    expect(parsed.actions).toEqual([
+      {
+        id: "implement",
+        label: "Implement",
+        decision: "approve",
+        variant: "primary",
+      },
+    ]);
+  });
+
+  it("parses a sparse plan block with defaults", () => {
+    const parsed = contentBlockSchema.parse({
+      type: "plan",
+      blockId: "plan-block-sparse",
+      status: "streaming",
+      timestamp: 4,
+      planStatus: "drafting",
+      planId: "plan-sparse",
+      harnessId: "codex",
+      source: {
+        harnessId: "codex",
+        kind: "provider-plan",
+      },
+    });
+
+    if (parsed.type !== "plan") {
+      throw new Error("Expected parsed block to be a plan");
+    }
+    expect(parsed.source.sessionId).toBeNull();
+    expect(parsed.source.turnId).toBeNull();
+    expect(parsed.title).toBeNull();
+    expect(parsed.summary).toBeNull();
+    expect(parsed.markdownPreview).toBe("");
+    expect(parsed.fullContentRef).toBeNull();
+    expect(parsed.steps).toEqual([]);
+    expect(parsed.actions).toEqual([]);
+    expect(parsed.approvalId).toBeNull();
+    expect(parsed.supersededByPlanId).toBeNull();
+    expect(parsed.metadata).toBeNull();
+  });
+});
+
+describe("toolCallManagedCommandSchema (started/restarted union)", () => {
+  const baseToolCall = {
+    type: "tool_call" as const,
+    blockId: "tc-shell",
+    status: "completed" as const,
+    timestamp: 1,
+    toolName: "traycer_run_shell",
+    error: null,
+  };
+
+  it("parses a legacy identity-only managedCommand (pre-restart-correlation) as a started event with cwd:null", () => {
+    // Every block stamped before restarts were correlated carries only the
+    // identity fields - the union's started member defaults `event` and
+    // `cwd` so this old shape still parses instead of failing the block.
+    const block = contentBlockSchema.parse({
+      ...baseToolCall,
+      managedCommand: {
+        commandId: "cmd-1",
+        description: "deploy watcher",
+        monitoring: true,
+      },
+    }) as ToolCallBlock;
+    expect(block.managedCommand).toEqual({
+      event: "started",
+      commandId: "cmd-1",
+      description: "deploy watcher",
+      monitoring: true,
+      cwd: null,
+    });
+  });
+
+  it("round-trips a started payload carrying cwd", () => {
+    const block = contentBlockSchema.parse({
+      ...baseToolCall,
+      managedCommand: {
+        event: "started",
+        commandId: "cmd-1",
+        description: "deploy watcher",
+        monitoring: true,
+        cwd: "/work/repo",
+      },
+    }) as ToolCallBlock;
+    expect(block.managedCommand).toEqual({
+      event: "started",
+      commandId: "cmd-1",
+      description: "deploy watcher",
+      monitoring: true,
+      cwd: "/work/repo",
+    });
+  });
+
+  it("round-trips a restarted payload with a running outcome", () => {
+    const restarted: ToolCallManagedCommandRestarted = {
+      event: "restarted",
+      commandId: "cmd-1",
+      description: "deploy watcher",
+      monitoring: true,
+      effectiveCommand: "tail -f deploy.log --since 1h",
+      effectiveCwd: "/work/repo",
+      commandChanged: true,
+      cwdChanged: false,
+      outcome: { state: "running", pid: 4410, startedAtMs: 10 },
+    };
+    const block = toolCallBlockSchema.parse({
+      ...baseToolCall,
+      managedCommand: restarted,
+    });
+    expect(block.managedCommand).toEqual(restarted);
+
+    // Through the full contentBlockSchema union too - the restarted member is
+    // tried FIRST precisely so a shape carrying its own required `event`
+    // literal is never reinterpreted as a defaulted started shape.
+    const viaContentBlock = contentBlockSchema.parse({
+      ...baseToolCall,
+      managedCommand: restarted,
+    }) as ToolCallBlock;
+    expect(viaContentBlock.managedCommand).toEqual(restarted);
+  });
+
+  it("round-trips a restarted payload with an exited/null-code outcome (spawn failure)", () => {
+    const restarted: ToolCallManagedCommandRestarted = {
+      event: "restarted",
+      commandId: "cmd-1",
+      description: "deploy watcher",
+      monitoring: false,
+      effectiveCommand: "tail -f deploy.log",
+      effectiveCwd: "/work/repo",
+      commandChanged: false,
+      cwdChanged: true,
+      outcome: {
+        state: "exited",
+        exitCode: null,
+        signal: null,
+        exitedAtMs: 20,
+      },
+    };
+    const block = toolCallBlockSchema.parse({
+      ...baseToolCall,
+      managedCommand: restarted,
+    });
+    expect(block.managedCommand).toEqual(restarted);
+  });
+
+  it("rejects a restarted payload missing a required field (effectiveCwd)", () => {
+    const incomplete = {
+      event: "restarted" as const,
+      commandId: "cmd-1",
+      description: "deploy watcher",
+      monitoring: true,
+      effectiveCommand: "tail -f deploy.log",
+      // effectiveCwd omitted - the restarted member has no default for it,
+      // and the started member's literal "started" cannot match "restarted".
+      commandChanged: true,
+      cwdChanged: false,
+      outcome: { state: "running" as const, pid: 1, startedAtMs: 1 },
+    };
+    const result = toolCallBlockSchema.safeParse({
+      ...baseToolCall,
+      managedCommand: incomplete,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("still parses managedCommand: null (every non-shell tool call)", () => {
+    const block = contentBlockSchema.parse({
+      ...baseToolCall,
+      managedCommand: null,
+    }) as ToolCallBlock;
+    expect(block.managedCommand).toBeNull();
+  });
+});
+
+describe("subAgentBlockSchema workflowMeta (no new persisted block type)", () => {
+  const workflowSubAgentBlock = {
+    type: "subagent",
+    blockId: "wf-1",
+    status: "completed",
+    timestamp: 1000,
+    name: "review",
+    agentType: null,
+    task: "Review the diff",
+    progressUpdates: ["Find: find:host-core"],
+    result: "3 findings",
+    startedAt: 900,
+    spawnToolCallId: "toolu_workflow_1",
+    stopped: false,
+    workflowMeta: {
+      name: "review",
+      intent: "Review the diff",
+      activity: [
+        { kind: "phase", text: "Find" },
+        { kind: "label", text: "find:host-core" },
+      ],
+      agentsStarted: 16,
+      agentsFinished: 16,
+      totalTokens: 120000,
+    },
+  };
+
+  it("round-trips a dual-written workflow subagent block through the current schema", () => {
+    const parsed = subAgentBlockSchema.parse(
+      workflowSubAgentBlock,
+    ) as SubAgentBlock;
+    expect(parsed.name).toBe("review");
+    expect(parsed.task).toBe("Review the diff");
+    expect(parsed.workflowMeta).toEqual(workflowSubAgentBlock.workflowMeta);
+  });
+
+  it("defaults workflowMeta to null for an ordinary (pre-workflow) subagent block", () => {
+    const { workflowMeta: _workflowMeta, ...ordinary } = workflowSubAgentBlock;
+    const parsed = subAgentBlockSchema.parse(ordinary) as SubAgentBlock;
+    expect(parsed.workflowMeta).toBeNull();
+  });
+
+  it("old-reader compat: a pre-workflowMeta subAgentBlockSchema parses a workflowMeta-bearing block, stripping the unknown key (plan invariant 6)", () => {
+    // Field-for-field copy of `subAgentBlockSchema` as it existed before
+    // `workflowMeta` was added - stands in for a released host's baked schema.
+    // Persisted bytes must stay readable by any released host (tech plan
+    // §2.2 / critique finding 1: no new block `type`, only an
+    // additive/defaulted field on the existing `subagent` block). A hard
+    // ZodError here would make a chat containing a workflow run entirely
+    // unreadable on an older host, not just degraded.
+    const preWorkflowMetaSubAgentBlockSchema = z.object({
+      blockId: z.string(),
+      status: z.enum([
+        "streaming",
+        "completed",
+        "errored",
+        "interrupted",
+        "superseded",
+      ]),
+      timestamp: z.number(),
+      parentBlockId: z.string().nullish(),
+      type: z.literal("subagent"),
+      name: z.string().nullable(),
+      agentType: z.string().nullable().default(null),
+      task: z.string().nullable(),
+      progressUpdates: z.array(z.string()),
+      result: z.string().nullable(),
+      startedAt: z.number().nullable().default(null),
+      spawnToolCallId: z.string().nullable().default(null),
+      stopped: z.boolean().default(false),
+    });
+
+    const parsed = preWorkflowMetaSubAgentBlockSchema.parse(
+      workflowSubAgentBlock,
+    );
+    expect(parsed.type).toBe("subagent");
+    expect(parsed.name).toBe("review");
+    expect(parsed.result).toBe("3 findings");
+    // The rich workflow data is not retained by the older reader - the base
+    // subagent fields are the faithful degradation.
+    expect("workflowMeta" in parsed).toBe(false);
+  });
+});
+
+describe("autonomousResumeBlockSchema wakeup persistence compat", () => {
+  const baseFields = {
+    type: "autonomous_resume" as const,
+    blockId: "resume-1",
+    status: "completed" as const,
+    timestamp: 1,
+  };
+
+  it("freezes delivery placement out of chat.subscribe 1.8 and includes it in 1.9", () => {
+    const frozen = toCanonicalJsonSchema(
+      chatSubscribeV18.serverFrameSchema,
+      {},
+    );
+    const current = toCanonicalJsonSchema(
+      chatSubscribeV19.serverFrameSchema,
+      {},
+    );
+    expect(JSON.stringify(frozen)).not.toContain("deliveryPlacement");
+    expect(JSON.stringify(current)).toContain("deliveryPlacement");
+  });
+
+  it("normalizes a missing delivery placement to null on schema and raw decode", () => {
+    const raw = {
+      ...baseFields,
+      triggers: [],
+      wakeTriggers: undefined,
+    };
+    expect(decodeAutonomousResumeBlock(raw).deliveryPlacement).toBeNull();
+    expect(contentBlockSchema.parse(raw)).toMatchObject({
+      type: "autonomous_resume",
+      deliveryPlacement: null,
+    });
+  });
+
+  it("round-trips both delivery placements and omits them from the frozen codec", () => {
+    for (const deliveryPlacement of ["in_turn", "turn_start"] as const) {
+      const domain = autonomousResumeBlockSchema.parse({
+        ...baseFields,
+        deliveryPlacement,
+        triggers: [],
+      });
+      expect(autonomousResumeBlockSchema.encode(domain).deliveryPlacement).toBe(
+        deliveryPlacement,
+      );
+      const frozen = autonomousResumeBlockSchemaV18.encode(domain);
+      expect("deliveryPlacement" in frozen).toBe(false);
+      expect(autonomousResumeBlockSchemaV18.decode(frozen)).not.toHaveProperty(
+        "deliveryPlacement",
+      );
+    }
+  });
+
+  it("decodes a raw pre-wakeTriggers stored block (v1.1.3 data, NO schema parse) without throwing", () => {
+    // The host's storage hot path (`decodeStoredBlock` in
+    // `chat-message-collections.ts`) calls this function on raw Yjs JSON
+    // WITHOUT a schema parse, so `.default([])` never runs: every
+    // autonomous_resume block written before the wakeTriggers key existed
+    // lacks it entirely. Regression: this exact shape crashed every chat
+    // open with "Cannot read properties of undefined (reading 'length')".
+    const rawV113Stored = {
+      ...baseFields,
+      triggers: [
+        {
+          kind: "command" as const,
+          title: "cmd",
+          status: "completed" as const,
+          summary: "ran",
+          blockId: "",
+          outputFile: null,
+          mcp: null,
+          managedCommand: null,
+          live: false,
+        },
+      ],
+      wakeTriggers: undefined,
+    };
+    const decoded = decodeAutonomousResumeBlock(rawV113Stored);
+    expect(decoded.triggers.map((t) => t.kind)).toEqual(["command"]);
+    expect("wakeTriggers" in decoded).toBe(false);
+  });
+
+  it("defaults `live` to false, so every trigger persisted before it existed reads as terminal", () => {
+    const stored = {
+      ...baseFields,
+      triggers: [
+        { kind: "monitor", title: "build", status: "completed", summary: "s" },
+      ],
+    };
+    const parsed = contentBlockSchema.parse(stored);
+    if (parsed.type !== "autonomous_resume") {
+      throw new Error("Expected parsed block to be autonomous_resume");
+    }
+    expect(parsed.triggers[0]?.live).toBe(false);
+  });
+
+  it("round-trips a live trigger through the storage codec", () => {
+    // `live` says the producing command was STILL RUNNING when the digest was
+    // rendered - the one thing the `status` enum cannot express. It has to
+    // survive the encode/decode the storage path puts every block through, or
+    // the divider would silently revert to claiming the command finished.
+    const stored = {
+      ...baseFields,
+      triggers: [
+        {
+          kind: "monitor",
+          title: "build",
+          status: "completed",
+          summary: "still running - 12 new log lines",
+          live: true,
+        },
+      ],
+    };
+    const parsed = contentBlockSchema.parse(stored);
+    if (parsed.type !== "autonomous_resume") {
+      throw new Error("Expected parsed block to be autonomous_resume");
+    }
+    expect(parsed.triggers[0]?.live).toBe(true);
+    const reDecoded = decodeAutonomousResumeBlock(
+      encodeAutonomousResumeBlock(parsed),
+    );
+    expect(reDecoded.triggers[0]?.live).toBe(true);
+  });
+
+  it("never marks a fired wake as live: a wake is terminal by construction", () => {
+    const stored = {
+      ...baseFields,
+      triggers: [],
+      wakeTriggers: [{ title: "wake1", status: "completed", summary: "woke" }],
+    };
+    const parsed = contentBlockSchema.parse(stored);
+    if (parsed.type !== "autonomous_resume") {
+      throw new Error("Expected parsed block to be autonomous_resume");
+    }
+    expect(parsed.triggers[0]?.live).toBe(false);
+  });
+
+  it("parses a legacy pre-fix block with kind:'wakeup' inline in triggers (rc/dev data)", () => {
+    const legacy = {
+      ...baseFields,
+      triggers: [
+        {
+          kind: "wakeup",
+          title: "legacy wake",
+          status: "completed",
+          summary: "s",
+        },
+      ],
+    };
+    const parsed = contentBlockSchema.parse(legacy);
+    if (parsed.type !== "autonomous_resume") {
+      throw new Error("Expected parsed block to be autonomous_resume");
+    }
+    expect(parsed.triggers).toEqual([
+      {
+        kind: "wakeup",
+        title: "legacy wake",
+        status: "completed",
+        summary: "s",
+        blockId: "",
+        outputFile: null,
+        mcp: null,
+        managedCommand: null,
+        live: false,
+      },
+    ]);
+    expect("wakeTriggers" in parsed).toBe(false);
+  });
+
+  it("merges the additive wakeTriggers field into triggers, appended after task triggers", () => {
+    const stored = {
+      ...baseFields,
+      triggers: [
+        {
+          kind: "command",
+          title: "cmd",
+          status: "completed",
+          summary: "ran",
+        },
+      ],
+      wakeTriggers: [{ title: "wake1", status: "completed", summary: "woke" }],
+    };
+    const parsed = contentBlockSchema.parse(stored);
+    if (parsed.type !== "autonomous_resume") {
+      throw new Error("Expected parsed block to be autonomous_resume");
+    }
+    expect(parsed.triggers.map((t) => t.kind)).toEqual(["command", "wakeup"]);
+    expect(parsed.triggers[1]).toEqual({
+      kind: "wakeup",
+      title: "wake1",
+      status: "completed",
+      summary: "woke",
+      blockId: "",
+      outputFile: null,
+      mcp: null,
+      managedCommand: null,
+      live: false,
+    });
+    expect("wakeTriggers" in parsed).toBe(false);
+  });
+
+  it("v1.1.3 hosts would strip the unknown wakeTriggers key and still parse (empty-marker degradation)", () => {
+    // Simulates the OLD closed enum (no "wakeup") plus the absence of the
+    // wakeTriggers key entirely - what a v1.1.3 `chatSchema.safeParse` sees
+    // once new-host writes have gone through `encodeAutonomousResumeBlock`.
+    const oldEnumTriggerSchema = z.object({
+      kind: z.enum(["command", "monitor", "subagent"]),
+      title: z.string(),
+      status: z.enum(["completed", "failed", "stopped"]),
+      summary: z.string(),
+      blockId: z.string().default(""),
+      outputFile: z
+        .object({ workspacePath: z.string(), filePath: z.string() })
+        .nullable()
+        .default(null),
+    });
+    const oldBlockSchema = z.object({
+      type: z.literal("autonomous_resume"),
+      blockId: z.string(),
+      status: z.enum(["streaming", "completed", "errored"]),
+      timestamp: z.number(),
+      triggers: z.array(oldEnumTriggerSchema),
+    });
+
+    const domain: AutonomousResumeBlock = {
+      ...baseFields,
+      deliveryPlacement: null,
+      triggers: [
+        {
+          kind: "wakeup",
+          title: "wake1",
+          status: "completed",
+          summary: "woke",
+          blockId: "",
+          outputFile: null,
+          mcp: null,
+          managedCommand: null,
+          live: false,
+        },
+      ],
+    };
+    const encoded = encodeAutonomousResumeBlock(domain);
+
+    const result = oldBlockSchema.safeParse(encoded);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.triggers).toEqual([]);
+    }
+  });
+
+  it("round-trips encode -> decode for a mixed trigger set (canonical order: task triggers, then wakeup)", () => {
+    const domain: AutonomousResumeBlock = {
+      ...baseFields,
+      deliveryPlacement: null,
+      triggers: [
+        {
+          kind: "subagent",
+          title: "sub",
+          status: "completed",
+          summary: "done",
+          blockId: "sub-block",
+          outputFile: null,
+          mcp: null,
+          managedCommand: null,
+          live: false,
+        },
+        {
+          kind: "wakeup",
+          title: "wake1",
+          status: "completed",
+          summary: "woke",
+          blockId: "",
+          outputFile: null,
+          mcp: null,
+          managedCommand: null,
+          live: false,
+        },
+      ],
+    };
+
+    const encoded = encodeAutonomousResumeBlock(domain);
+    expect(encoded.triggers).toHaveLength(1);
+    expect(encoded.triggers[0]?.kind).toBe("subagent");
+    expect(encoded.wakeTriggers).toEqual([
+      {
+        title: "wake1",
+        status: "completed",
+        summary: "woke",
+        blockId: "",
+        outputFile: null,
+      },
+    ]);
+
+    const decoded = decodeAutonomousResumeBlock(encoded);
+    expect(decoded).toEqual(domain);
+  });
+
+  it("decode is idempotent - re-decoding an already-domain-shaped block is a no-op", () => {
+    const domain: AutonomousResumeBlock = {
+      ...baseFields,
+      deliveryPlacement: null,
+      triggers: [
+        {
+          kind: "wakeup",
+          title: "wake1",
+          status: "completed",
+          summary: "woke",
+          blockId: "",
+          outputFile: null,
+          mcp: null,
+          managedCommand: null,
+          live: false,
+        },
+      ],
+    };
+    const reparsed = contentBlockSchema.parse(domain);
+    expect(reparsed).toEqual(domain);
+  });
+
+  it("z.encode on the full contentBlockSchema union splits wakeup triggers into wakeTriggers", () => {
+    const domain: AutonomousResumeBlock = {
+      ...baseFields,
+      deliveryPlacement: null,
+      triggers: [
+        {
+          kind: "wakeup",
+          title: "wake1",
+          status: "completed",
+          summary: "woke",
+          blockId: "",
+          outputFile: null,
+          mcp: null,
+          managedCommand: null,
+          live: false,
+        },
+      ],
+    };
+    const encoded = z.encode(contentBlockSchema, domain);
+    if (encoded.type !== "autonomous_resume") {
+      throw new Error("Expected encoded block to be autonomous_resume");
+    }
+    expect(encoded.triggers).toEqual([]);
+    expect(encoded.wakeTriggers).toEqual([
+      {
+        title: "wake1",
+        status: "completed",
+        summary: "woke",
+        blockId: "",
+        outputFile: null,
+      },
+    ]);
+  });
+
+  it("importing hostStreamRpcRegistry succeeds and both JSON-schema IO modes generate without throwing", () => {
+    // Regression guard for the actual bug this codec fixes: a plain
+    // `.transform()` here would make full stream-registry validation throw
+    // "Transforms cannot be represented in JSON Schema" the moment any
+    // `chat.subscribe` contract (which embeds `chatSchema`, which embeds this
+    // block) gets its fields JSON-schema-serialized. Construction is
+    // structural-only, so the guard is the explicit full validator over the
+    // line's head: one contract serializes the block, the whole line repeats it.
+    const line = hostStreamRpcRegistry["chat.subscribe"][1];
+    expect(() =>
+      validateVersionedStreamRpcRegistry({
+        "chat.subscribe": {
+          1: {
+            ...line,
+            versions: { [line.latestMinor]: line.versions[line.latestMinor] },
+          },
+        },
+      }),
+    ).not.toThrow();
+    expect(() => toCanonicalJsonSchema(contentBlockSchema, {})).not.toThrow();
+    expect(() =>
+      toCanonicalJsonSchema(contentBlockSchema, { io: "input" }),
+    ).not.toThrow();
+  });
+});
+
+describe("textBlockSchema providerNotice (no new persisted block type)", () => {
+  const modelReroutedBlock = {
+    type: "text",
+    blockId: "notice-1",
+    status: "completed",
+    timestamp: 1000,
+    text: "Codex switched from gpt-5 to gpt-5-safe (highRiskCyberActivity).",
+    providerNotice: {
+      harnessId: "codex",
+      noticeKind: "model_rerouted",
+      tone: "warning",
+      title: "Model changed",
+      message: "Codex switched from gpt-5 to gpt-5-safe.",
+      details: [
+        { label: "Reason", value: "highRiskCyberActivity" },
+        { label: "From", value: "gpt-5" },
+        { label: "To", value: "gpt-5-safe" },
+      ],
+      metadata: {
+        type: "model_rerouted",
+        fromModel: "gpt-5",
+        toModel: "gpt-5-safe",
+        reason: "highRiskCyberActivity",
+      },
+    },
+  };
+
+  it("defaults providerNotice to null for a legacy text block (no providerNotice key)", () => {
+    const { providerNotice: _providerNotice, ...legacy } = modelReroutedBlock;
+    const parsed = contentBlockSchema.parse(legacy) as TextBlock;
+    expect(parsed.type).toBe("text");
+    expect(parsed.providerNotice).toBeNull();
+  });
+
+  it("round-trips a model_rerouted provider notice text block", () => {
+    const parsed = contentBlockSchema.parse(modelReroutedBlock) as TextBlock;
+    expect(parsed.type).toBe("text");
+    expect(parsed.text).toBe(modelReroutedBlock.text);
+    expect(parsed.providerNotice).toEqual(modelReroutedBlock.providerNotice);
+  });
+
+  it("round-trips a model_verification provider notice text block", () => {
+    const block = {
+      type: "text",
+      blockId: "notice-2",
+      status: "completed",
+      timestamp: 1001,
+      text: "Model verification active (trustedAccessForCyber).",
+      providerNotice: {
+        harnessId: "codex",
+        noticeKind: "model_verification",
+        tone: "info",
+        title: "Model verification active",
+        message: "trustedAccessForCyber",
+        details: [{ label: "Verifications", value: "trustedAccessForCyber" }],
+        metadata: {
+          type: "model_verification",
+          verifications: ["trustedAccessForCyber"],
+        },
+      },
+    };
+    const parsed = contentBlockSchema.parse(block) as TextBlock;
+    expect(parsed.providerNotice?.metadata).toEqual({
+      type: "model_verification",
+      verifications: ["trustedAccessForCyber"],
+    });
+  });
+
+  it("round-trips a safety_buffering provider notice text block, including a null terminalReason while streaming", () => {
+    const block = {
+      type: "text",
+      blockId: "notice-3",
+      status: "streaming",
+      timestamp: 1002,
+      text: "Safety check in progress.",
+      providerNotice: {
+        harnessId: "codex",
+        noticeKind: "safety_buffering",
+        tone: "info",
+        title: "Safety check in progress",
+        message: "Running gpt-5, may fall back to gpt-5-fast.",
+        details: [
+          { label: "Model", value: "gpt-5" },
+          { label: "Faster model", value: "gpt-5-fast" },
+        ],
+        metadata: {
+          type: "safety_buffering",
+          model: "gpt-5",
+          fasterModel: "gpt-5-fast",
+          useCases: ["cyber"],
+          reasons: ["highRiskCyberActivity"],
+          terminalReason: null,
+        },
+      },
+    };
+    const parsed = contentBlockSchema.parse(block) as TextBlock;
+    expect(parsed.providerNotice?.metadata).toMatchObject({
+      type: "safety_buffering",
+      terminalReason: null,
+    });
+  });
+
+  it("old-reader compat: a pre-providerNotice textBlockSchema parses a providerNotice-bearing block, stripping the unknown key", () => {
+    // Field-for-field copy of `textBlockSchema` as it existed before
+    // `providerNotice` was added - stands in for a released host's baked
+    // schema. A provider-notice text block must stay readable by any
+    // released host as plain assistant text (tech plan: compatibility-safe
+    // persisted shape, no new `ContentBlock.type`).
+    const preProviderNoticeTextBlockSchema = z.object({
+      blockId: z.string(),
+      status: z.enum(["streaming", "completed", "errored"]),
+      timestamp: z.number(),
+      parentBlockId: z.string().nullish(),
+      type: z.literal("text"),
+      text: z.string(),
+    });
+
+    const parsed = preProviderNoticeTextBlockSchema.parse(modelReroutedBlock);
+    expect(parsed.type).toBe("text");
+    expect(parsed.text).toBe(modelReroutedBlock.text);
+    // The enrichment is not retained by the older reader - the base text
+    // field is the faithful degradation.
+    expect("providerNotice" in parsed).toBe(false);
+  });
+
+  const harnessMessageBlock = {
+    type: "text",
+    blockId: "notice-hm-1",
+    status: "completed",
+    timestamp: 1002,
+    text: "UserPromptSubmit operation blocked by hook: no secrets in prompts",
+    providerNotice: {
+      harnessId: "claude",
+      noticeKind: "harness_message",
+      tone: "warning",
+      title: "Claude Code warning",
+      message:
+        "UserPromptSubmit operation blocked by hook: no secrets in prompts",
+      details: [],
+      metadata: null,
+    },
+  };
+
+  it("round-trips a harness_message provider notice text block", () => {
+    const parsed = contentBlockSchema.parse(harnessMessageBlock) as TextBlock;
+    expect(parsed.type).toBe("text");
+    expect(parsed.providerNotice?.noticeKind).toBe("harness_message");
+    // The generic kind is deliberately metadata-less: it carries prose the
+    // harness wrote, not structured facts.
+    expect(parsed.providerNotice?.metadata).toBeNull();
+  });
+
+  it("keeps harness_message off every released line: the pre-Reasonix freeze rejects it", () => {
+    // `contentBlockSchemaPreImage` / `PreSettlement` are bound to the released
+    // `chat.subscribe@1.0`-`1.6` lines and the epic `2.0` record. A released
+    // peer strict-decodes the kind, so the freeze must reject the value rather
+    // than strip it - the host's frame projection is what keeps it from ever
+    // being sent (`chat-frame-projection.ts`).
+    expect(
+      contentBlockSchemaPreImage.safeParse(harnessMessageBlock).success,
+    ).toBe(false);
+    expect(
+      contentBlockSchemaPreSettlement.safeParse(harnessMessageBlock).success,
+    ).toBe(false);
+    // The same block minus the new kind still parses on those lines, so the
+    // rejection is the enum value and not the block shape.
+    expect(
+      contentBlockSchemaPreSettlement.safeParse({
+        ...harnessMessageBlock,
+        providerNotice: {
+          ...harnessMessageBlock.providerNotice,
+          noticeKind: "safety_buffering",
+        },
+      }).success,
+    ).toBe(true);
+  });
+
+  it("rejects an unknown normalized-metadata discriminant", () => {
+    const result = providerNoticeNormalizedMetadataSchema.safeParse({
+      type: "unknown_kind",
+      value: "x",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a raw/nested provider payload shape outside the normalized metadata union", () => {
+    // The generated Codex payload shape (raw threadId/turnId/verifications
+    // envelope) must never be accepted as-is - only the normalized,
+    // per-notice-kind facts are allowed.
+    const result = providerNoticeMetadataSchema.safeParse({
+      harnessId: "codex",
+      noticeKind: "model_verification",
+      tone: "info",
+      title: "Model verification active",
+      message: null,
+      details: [],
+      metadata: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        verifications: ["trustedAccessForCyber"],
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects provider notice metadata whose type does not match noticeKind", () => {
+    const result = providerNoticeMetadataSchema.safeParse({
+      harnessId: "codex",
+      noticeKind: "model_rerouted",
+      tone: "warning",
+      title: "Model changed",
+      message: null,
+      details: [],
+      metadata: {
+        type: "model_verification",
+        verifications: ["trustedAccessForCyber"],
+      },
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects non-JSON-serializable values on normalized metadata fields", () => {
+    const result = providerNoticeNormalizedMetadataSchema.safeParse({
+      type: "model_rerouted",
+      fromModel: "gpt-5",
+      toModel: "gpt-5-safe",
+      reason: () => "highRiskCyberActivity",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("textBlockSchema rejects a providerNotice missing required metadata fields", () => {
+    const result = textBlockSchema.safeParse({
+      type: "text",
+      blockId: "notice-invalid",
+      status: "completed",
+      timestamp: 1,
+      text: "fallback",
+      providerNotice: {
+        harnessId: "codex",
+        noticeKind: "model_rerouted",
+        tone: "warning",
+        // title is required and missing.
+        message: null,
+        details: [],
+        metadata: null,
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
+// ─── errorBlockSchema.failure (ticket 01, chat.subscribe@1.10) ────────────
+describe("errorBlockSchema.failure round-trip and defaulting", () => {
+  it("round-trips a full failure payload", () => {
+    const block = {
+      type: "error",
+      blockId: "err-1",
+      status: "completed",
+      timestamp: 1,
+      message: "rate limited",
+      recoverable: true,
+      code: "usage_limit_exceeded",
+      failure: {
+        reason: "rate_limit",
+        resetsAt: 1000,
+        resetsAtSource: "provider",
+        scope: "five_hour",
+        providerDetail: "usage_limit_exceeded",
+      },
+    };
+    const parsed = errorBlockSchema.parse(block);
+    expect(parsed.failure).toEqual(block.failure);
+    // Full parse -> serialize -> parse.
+    expect(errorBlockSchema.parse(JSON.parse(JSON.stringify(parsed)))).toEqual(
+      parsed,
+    );
+  });
+
+  it("defaults failure to null (NOT undefined) when the key is absent - the persisted block is .nullable().default(null)", () => {
+    const parsed = errorBlockSchema.parse({
+      type: "error",
+      blockId: "err-2",
+      status: "completed",
+      timestamp: 1,
+      message: "boom",
+      recoverable: false,
+      code: null,
+    });
+    expect(parsed.failure).toBeNull();
+    expect("failure" in parsed).toBe(true);
+  });
+
+  it("agentFailureSchema round-trips every optional field and requires only reason", () => {
+    expect(agentFailureSchema.parse({ reason: "rate_limit" })).toEqual({
+      reason: "rate_limit",
+    });
+    const full = {
+      reason: "rate_limit" as const,
+      resetsAt: 1000,
+      resetsAtSource: "probe" as const,
+      scope: "seven_day",
+      providerDetail: "usage_limit_exceeded",
+    };
+    expect(agentFailureSchema.parse(full)).toEqual(full);
+    expect(agentFailureSchema.safeParse({}).success).toBe(false);
+  });
+
+  // `resetsAt` + `resetsAtSource` are documented as a PAIR, and the error card
+  // spends that: it formats `failure.resetsAt` as a clock time and never reads
+  // the source. Before the refinement each field was independently optional, so
+  // a boundary with nothing certifying it parsed cleanly and rendered as a
+  // verified time - the one thing the payload's doc promises cannot happen.
+  describe("agentFailureSchema reset-metadata pairing", () => {
+    const base = { reason: "rate_limit" as const };
+
+    it("rejects a boundary with no source, naming the MISSING field", () => {
+      const result = agentFailureSchema.safeParse({ ...base, resetsAt: 1000 });
+      expect(result.success).toBe(false);
+      // The path, not just the rejection: an arm that fired on the wrong half
+      // would still refuse this input, and refusing for the wrong reason is
+      // what makes a later inversion invisible.
+      expect(
+        result.success ? [] : result.error.issues.map((issue) => issue.path),
+      ).toEqual([["resetsAtSource"]]);
+    });
+
+    it("rejects a source with no boundary, naming the MISSING field", () => {
+      const result = agentFailureSchema.safeParse({
+        ...base,
+        resetsAtSource: "probe",
+      });
+      expect(result.success).toBe(false);
+      expect(
+        result.success ? [] : result.error.issues.map((issue) => issue.path),
+      ).toEqual([["resetsAt"]]);
+    });
+
+    it("accepts neither and both - the pair is optional, not required", () => {
+      expect(agentFailureSchema.safeParse(base).success).toBe(true);
+      expect(
+        agentFailureSchema.safeParse({
+          ...base,
+          resetsAt: 1000,
+          resetsAtSource: "provider",
+        }).success,
+      ).toBe(true);
+    });
+
+    // The must-NOT-flag control. `scope` is a per-provider free-text label, not
+    // part of the boundary's proof, so it is deliberately outside the pairing;
+    // this cell reddens if someone widens the rule to cover it.
+    it("leaves `scope` and `providerDetail` uncoupled from the pair", () => {
+      expect(
+        agentFailureSchema.safeParse({
+          ...base,
+          scope: "five_hour",
+          providerDetail: "usage_limit_exceeded",
+        }).success,
+      ).toBe(true);
+    });
+
+    // The refinement has to survive the wrappers the persisted block puts on
+    // it (`.nullable().default(null)`); a future refactor that rebuilt the
+    // failure shape inline in the block would drop it silently otherwise.
+    it("propagates through errorBlockSchema's nullable+defaulted failure", () => {
+      const block = {
+        type: "error",
+        blockId: "err-pair",
+        status: "completed",
+        timestamp: 1,
+        message: "rate limited",
+        recoverable: true,
+        code: "usage_limit_exceeded",
+      };
+      expect(
+        errorBlockSchema.safeParse({
+          ...block,
+          failure: { reason: "rate_limit", resetsAt: 1000 },
+        }).success,
+      ).toBe(false);
+      // The positive control. Without it a typo anywhere else in `block` would
+      // reject the line above for a reason that has nothing to do with the
+      // pairing, and the cell would read as a pass.
+      expect(
+        errorBlockSchema.safeParse({
+          ...block,
+          failure: {
+            reason: "rate_limit",
+            resetsAt: 1000,
+            resetsAtSource: "provider",
+          },
+        }).success,
+      ).toBe(true);
+    });
+  });
+});
+
+describe("providerNoticeKindSchemaPreFallback rejects an unknown enum VALUE (not merely an unknown key)", () => {
+  it("rejects every fallback attribution kind, and still accepts every pre-fallback kind", () => {
+    // Named one at a time rather than derived as "the live enum minus this
+    // one": a derived list would pass for any pair of enums, including the two
+    // being identical, which is the property this cell exists to refuse. The
+    // three MOVE arms are listed separately for the same reason - splitting
+    // `fallback_applied` into three kinds is exactly the growth a `1.7`-`1.9`
+    // peer's frozen copy cannot absorb, so each new value has to be refused
+    // here by name.
+    for (const kind of [
+      "fallback_applied",
+      "fallback_returned",
+      "fallback_return_blocked",
+      "fallback_wait_resumed",
+      "fallback_settled",
+    ]) {
+      expect(providerNoticeKindSchemaPreFallback.safeParse(kind).success).toBe(
+        false,
+      );
+      // The live enum is the other half of the claim: these are refused
+      // because the freeze does not name them, NOT because they are unknown
+      // values everywhere. Without this line the cell would still pass if a
+      // kind were misspelled out of existence on both sides.
+      expect(providerNoticeKindSchema.safeParse(kind).success).toBe(true);
+    }
+    for (const kind of [
+      "model_rerouted",
+      "model_verification",
+      "safety_buffering",
+      "harness_message",
+    ]) {
+      expect(providerNoticeKindSchemaPreFallback.safeParse(kind).success).toBe(
+        true,
+      );
+    }
+  });
+
+  it("contentBlockSchemaPreFallback rejects a text block carrying the new fallback_applied notice kind", () => {
+    const fallbackAppliedBlock = {
+      type: "text",
+      blockId: "notice-fallback-1",
+      status: "completed",
+      timestamp: 1,
+      text: "Switched to the backup profile after a rate limit.",
+      providerNotice: {
+        harnessId: "claude",
+        noticeKind: "fallback_applied",
+        tone: "info",
+        title: "Switched profile",
+        message: null,
+        details: [],
+        metadata: null,
+      },
+    };
+    // Live schema accepts it - this is the whole point of the freeze existing
+    // beside it.
+    expect(contentBlockSchema.safeParse(fallbackAppliedBlock).success).toBe(
+      true,
+    );
+    expect(
+      contentBlockSchemaPreFallback.safeParse(fallbackAppliedBlock).success,
+    ).toBe(false);
+    // The same block on a released kind still parses on the frozen union - the
+    // rejection is the enum value, not the block shape.
+    expect(
+      contentBlockSchemaPreFallback.safeParse({
+        ...fallbackAppliedBlock,
+        providerNotice: {
+          ...fallbackAppliedBlock.providerNotice,
+          noticeKind: "harness_message",
+        },
+      }).success,
+    ).toBe(true);
+  });
+});
+
+describe("errorBlockSchemaPreFallback (frozen chat.subscribe@1.0-1.9) strips failure as an unknown key", () => {
+  const errorWithFailure = {
+    type: "error",
+    blockId: "err-1",
+    status: "completed",
+    timestamp: 1,
+    message: "rate limited",
+    recoverable: true,
+    code: "usage_limit_exceeded",
+    failure: { reason: "rate_limit" },
+  };
+
+  it("strips failure rather than rejecting the block", () => {
+    const parsed = errorBlockSchemaPreFallback.parse(errorWithFailure);
+    expect("failure" in parsed).toBe(false);
+    expect(parsed).toMatchObject({ type: "error", message: "rate limited" });
+  });
+
+  // The structural pin: contentBlockSchemaPreFallback (what every released
+  // snapshot chat-tree ultimately binds `error` blocks through) must itself
+  // route through the frozen errorBlockSchemaPreFallback member, not the
+  // live, still-growing errorBlockSchema - a discriminated union that lists
+  // its members explicitly but points one of them at a live schema is frozen
+  // in name only.
+  it("contentBlockSchemaPreFallback strips failure from an error block via its frozen member", () => {
+    const parsed = contentBlockSchemaPreFallback.parse(errorWithFailure);
+    expect(parsed.type).toBe("error");
+    expect("failure" in parsed).toBe(false);
+  });
+});
+
+describe("interviewQuestionSchema allowsCustomAnswer (additive, reader-permissive)", () => {
+  const baseQuestion = {
+    questionId: null,
+    question: "Choose",
+    header: null,
+    options: [{ label: "Alpha", description: null, preview: null }],
+    multiSelect: false,
+  };
+
+  it("parses a question persisted before the field existed as `null`", () => {
+    // The legacy path the field's `.default(null)` exists for: every question
+    // written before this change omits the key, and `null` means "unstated",
+    // which every renderer treats exactly as it did before - free text offered.
+    const question = interviewQuestionSchema.parse(baseQuestion);
+    expect(question.allowsCustomAnswer).toBeNull();
+  });
+
+  it("carries an explicit value through unchanged in both directions", () => {
+    expect(
+      interviewQuestionSchema.parse({
+        ...baseQuestion,
+        allowsCustomAnswer: false,
+      }).allowsCustomAnswer,
+    ).toBe(false);
+    expect(
+      interviewQuestionSchema.parse({
+        ...baseQuestion,
+        allowsCustomAnswer: true,
+      }).allowsCustomAnswer,
+    ).toBe(true);
+  });
+
+  it("ACCEPTS `false` with no options, deliberately, rather than rejecting the document", () => {
+    // The schema's doc calls this pair a raiser invariant, and it is not
+    // enforced here ON PURPOSE. This schema is BOTH the persistence schema for
+    // stored epic content and the wire schema released streamchat lines
+    // project (`runtimeInterviewQuestionSchema` aliases it), so a `.refine()`
+    // rejecting the pair would not withdraw a bad question - it would fail the
+    // parse of the whole content block, exactly the failure the file's first
+    // test names ("a hard ZodError here would break agent.getTranscript for
+    // the whole chat"), and drop a live interview frame from a peer host that
+    // is entitled to send it.
+    //
+    // The pair is refused where it can actually be decided: producers. Every
+    // per-harness bridge makes it unreachable by construction, the generic
+    // normalizer (`interview-detection.ts`) downgrades it to `null`, and the
+    // renderer treats it as a fail-safe - no input, Skip still available -
+    // which `pending-interview-card.test.tsx` pins with a CONTROL.
+    //
+    // Falsification: add that `.refine()` and this reddens, pointing whoever
+    // did it at the two consumers that would start failing.
+    const parsed = interviewQuestionSchema.parse({
+      ...baseQuestion,
+      options: [],
+      allowsCustomAnswer: false,
+    });
+    expect(parsed.options).toEqual([]);
+    expect(parsed.allowsCustomAnswer).toBe(false);
+  });
+
+  it("keeps a whole interview block parseable when a question carries the pair", () => {
+    // The consumer that matters: one bad question must not cost the block.
+    const block = contentBlockSchema.parse({
+      type: "interview",
+      blockId: "iv-degenerate",
+      status: "streaming",
+      timestamp: 1,
+      toolName: "AskUserQuestion",
+      title: null,
+      description: null,
+      questions: [{ ...baseQuestion, options: [], allowsCustomAnswer: false }],
+      answers: [],
+      error: null,
+      metadata: null,
+    }) as InterviewBlock;
+    expect(block.questions).toHaveLength(1);
+  });
+});
+
+describe("toolCallBlockSchema agentMessageDelivery (cross-host send state)", () => {
+  const base = {
+    type: "tool_call" as const,
+    blockId: "tc-send",
+    status: "completed" as const,
+    timestamp: 1,
+    toolName: "traycer_send_message",
+    error: null,
+  };
+
+  it.each(["queued", "delivered", "expired", "failed"] as const)(
+    "keeps agentMessageDelivery in state %s",
+    (state) => {
+      const delivery = {
+        targetHostId: "host-2",
+        eventId: "evt-1",
+        state,
+        targetHostOffline: true,
+      };
+      const block = toolCallBlockSchema.parse({
+        ...base,
+        agentMessageDelivery: delivery,
+      });
+      expect(block.agentMessageDelivery).toEqual(delivery);
+    },
+  );
+
+  it("reads a stamp written before targetHostOffline as not offline", () => {
+    const block = toolCallBlockSchema.parse({
+      ...base,
+      agentMessageDelivery: {
+        targetHostId: "host-2",
+        eventId: "evt-1",
+        state: "queued",
+      },
+    });
+    expect(block.agentMessageDelivery).toEqual({
+      targetHostId: "host-2",
+      eventId: "evt-1",
+      state: "queued",
+      targetHostOffline: false,
+    });
+  });
+
+  it("defaults to null when absent", () => {
+    expect(toolCallBlockSchema.parse(base).agentMessageDelivery).toBeNull();
+  });
+
+  it("rejects an unknown state", () => {
+    const result = toolCallBlockSchema.safeParse({
+      ...base,
+      agentMessageDelivery: {
+        targetHostId: "host-2",
+        eventId: "evt-1",
+        state: "lost",
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("toolCallBlockSchemaPreDelivery strips the key", () => {
+    const block = toolCallBlockSchemaPreDelivery.parse({
+      ...base,
+      agentMessageDelivery: {
+        targetHostId: "host-2",
+        eventId: "evt-1",
+        state: "queued",
+      },
+    });
+    expect(Object.hasOwn(block, "agentMessageDelivery")).toBe(false);
+    expect(block.toolName).toBe("traycer_send_message");
+  });
+});
+
+describe("compaction notApplied across the frozen epic block chains", () => {
+  const erroredCompaction = {
+    blockId: "compaction-1",
+    status: "errored",
+    timestamp: 1,
+    type: "compaction",
+    trigger: "auto",
+    preTokens: 900,
+    postTokens: null,
+    durationMs: null,
+    summary: null,
+    error: "Copilot did not apply this compaction.",
+  };
+
+  const frozenUnions = [
+    { name: "PreHtml", schema: contentBlockSchemaPreHtml },
+    { name: "PreReasonix", schema: contentBlockSchemaPreReasonix },
+    { name: "PreImage", schema: contentBlockSchemaPreImage },
+    { name: "PreSettlement", schema: contentBlockSchemaPreSettlement },
+    { name: "PreFallback", schema: contentBlockSchemaPreFallback },
+    { name: "PreShellHost", schema: contentBlockSchemaPreShellHost },
+    { name: "PreBrowser", schema: contentBlockSchemaPreBrowser },
+    { name: "PreReceipt", schema: contentBlockSchemaPreReceipt },
+    { name: "PreMcpApp", schema: contentBlockSchemaPreMcpApp },
+    { name: "V18", schema: contentBlockSchemaV18 },
+  ] as const;
+
+  it.each(frozenUnions)(
+    "contentBlockSchema$name drops the flag and keeps the failure",
+    ({ schema }) => {
+      const block = schema.parse({ ...erroredCompaction, notApplied: true });
+      expect(Object.hasOwn(block, "notApplied")).toBe(false);
+      expect(block.status).toBe("errored");
+    },
+  );
+
+  it("the live union carries true and defaults absent input to false", () => {
+    const notAppliedOf = (input: object): boolean => {
+      const block = contentBlockSchema.parse(input);
+      if (block.type !== "compaction") {
+        throw new Error("expected a compaction block");
+      }
+      return block.notApplied;
+    };
+    expect(notAppliedOf({ ...erroredCompaction, notApplied: true })).toBe(true);
+    expect(notAppliedOf(erroredCompaction)).toBe(false);
+  });
+});

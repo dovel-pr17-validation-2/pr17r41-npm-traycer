@@ -1,0 +1,641 @@
+/**
+ * `worktree.deleteBatchByPath@1.0` - one host-owned deletion COMMAND over N
+ * approved targets. `@1.1` adds per-target `stopOwners` consent and typed busy
+ * details on `target.failed` while keeping the released `@1.0` schemas frozen.
+ * `@1.3` adds the decline kind on `target.complete`.
+ * `@1.4` adds an optional bounded error tail on unsuccessful targets.
+ *
+ * Added rather than growing `worktree.deleteByPath@1.0`, whose request and
+ * frames are released and frozen. The two differ in ownership, not in
+ * mechanism: the released stream is one target whose lifetime is the socket's,
+ * while a command here is minted by the client, owned by the host, and
+ * survives its observer. That is what lets the host aggregate N targets into
+ * ONE durable completion notification - a renderer-side queue of N streams
+ * cannot, because it has no identity the host can attribute the summary to.
+ *
+ * ## Start versus observe
+ *
+ * The open request is a discriminated union, and that discriminant is the
+ * whole replay-safety story for a destructive operation.
+ *
+ * `WsStreamClient` re-sends a session's ORIGINAL open request on every
+ * reconnect, automatically and indefinitely. Single-flight alone cannot make
+ * that safe: the map is process-local and evicted a minute after completion,
+ * so an outage longer than the grace window - or a host restart - would turn
+ * an automatic re-subscribe into a second execution of the same `commandId`,
+ * and its result would overwrite the durable summary the first run wrote.
+ *
+ * So the authority to START work lives in the request itself: only a `start`
+ * may create a command, and a client only ever issues one from an explicit
+ * user action. Once a `start` has actually reached the host, the client
+ * re-subscribes as `observe`, which can attach to a live command but can never
+ * create one. A command the host no longer knows about (evicted, or lost to a
+ * restart) answers `command.failed` - honest uncertainty, no deletion.
+ *
+ * This is deliberately NOT keyed off the completion notification row: policy
+ * can suppress that row and the sink write can fail, so it is not an execution
+ * ledger.
+ *
+ * ## Command semantics (enforced by `WorktreeDeletionCommandService`)
+ *
+ * - `commandId` is a client-minted UUID. Commands are single-flight by
+ *   `(userId, commandId)` for the host process lifetime, so a duplicate
+ *   subscribe during the bounded grace window ATTACHES to the running command
+ *   instead of executing it a second time. There is no cross-restart
+ *   exactly-once claim: an unconfirmed destructive result stays uncertain and
+ *   needs explicit user action.
+ * - Closing the socket detaches that observer. It does NOT cancel accepted
+ *   work: remaining targets run and the completion notification is still
+ *   written. This is the whole point of host ownership - a Settings tab closed
+ *   mid-bulk-delete must not strand half the selection.
+ * - An empty `targets` list is not a command: the resolver answers
+ *   `command.complete` with zero counts, creates no command, and writes no
+ *   notification row.
+ * - Per-target frames are NOT replayed to an observer that attached late, so a
+ *   client that missed some must treat `command.complete` as terminal for
+ *   every target it never saw settle.
+ *
+ * Server frames are tagged by `worktreePath`, the target's own stable key.
+ * Requests carry unique paths (the schema rejects duplicates), so a path
+ * identifies exactly one target for the command's lifetime and a client can
+ * route a frame to its per-target record without minting a parallel id space.
+ *
+ * - `target.started`  - target validated and not busy; `hasTeardown` says
+ *                       whether a teardown step will run.
+ * - `target.phase`    - `teardown` | `remove`.
+ * - `target.output`   - a chunk of teardown stdout/stderr.
+ * - `target.complete` - terminal for that target; `deleted` is its outcome
+ *                       (a declined/no-op delete is `false`, not a failure).
+ *                       From `@1.3` a `deleted: false` also names WHY in
+ *                       `declined`, so a client can say what happened instead
+ *                       of one line for three unrelated non-deletions.
+ * - `target.failed`   - terminal for that target; displayable reason.
+ * - `command.complete`- terminal for the COMMAND, after every target settled.
+ * - `command.failed`  - terminal: no work ran or will run UNDER THIS
+ *                       SUBSCRIPTION, with a displayable reason. Either the
+ *                       host cannot serve the command at all (worktree service
+ *                       unavailable), or an `observe` named a command this host
+ *                       no longer holds. No target frames precede it.
+ * - `pong`            - heartbeat response.
+ *
+ * Client frames: `ping` only, like the released stream.
+ */
+import { z } from "zod";
+import { defineStreamRpcContract } from "@traycer/protocol/framework/versioned-stream-rpc";
+import {
+  worktreeBusyHoldersWireFieldSchema,
+  worktreeBusyHoldersWireFieldSchemaV1,
+} from "@traycer/protocol/framework/worktree-busy-holders";
+import { worktreeEntryScriptsSchema } from "@traycer/protocol/host/worktree-schemas";
+import { lazySchema } from "@traycer/protocol/framework/lazy-schema";
+
+/**
+ * Where the command came from. Durable: it rides into the notification
+ * payload, so the row can say "a bulk delete you started in Settings" without
+ * persisting a route. Closed on purpose - an unrecognized source is a client
+ * bug, not a compatibility event, and every producer is in this repo.
+ */
+export const worktreeDeletionSourceSchema = lazySchema(() =>
+  z.enum(["settings", "task_cleanup", "task_sweep", "cli", "legacy_client"]),
+);
+export type WorktreeDeletionSource = z.infer<
+  typeof worktreeDeletionSourceSchema
+>;
+
+export const worktreeDeleteBatchTargetSchema = lazySchema(() =>
+  z.object({
+    worktreePath: z.string().min(1),
+    /**
+     * Per-target script override from the Settings review modal. `null` means
+     * "read the worktree's own `.traycer/environment.json`", matching the
+     * released single-target request.
+     */
+    scripts: worktreeEntryScriptsSchema.nullable(),
+  }),
+);
+export type WorktreeDeleteBatchTarget = z.infer<
+  typeof worktreeDeleteBatchTargetSchema
+>;
+
+/**
+ * `worktree.deleteBatchByPath@1.1` target. Consent covers whichever owners are
+ * active when deletion runs, so the target needs only `stopOwners`; there is
+ * deliberately no holder-inventory revision. Defaulting to false lets a 1.1
+ * host parse a 1.0-shaped target with the original refuse-on-busy behavior.
+ */
+export const worktreeDeleteBatchTargetSchemaV11 = lazySchema(() =>
+  worktreeDeleteBatchTargetSchema.extend({
+    stopOwners: z.boolean().default(false),
+  }),
+);
+export type WorktreeDeleteBatchTargetV11 = z.infer<
+  typeof worktreeDeleteBatchTargetSchemaV11
+>;
+
+/**
+ * Client-minted UUID naming a command. Validated as a UUID rather than an open
+ * string so a client cannot collapse distinct commands onto a shared constant
+ * and have the single-flight map silently attach the second one to the first's
+ * already-finished result.
+ */
+const commandIdSchema = lazySchema(() => z.uuid());
+
+export const worktreeDeleteBatchByPathOpenRequestSchema = lazySchema(() =>
+  z.discriminatedUnion("mode", [
+    /**
+     * Authorizes execution. Only ever sent for an explicit user action, and
+     * never re-sent automatically after it has reached the host.
+     */
+    z.object({
+      mode: z.literal("start"),
+      commandId: commandIdSchema,
+      source: worktreeDeletionSourceSchema,
+      /** Task that initiated a single-Task sweep. Absent when there is no
+       * single durable Task destination for the completion notification. */
+      epicId: z.string().min(1).optional(),
+      /**
+       * Every approved target, in one request. Paths must be unique: the frame
+       * tagging keys off `worktreePath`, and a repeated path would make two
+       * target records indistinguishable on the wire (and schedule the same
+       * directory twice).
+       */
+      targets: z
+        .array(worktreeDeleteBatchTargetSchema)
+        .refine(
+          (targets) =>
+            new Set(targets.map((target) => target.worktreePath)).size ===
+            targets.length,
+          { message: "targets must have unique worktreePath values" },
+        ),
+    }),
+    /**
+     * Re-attaches to a command already accepted by this host process. Carries
+     * NO targets on purpose: an observe request that cannot describe work is
+     * structurally incapable of starting any, however it is routed or replayed.
+     */
+    z.object({
+      mode: z.literal("observe"),
+      commandId: commandIdSchema,
+    }),
+  ]),
+);
+export type WorktreeDeleteBatchByPathOpenRequest = z.infer<
+  typeof worktreeDeleteBatchByPathOpenRequestSchema
+>;
+
+/**
+ * Frozen @1.1 open-request schema. A 1.0 host parses against the separate
+ * schema above and strips `stopOwners`; clients therefore gate consented
+ * targets on the negotiated minor instead of assuming the field survived.
+ */
+export const worktreeDeleteBatchByPathOpenRequestSchemaV11 = lazySchema(() =>
+  z.discriminatedUnion("mode", [
+    z.object({
+      mode: z.literal("start"),
+      commandId: commandIdSchema,
+      source: worktreeDeletionSourceSchema,
+      epicId: z.string().min(1).optional(),
+      targets: z
+        .array(worktreeDeleteBatchTargetSchemaV11)
+        .refine(
+          (targets) =>
+            new Set(targets.map((target) => target.worktreePath)).size ===
+            targets.length,
+          { message: "targets must have unique worktreePath values" },
+        ),
+    }),
+    z.object({
+      mode: z.literal("observe"),
+      commandId: commandIdSchema,
+    }),
+  ]),
+);
+export type WorktreeDeleteBatchByPathOpenRequestV11 = z.infer<
+  typeof worktreeDeleteBatchByPathOpenRequestSchemaV11
+>;
+
+const worktreeDeleteBatchPhaseSchema = lazySchema(() =>
+  z.enum(["teardown", "remove"]),
+);
+export type WorktreeDeleteBatchPhase = z.infer<
+  typeof worktreeDeleteBatchPhaseSchema
+>;
+
+const worktreeDeleteBatchOutputChannelSchema = lazySchema(() =>
+  z.enum(["stdout", "stderr"]),
+);
+export type WorktreeDeleteBatchOutputChannel = z.infer<
+  typeof worktreeDeleteBatchOutputChannelSchema
+>;
+
+export const worktreeDeleteBatchByPathServerFrameSchema = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("target.started"),
+      worktreePath: z.string().min(1),
+      hasTeardown: z.boolean(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.phase"),
+      worktreePath: z.string().min(1),
+      phase: worktreeDeleteBatchPhaseSchema,
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.output"),
+      worktreePath: z.string().min(1),
+      channel: worktreeDeleteBatchOutputChannelSchema,
+      chunk: z.string(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.complete"),
+      worktreePath: z.string().min(1),
+      deleted: z.boolean(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.failed"),
+      worktreePath: z.string().min(1),
+      reason: z.string(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("command.complete"),
+      requestedCount: z.number().int().nonnegative(),
+      deletedCount: z.number().int().nonnegative(),
+      failedCount: z.number().int().nonnegative(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("command.failed"),
+      reason: z.string(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("pong"),
+      hasBinaryPayload: z.literal(false),
+    }),
+  ]),
+);
+export type WorktreeDeleteBatchByPathServerFrame = z.infer<
+  typeof worktreeDeleteBatchByPathServerFrameSchema
+>;
+
+/**
+ * Frozen @1.1 server frames. Busy details are optional so a 1.0-shaped failure
+ * remains valid. Malformed `holders` and unknown future `code` values sanitize
+ * to absent rather than dropping the terminal frame and stranding the target.
+ */
+export const worktreeDeleteBatchByPathServerFrameSchemaV11 = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("target.started"),
+      worktreePath: z.string().min(1),
+      hasTeardown: z.boolean(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.phase"),
+      worktreePath: z.string().min(1),
+      phase: worktreeDeleteBatchPhaseSchema,
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.output"),
+      worktreePath: z.string().min(1),
+      channel: worktreeDeleteBatchOutputChannelSchema,
+      chunk: z.string(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.complete"),
+      worktreePath: z.string().min(1),
+      deleted: z.boolean(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.failed"),
+      worktreePath: z.string().min(1),
+      reason: z.string(),
+      holders: worktreeBusyHoldersWireFieldSchemaV1,
+      code: z.literal("WORKTREE_BUSY").optional().catch(undefined),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("command.complete"),
+      requestedCount: z.number().int().nonnegative(),
+      deletedCount: z.number().int().nonnegative(),
+      failedCount: z.number().int().nonnegative(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("command.failed"),
+      reason: z.string(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("pong"),
+      hasBinaryPayload: z.literal(false),
+    }),
+  ]),
+);
+export type WorktreeDeleteBatchByPathServerFrameV11 = z.infer<
+  typeof worktreeDeleteBatchByPathServerFrameSchemaV11
+>;
+
+/**
+ * `@1.2` - open request unchanged (aliased). `target.failed` holders may
+ * carry `chatTier` on `chat-turn` entries; the host emits the key only to a
+ * subscriber that negotiated this minor, and the frozen `@1.1` frames above
+ * are bound to the V1 holder object so an older subscriber never parses it.
+ */
+export const worktreeDeleteBatchByPathOpenRequestSchemaV12 =
+  worktreeDeleteBatchByPathOpenRequestSchemaV11;
+export type WorktreeDeleteBatchByPathOpenRequestV12 =
+  WorktreeDeleteBatchByPathOpenRequestV11;
+
+export const worktreeDeleteBatchByPathServerFrameSchemaV12 = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("target.started"),
+      worktreePath: z.string().min(1),
+      hasTeardown: z.boolean(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.phase"),
+      worktreePath: z.string().min(1),
+      phase: worktreeDeleteBatchPhaseSchema,
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.output"),
+      worktreePath: z.string().min(1),
+      channel: worktreeDeleteBatchOutputChannelSchema,
+      chunk: z.string(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.complete"),
+      worktreePath: z.string().min(1),
+      deleted: z.boolean(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.failed"),
+      worktreePath: z.string().min(1),
+      reason: z.string(),
+      holders: worktreeBusyHoldersWireFieldSchema,
+      code: z.literal("WORKTREE_BUSY").optional().catch(undefined),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("command.complete"),
+      requestedCount: z.number().int().nonnegative(),
+      deletedCount: z.number().int().nonnegative(),
+      failedCount: z.number().int().nonnegative(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("command.failed"),
+      reason: z.string(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("pong"),
+      hasBinaryPayload: z.literal(false),
+    }),
+  ]),
+);
+export type WorktreeDeleteBatchByPathServerFrameV12 = z.infer<
+  typeof worktreeDeleteBatchByPathServerFrameSchemaV12
+>;
+
+/**
+ * Why a target was declined rather than removed (`target.complete` with
+ * `deleted: false`, `@1.3`). The same three kinds the host already records on
+ * the completion notification row, and nothing more: no path, no stderr.
+ *
+ * - `not_managed`     - not a deletable managed worktree (outside the managed
+ *                       root, a main worktree, or a directory git does not
+ *                       track as a linked worktree). Retrying never helps.
+ * - `teardown_failed` - the teardown script ran and exited non-zero, so the
+ *                       worktree was left in place.
+ * - `removal_failed`  - the removal ran and did not clear the directory.
+ */
+export const worktreeDeleteDeclinedKindSchema = lazySchema(() =>
+  z.enum(["not_managed", "teardown_failed", "removal_failed"]),
+);
+export type WorktreeDeleteDeclinedKind = z.infer<
+  typeof worktreeDeleteDeclinedKindSchema
+>;
+
+/**
+ * `@1.3` - open request unchanged (aliased). `target.complete` may carry
+ * `declined` when `deleted` is `false`; the host emits the key only to a
+ * subscriber that negotiated this minor, and the frozen `@1.0`-`@1.2` frames
+ * above strip it. A kind this build does not know sanitizes to absent rather
+ * than dropping the terminal frame and stranding the target.
+ */
+export const worktreeDeleteBatchByPathOpenRequestSchemaV13 =
+  worktreeDeleteBatchByPathOpenRequestSchemaV11;
+export type WorktreeDeleteBatchByPathOpenRequestV13 =
+  WorktreeDeleteBatchByPathOpenRequestV11;
+
+export const worktreeDeleteBatchByPathServerFrameSchemaV13 = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("target.started"),
+      worktreePath: z.string().min(1),
+      hasTeardown: z.boolean(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.phase"),
+      worktreePath: z.string().min(1),
+      phase: worktreeDeleteBatchPhaseSchema,
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.output"),
+      worktreePath: z.string().min(1),
+      channel: worktreeDeleteBatchOutputChannelSchema,
+      chunk: z.string(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.complete"),
+      worktreePath: z.string().min(1),
+      deleted: z.boolean(),
+      declined: worktreeDeleteDeclinedKindSchema.optional().catch(undefined),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.failed"),
+      worktreePath: z.string().min(1),
+      reason: z.string(),
+      holders: worktreeBusyHoldersWireFieldSchema,
+      code: z.literal("WORKTREE_BUSY").optional().catch(undefined),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("command.complete"),
+      requestedCount: z.number().int().nonnegative(),
+      deletedCount: z.number().int().nonnegative(),
+      failedCount: z.number().int().nonnegative(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("command.failed"),
+      reason: z.string(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("pong"),
+      hasBinaryPayload: z.literal(false),
+    }),
+  ]),
+);
+export type WorktreeDeleteBatchByPathServerFrameV13 = z.infer<
+  typeof worktreeDeleteBatchByPathServerFrameSchemaV13
+>;
+
+/** Display-only failure detail, bounded independently of live teardown output. */
+export const WORKTREE_DELETE_ERROR_TAIL_MAX_BYTES = 4096;
+export const WORKTREE_DELETE_ERROR_TAIL_MAX_LINES = 20;
+
+// Invalid optional detail must never swallow the target's terminal outcome.
+const worktreeDeleteErrorTailSchema = lazySchema(() =>
+  z
+    .string()
+    .min(1)
+    .max(WORKTREE_DELETE_ERROR_TAIL_MAX_BYTES)
+    .refine(
+      (tail) =>
+        new TextEncoder().encode(tail).byteLength <=
+        WORKTREE_DELETE_ERROR_TAIL_MAX_BYTES,
+    )
+    .refine(
+      (tail) => tail.split("\n").length <= WORKTREE_DELETE_ERROR_TAIL_MAX_LINES,
+    )
+    .refine(
+      (tail) => !/[\p{Cc}\p{Cf}\u2028\u2029]/u.test(tail.replaceAll("\n", "")),
+    )
+    .optional()
+    .catch(undefined),
+);
+
+/** @1.4 adds a bounded error tail on unsuccessful target terminal frames. */
+export const worktreeDeleteBatchByPathServerFrameSchemaV14 = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("target.started"),
+      worktreePath: z.string().min(1),
+      hasTeardown: z.boolean(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.phase"),
+      worktreePath: z.string().min(1),
+      phase: worktreeDeleteBatchPhaseSchema,
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.output"),
+      worktreePath: z.string().min(1),
+      channel: worktreeDeleteBatchOutputChannelSchema,
+      chunk: z.string(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.complete"),
+      worktreePath: z.string().min(1),
+      deleted: z.boolean(),
+      declined: worktreeDeleteDeclinedKindSchema.optional().catch(undefined),
+      errorTail: worktreeDeleteErrorTailSchema,
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("target.failed"),
+      worktreePath: z.string().min(1),
+      reason: z.string(),
+      errorTail: worktreeDeleteErrorTailSchema,
+      holders: worktreeBusyHoldersWireFieldSchema,
+      code: z.literal("WORKTREE_BUSY").optional().catch(undefined),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("command.complete"),
+      requestedCount: z.number().int().nonnegative(),
+      deletedCount: z.number().int().nonnegative(),
+      failedCount: z.number().int().nonnegative(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("command.failed"),
+      reason: z.string(),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("pong"),
+      hasBinaryPayload: z.literal(false),
+    }),
+  ]),
+);
+export type WorktreeDeleteBatchByPathServerFrameV14 = z.infer<
+  typeof worktreeDeleteBatchByPathServerFrameSchemaV14
+>;
+
+export const worktreeDeleteBatchByPathClientFrameSchema = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("ping"),
+      hasBinaryPayload: z.literal(false),
+    }),
+  ]),
+);
+export type WorktreeDeleteBatchByPathClientFrame = z.infer<
+  typeof worktreeDeleteBatchByPathClientFrameSchema
+>;
+
+export const worktreeDeleteBatchByPathStreamV10 = defineStreamRpcContract({
+  method: "worktree.deleteBatchByPath",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  openRequestSchema: worktreeDeleteBatchByPathOpenRequestSchema,
+  serverFrameSchema: worktreeDeleteBatchByPathServerFrameSchema,
+  clientFrameSchema: worktreeDeleteBatchByPathClientFrameSchema,
+});
+
+export const worktreeDeleteBatchByPathStreamV11 = defineStreamRpcContract({
+  method: "worktree.deleteBatchByPath",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  openRequestSchema: worktreeDeleteBatchByPathOpenRequestSchemaV11,
+  serverFrameSchema: worktreeDeleteBatchByPathServerFrameSchemaV11,
+  clientFrameSchema: worktreeDeleteBatchByPathClientFrameSchema,
+});
+
+export const worktreeDeleteBatchByPathStreamV12 = defineStreamRpcContract({
+  method: "worktree.deleteBatchByPath",
+  schemaVersion: { major: 1, minor: 2 } as const,
+  openRequestSchema: worktreeDeleteBatchByPathOpenRequestSchemaV12,
+  serverFrameSchema: worktreeDeleteBatchByPathServerFrameSchemaV12,
+  clientFrameSchema: worktreeDeleteBatchByPathClientFrameSchema,
+});
+
+export const worktreeDeleteBatchByPathStreamV13 = defineStreamRpcContract({
+  method: "worktree.deleteBatchByPath",
+  schemaVersion: { major: 1, minor: 3 } as const,
+  openRequestSchema: worktreeDeleteBatchByPathOpenRequestSchemaV13,
+  serverFrameSchema: worktreeDeleteBatchByPathServerFrameSchemaV13,
+  clientFrameSchema: worktreeDeleteBatchByPathClientFrameSchema,
+});
+
+export const worktreeDeleteBatchByPathStreamV14 = defineStreamRpcContract({
+  method: "worktree.deleteBatchByPath",
+  schemaVersion: { major: 1, minor: 4 } as const,
+  openRequestSchema: worktreeDeleteBatchByPathOpenRequestSchemaV13,
+  serverFrameSchema: worktreeDeleteBatchByPathServerFrameSchemaV14,
+  clientFrameSchema: worktreeDeleteBatchByPathClientFrameSchema,
+});

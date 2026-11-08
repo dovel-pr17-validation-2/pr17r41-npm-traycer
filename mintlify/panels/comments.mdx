@@ -1,0 +1,103 @@
+---
+title: "Comments"
+description: "Discuss document text, HTML elements, and canvas boards in anchored comment threads."
+---
+
+import { FeatureVideo } from "/snippets/feature-video.jsx";
+
+<FeatureVideo src="https://assets.traycer.ai/docs/videos/artifact-comments.mp4" label="Add and resolve an anchored artifact comment" />
+
+Comments are threads attached to an artifact: document text, an HTML element or text selection, a canvas board, or a point on a canvas. Use them for questions, review notes, decisions, and follow-ups that belong to a specific passage. Everyone with access to the Task can comment.
+
+## The Comments Panel
+
+The **Comments** panel lists the threads on the active artifact.
+
+- Its icon appears in the sidebar rail once you start or open a thread, and stays while an artifact is active.
+- To keep it on the rail, right-click the rail and check **Comments**. While it is shown this way without an open artifact, the menu notes "Needs an open artifact".
+- Close it with **Close comments** in its header.
+
+For documents, threads follow the text order. HTML and canvas threads show the element, text, board, or location they refer to. Switch between the **Open**, **Resolved**, and **All** tabs to filter them. Click a thread to expand it and reveal its location in the artifact.
+
+## Start a Thread
+
+1. Select text in an artifact.
+2. Click **Comment** in the toolbar, or press ⌘⌥M / Ctrl+Alt+M.
+3. Write your comment in the "Start a thread…" box.
+4. Click **Comment**, or press ⌘Enter / Ctrl+Enter.
+
+Press Esc to cancel. If you've typed something, Traycer asks before discarding it.
+
+## HTML and Canvas Comments
+
+Open the latest [HTML artifact](/panels/artifacts/html) or a [canvas](/panels/artifacts/canvases), then turn on **Comments** in its toolbar. Select an element or text to start a thread. On a canvas you can also comment on a board or click a point on the canvas. Numbered pins mark the discussions. Turn comments off to interact with the page normally.
+
+Use **Send to chat** on a selected element to attach its visual context to an existing agent chat's draft. This is separate from posting a comment: review the draft and send it yourself. If there are no chats, create one first.
+
+Saved HTML versions are previews, so return to **Latest** before commenting.
+
+## Work in a Thread
+
+Each thread shows the quoted text and the number of comments. When you expand it:
+
+- **Reply** adds a comment. ⌘Enter / Ctrl+Enter sends it.
+- **Resolve** closes the thread and moves it to the **Resolved** tab. **Reopen** brings it back.
+- **Delete thread** (the trash button) removes the whole thread.
+- Your own comments have a **⋯** menu with **Edit** and **Delete**. Edited comments show "(edited)".
+
+Type **@** to mention a collaborator. They get a notification that you mentioned them.
+
+A thread shows **Anchor missing** when the text it was attached to is gone from the artifact. The thread and its comments are kept.
+
+## Who Can Do What
+
+| Action                                   | Who                                               |
+| ---------------------------------------- | ------------------------------------------------- |
+| Start threads, reply, and mention people | Everyone with access                              |
+| Edit or delete a comment                 | The comment's author                              |
+| Resolve, reopen, or delete a thread      | Everyone with access                              |
+
+See [Roles](/panels/sharing#roles).
+
+## Comments and Agents
+
+Agents can work through your comments. On hosts where you're an Editor or Owner, every thread is copied to a file beside its artifact:
+
+```text
+<artifact-folder>/.comments/<thread-id>.md
+```
+
+The folder is hidden, so plain file listings skip it. Each file holds the thread's status, author, the quoted text, and every comment:
+
+```markdown
+---
+thread: 0f6c1b2e-8a44-4d19-9c3e-5b7a0d21f8ac
+status: open
+author: "alice"
+created: 2026-08-14T10:15:00.000Z
+anchor: present
+---
+
+<quoted_section>
+the artifact text this thread is attached to
+</quoted_section>
+
+<comment id="9a1f0c73-2d64-4a58-b0e7-6c1d95f2ab34" author="alice" created_at="2026-08-14T10:15:00.000Z">
+Shouldn't this handle the offline case?
+</comment>
+```
+
+The `status:` line is the only part that can be changed. Setting it to `resolved` resolves the thread in the app, and `open` reopens it. Any other edit to the file is undone, so an agent can't reply to a thread this way.
+
+To have an agent address feedback, ask it directly. For example:
+
+```text
+Address the open comments on the tech plan. Update the plan, and resolve each thread you've handled.
+```
+
+For Markdown documents, the `comments:` frontmatter line gives a quick count, such as `comments: 2 open, 1 resolved`. HTML and canvas comment counts appear in `status.txt` beside the artifacts folder instead. Their comment files also identify the board or page and describe the selected element, text, or canvas location. See [Artifacts on Disk](/panels/artifacts#artifacts-on-disk).
+
+## Related
+
+- [Editing artifacts](/panels/artifacts/editing)
+- [Version history and recovery](/panels/artifacts/version-history): restoring an older version can move where comments are anchored.

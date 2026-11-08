@@ -1,0 +1,211 @@
+import { z } from "zod";
+import { defineStreamRpcContract } from "@traycer/protocol/framework/versioned-stream-rpc";
+import { lazySchema } from "@traycer/protocol/framework/lazy-schema";
+import {
+  hostListItemSchema,
+  hostListItemSchemaV10,
+  hostListItemSchemaV11,
+} from "@traycer/protocol/host/host-status";
+
+const textFrameFields = {
+  hasBinaryPayload: lazySchema(() => z.literal(false)),
+} as const;
+
+/**
+ * The signed-in account's host registry, pushed by the client's own host.
+ *
+ * ## Why a host serves rows it does not own
+ *
+ * `GET /api/v3/hosts` is one endpoint that three parties read: the app, for
+ * its host list; the host's origin-host-gone signal, for the verdict that
+ * another machine is not coming back; and the host's agent-facing directory
+ * reads. Each used to fetch it separately - the app once a minute per window,
+ * the host twice over - so an account with two windows open and a routed
+ * browser realm made four reads a minute of one Redis lease.
+ *
+ * The host is the natural single reader: it is one process per machine however
+ * many windows the app has, it already holds a device-bound credential for the
+ * endpoint, and it already needs the answer for itself. This stream is that
+ * reader's output.
+ *
+ * ## The rows are the cloud's own, not a projection
+ *
+ * A frame carries {@link hostListItemSchema} rows - exactly what
+ * `GET /api/v3/hosts` returns and what the client already projects through
+ * `hostListItemToDirectoryEntry`. Deliberately NOT the client's projected
+ * `HostDirectoryEntry`: two of that shape's fields are the CLIENT's to
+ * decide, not the host's - where the relay attach endpoint is, and how the
+ * client's own clock reads a `lastSeenAt` - and a host answering those would
+ * be inventing them. The host
+ * ships the evidence; the viewer keeps the derivation it already owns.
+ *
+ * ## Optional, and a fallback that is the status quo
+ *
+ * Additive, post-v1.0.0 OPTIONAL stream method. A host that predates it never
+ * advertises it, the client's subscription degrades to `unsupported`, and the
+ * app's own `GET /api/v3/hosts` poll remains exactly what it is today - so an
+ * older host costs latency and a redundant read, never a missing fleet. Never
+ * add it to the unary released floor; that list is fail-closed on the name set.
+ *
+ * ## One frame kind, carrying the whole inventory
+ *
+ * `snapshot` is the only server frame: there is no delta grammar and no resume
+ * cursor, because the inventory is small, whole, and re-read on a cadence
+ * rather than mutated. A reconnect re-reads it, which is the same thing a
+ * first connect does. The host sends one on subscribe and again whenever the
+ * rows change, and suppresses the re-send when a read returns what the client
+ * already has - otherwise a push plane would tick once a minute per client
+ * with a poll's shape and none of a poll's honesty about it.
+ *
+ * A `pong` rides the same union, because the transport's heartbeat IS a stream
+ * frame - see that member.
+ *
+ * `fetchedAtMs` is the host's own clock at the read that produced these rows,
+ * for a viewer that wants to say how old the answer is. `stale` says the most
+ * recent read did NOT produce these rows - it failed, or its body did not
+ * parse - and the last good rows are being served instead. A failed read never
+ * turns into an empty fleet: it says nothing about any host, and reporting it
+ * as "no hosts" would show every machine as departed, so a host with no good
+ * rows to serve sends no snapshot at all. The rows of a stale snapshot are
+ * therefore the last GOOD rows, and those may legitimately be empty - an
+ * account with no other host whose next read fails is exactly that frame -
+ * which is why the schema does not demand a non-empty `hosts` on `stale`.
+ *
+ * ## Minors
+ *
+ * @1.0 is FROZEN on {@link hostListItemSchemaV10}, the row before sandbox
+ * hosts. @1.1 carries the live {@link hostListItemSchema}, whose rows may hold
+ * `sandboxState`, `sandboxFrozen`, `profile` and `owner`, and whose set may
+ * include `kind: sandbox` rows. The serving host gates on the negotiated
+ * minor: a 1.0 subscriber receives rows rebuilt without those fields and with
+ * the sandbox rows removed, so a released client sees the fleet it always saw.
+ * @1.2 carries rows of a team's own computer (`kind: machine`), which a 1.1
+ * subscriber does not receive.
+ */
+export const hostInventorySubscribeOpenRequestSchemaV10 = lazySchema(() =>
+  z.object({}),
+);
+export type HostInventorySubscribeOpenRequestV10 = z.infer<
+  typeof hostInventorySubscribeOpenRequestSchemaV10
+>;
+
+export const hostInventorySubscribeServerFrameSchemaV10 = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("snapshot"),
+      ...textFrameFields,
+      hosts: z.array(hostListItemSchemaV10),
+      /** The host's clock at the read these rows came from. */
+      fetchedAtMs: z.number().int().nonnegative(),
+      /** These are the last good rows; the most recent read did not refresh them. */
+      stale: z.boolean(),
+    }),
+    /**
+     * The heartbeat's answer, and NOT optional decoration: the transport's
+     * liveness check is a stream frame, not a socket ping. `WsStreamSession`
+     * writes a `ping` CLIENT frame every `pingIntervalMs` and advances
+     * `lastPongAt` only on this frame; `pongTimeoutMs` is the drop cutoff
+     * measured from that timestamp. A stream contract without this kind is a
+     * stream every subscriber tears down and re-dials at the cutoff, forever,
+     * while the host sits there healthy - which is why every stream contract
+     * in this registry carries it.
+     */
+    z.object({
+      kind: z.literal("pong"),
+      ...textFrameFields,
+    }),
+  ]),
+);
+export type HostInventorySubscribeServerFrameV10 = z.infer<
+  typeof hostInventorySubscribeServerFrameSchemaV10
+>;
+
+export const hostInventorySubscribeClientFrameSchemaV10 = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("ping"),
+      ...textFrameFields,
+    }),
+  ]),
+);
+export type HostInventorySubscribeClientFrameV10 = z.infer<
+  typeof hostInventorySubscribeClientFrameSchemaV10
+>;
+
+export const hostInventorySubscribeV10 = defineStreamRpcContract({
+  method: "host.hostInventory.subscribe",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  openRequestSchema: hostInventorySubscribeOpenRequestSchemaV10,
+  serverFrameSchema: hostInventorySubscribeServerFrameSchemaV10,
+  clientFrameSchema: hostInventorySubscribeClientFrameSchemaV10,
+});
+
+/**
+ * @1.1: the same two frame kinds, with the snapshot's rows on the registry
+ * row as it stood before a team's own computer
+ * ({@link hostListItemSchemaV11}), so they may carry the sandbox fields and
+ * include `kind: sandbox` rows. Everything else is @1.0's, field for field.
+ */
+export const hostInventorySubscribeServerFrameSchemaV11 = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("snapshot"),
+      ...textFrameFields,
+      hosts: z.array(hostListItemSchemaV11),
+      /** The host's clock at the read these rows came from. */
+      fetchedAtMs: z.number().int().nonnegative(),
+      /** These are the last good rows; the most recent read did not refresh them. */
+      stale: z.boolean(),
+    }),
+    z.object({
+      kind: z.literal("pong"),
+      ...textFrameFields,
+    }),
+  ]),
+);
+export type HostInventorySubscribeServerFrameV11 = z.infer<
+  typeof hostInventorySubscribeServerFrameSchemaV11
+>;
+
+export const hostInventorySubscribeV11 = defineStreamRpcContract({
+  method: "host.hostInventory.subscribe",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  openRequestSchema: hostInventorySubscribeOpenRequestSchemaV10,
+  serverFrameSchema: hostInventorySubscribeServerFrameSchemaV11,
+  clientFrameSchema: hostInventorySubscribeClientFrameSchemaV10,
+});
+
+/**
+ * @1.2 (Tracy Bots T141): the snapshot's rows on the live registry row, so
+ * the set may include a team's own computer (`kind: machine`). Everything
+ * else is @1.1's, field for field. The serving host drops `machine` rows for
+ * a 1.1 subscriber.
+ */
+export const hostInventorySubscribeServerFrameSchemaV12 = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("snapshot"),
+      ...textFrameFields,
+      hosts: z.array(hostListItemSchema),
+      /** The host's clock at the read these rows came from. */
+      fetchedAtMs: z.number().int().nonnegative(),
+      /** These are the last good rows; the most recent read did not refresh them. */
+      stale: z.boolean(),
+    }),
+    z.object({
+      kind: z.literal("pong"),
+      ...textFrameFields,
+    }),
+  ]),
+);
+export type HostInventorySubscribeServerFrameV12 = z.infer<
+  typeof hostInventorySubscribeServerFrameSchemaV12
+>;
+
+export const hostInventorySubscribeV12 = defineStreamRpcContract({
+  method: "host.hostInventory.subscribe",
+  schemaVersion: { major: 1, minor: 2 } as const,
+  openRequestSchema: hostInventorySubscribeOpenRequestSchemaV10,
+  serverFrameSchema: hostInventorySubscribeServerFrameSchemaV12,
+  clientFrameSchema: hostInventorySubscribeClientFrameSchemaV10,
+});

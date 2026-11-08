@@ -1,0 +1,118 @@
+# Contributing to Traycer
+
+Thanks for helping improve Traycer! This repo holds the open-source clients, CLI, and protocol.
+
+## Prerequisites
+
+- **Bun 1.3.14** — the `packageManager` is pinned. Install that exact version with
+  `curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.14"` (Windows:
+  `iex "& {$(irm https://bun.sh/install.ps1)} -Version 1.3.14"`); the unversioned
+  installers and `bun upgrade` fetch the latest release instead
+- **Node 24**
+
+## Setup
+
+```sh
+git clone https://github.com/traycerai/traycer.git
+cd traycer
+bun install
+```
+
+## Common tasks
+
+| Command          | What it does            |
+| ---------------- | ----------------------- |
+| `bun run build`  | Build all packages (Nx) |
+| `bun run test`   | Run tests (Vitest)      |
+| `bun run lint`   | Lint (ESLint)           |
+| `bun run format` | Format (Prettier)       |
+
+Nx caches and only rebuilds what changed. To target one package:
+
+```sh
+bunx nx run @traycer-clients/traycer-cli:build
+```
+
+## Repo layout
+
+| Path                   | Package                                         |
+| ---------------------- | ----------------------------------------------- |
+| `protocol/`            | `@traycer/protocol` — client⇄host wire contract |
+| `clients/traycer-cli/` | the `traycer` CLI                               |
+| `clients/shared/`      | shared transport / auth / formatting            |
+| `clients/gui-app/`     | GUI renderer                                    |
+| `clients/desktop/`     | Electron shell                                  |
+
+## Provider authentication
+
+When integrating a coding agent or changing auth consumers, read the
+[provider authentication evidence contract](protocol/provider-auth.md) for
+status semantics, runtime failures, profile scope and recovery.
+
+## Config targets and releases
+
+Each client's `src/config.ts` holds the **dev** values in source. Release
+builds run that client's `scripts/set-deploy-target.cjs` to stamp staging or
+production values into the file, then restore it, so those values are never
+committed. The CLI's source config already trusts Traycer's production
+host-signing key, so a build from source verifies released hosts;
+`~/.traycer/cli/host-trusted-pubkeys` can add keys without a rebuild.
+
+Releases are built and signed in Traycer's internal repository and published
+to this repo's [Releases](https://github.com/traycerai/traycer/releases).
+Signing secrets never enter this repository, so you need no secrets to build
+or test the code here.
+
+## Pre-commit hooks
+
+We use [pre-commit](https://pre-commit.com) for hygiene and local workspace
+checks: lint on the files your branch changed, format, and an incremental
+compile of the affected projects. CI additionally lints whole projects and runs
+the `build` targets. Install once:
+
+```sh
+pipx install pre-commit   # or: brew install pre-commit
+pre-commit install
+```
+
+If you installed the hooks before October 2026, run `pre-commit install` once
+more: it now also installs the `commit-msg` hook that checks the DCO sign-off,
+and for a maintainer pull request into `main` that hook is the only check of
+it.
+
+The hooks then run on every commit; run them on demand with
+`pre-commit run --all-files`. Tests are intentionally excluded from the hook
+and run as separate CI checks. Run a targeted test locally when it helps your
+development loop; the full suite does not need to run before each commit.
+
+## When CI runs
+
+A pull request from a fork runs every CI check, and so does a pull request
+from a bot or into any branch other than `main`. A pull request into `main`
+from a branch in this repository (maintainers') runs only the CodeQL scan;
+the protocol governance tripwire does not run either, and the full suite runs
+on the merged commit instead. Maintainers check locally what they can, and
+dispatch a workflow on a branch only when a check is actually needed before
+the merge.
+
+## Pull requests
+
+1. Fork and branch from `main`.
+2. Keep changes focused; add or update tests where it makes sense.
+3. Commit normally; pre-commit runs the affected static checks, and CI runs the
+   test suites separately on your pull request.
+4. Open a PR with the template and link any related issue.
+
+## Developer Certificate of Origin (DCO)
+
+Every commit must be **signed off** — it certifies you wrote the patch or have the right to submit it under MIT. Use `-s`:
+
+```sh
+git commit -s -m "your message"
+```
+
+This appends a `Signed-off-by: Your Name <you@example.com>` trailer. See <https://developercertificate.org/>. PRs whose commits aren't signed off will be asked to amend.
+
+## License
+
+By contributing, you agree your contributions are licensed under the [MIT License](LICENSE).

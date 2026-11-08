@@ -1,0 +1,428 @@
+import {
+  defineRpcContract,
+  defineUpgradePath,
+} from "@traycer/protocol/framework/index";
+import {
+  configBrowserGetRequestSchema,
+  configBrowserResponseSchema,
+  configBrowserSetRequestSchema,
+  configBrowserSetResponseSchema,
+  configCatalogGetRequestSchema,
+  configCatalogResponseSchema,
+  configCatalogResponseSchemaV10,
+  configCatalogSetRequestSchema,
+  configCatalogSetRequestSchemaV10,
+  configCatalogSetResponseSchema,
+  configCatalogSetResponseSchemaV10,
+  configEnvDeleteRequestSchema,
+  configEnvDeleteResponseSchema,
+  configEnvListRequestSchema,
+  configEnvListResponseSchema,
+  configEnvSetRequestSchema,
+  configEnvSetRequestSchemaV10,
+  configEnvSetResponseSchema,
+  configLogLevelsGetRequestSchema,
+  configLogLevelsResponseSchema,
+  configLogLevelsSetRequestSchema,
+  configLogLevelsSetResponseSchema,
+  configShellAddRequestSchema,
+  configShellAddRequestSchemaV10,
+  configWorktreesGetRequestSchema,
+  configWorktreesResponseSchema,
+  configWorktreesSetRequestSchema,
+  configWorktreesSetResponseSchema,
+  configVisualizationGetRequestSchema,
+  configVisualizationResponseSchema,
+  configVisualizationSetRequestSchema,
+  configVisualizationSetResponseSchema,
+  configSessionNamesGetRequestSchema,
+  configSessionNamesResponseSchema,
+  configSessionNamesSetRequestSchema,
+  configSessionNamesSetResponseSchema,
+  configShellAddResponseSchema,
+  configShellGetRequestSchema,
+  configShellGetResponseSchema,
+  configShellListDetectedRequestSchema,
+  configShellListDetectedResponseSchema,
+  configShellListDetectedResponseSchemaV10,
+  configShellProbeRequestSchema,
+  configShellProbeResponseSchema,
+  configShellRemoveRequestSchema,
+  configShellRemoveRequestSchemaV10,
+  configShellRemoveResponseSchema,
+  configShellResetRequestSchema,
+  configShellResetRequestSchemaV10,
+  configShellResetResponseSchema,
+  configShellRevertArgsRequestSchema,
+  configShellRevertArgsRequestSchemaV10,
+  configShellRevertArgsResponseSchema,
+  configShellSetRequestSchema,
+  configShellSetRequestSchemaV10,
+  configShellSetResponseSchema,
+} from "./schemas";
+
+/** Machine-user-global shell configuration; never host-slot scoped. */
+export const configShellGetV10 = defineRpcContract({
+  method: "config.shell.get",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configShellGetRequestSchema,
+  responseSchema: configShellGetResponseSchema,
+});
+
+export const configShellSetV10 = defineRpcContract({
+  method: "config.shell.set",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configShellSetRequestSchemaV10,
+  responseSchema: configShellSetResponseSchema,
+});
+
+export const configShellResetV10 = defineRpcContract({
+  method: "config.shell.reset",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configShellResetRequestSchemaV10,
+  responseSchema: configShellResetResponseSchema,
+});
+
+export const configShellAddV10 = defineRpcContract({
+  method: "config.shell.add",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configShellAddRequestSchemaV10,
+  responseSchema: configShellAddResponseSchema,
+});
+
+export const configShellRemoveV10 = defineRpcContract({
+  method: "config.shell.remove",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configShellRemoveRequestSchemaV10,
+  responseSchema: configShellRemoveResponseSchema,
+});
+
+export const configShellRevertArgsV10 = defineRpcContract({
+  method: "config.shell.revertArgs",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configShellRevertArgsRequestSchemaV10,
+  responseSchema: configShellRevertArgsResponseSchema,
+});
+
+/** Shell discovery runs against the connected host's own filesystem. */
+export const configShellListDetectedV10 = defineRpcContract({
+  method: "config.shell.listDetected",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configShellListDetectedRequestSchema,
+  responseSchema: configShellListDetectedResponseSchemaV10,
+});
+
+// v1.1 adds the optional `wslHealth` annotation to each row (a Windows
+// wsl.exe that cannot host a terminal: the installer stub, or no registered
+// distribution). Shipped as a minor rather than an in-place change to v1.0
+// because cli-v1.2.0 released the v1.0 response shape: a released peer never
+// sends the key, so it may only exist at a version that peer does not
+// negotiate. The extra object key is strippable by the within-major skew
+// handler, so a v1.1 host answering a v1.0 client drops it on the wire. See
+// the RPC backward-compat decision log.
+export const configShellListDetectedV11 = defineRpcContract({
+  method: "config.shell.listDetected",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: configShellListDetectedRequestSchema,
+  responseSchema: configShellListDetectedResponseSchema,
+});
+
+// The request is empty either way, and a v1.0 response is already a valid
+// v1.1 response - `wslHealth` is optional and its absence means "no verdict",
+// exactly what a host that never probed should express - so both upgrades are
+// the identity.
+export const configShellListDetectedUpgradeV10ToV11 = defineUpgradePath<
+  typeof configShellListDetectedV10,
+  typeof configShellListDetectedV11
+>({
+  from: configShellListDetectedV10.schemaVersion,
+  to: configShellListDetectedV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+/** Shell executable probing runs against the connected host's filesystem. */
+export const configShellProbeV10 = defineRpcContract({
+  method: "config.shell.probe",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configShellProbeRequestSchema,
+  responseSchema: configShellProbeResponseSchema,
+});
+
+/** Machine-user-global host-process environment overrides. */
+export const configEnvListV10 = defineRpcContract({
+  method: "config.env.list",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configEnvListRequestSchema,
+  responseSchema: configEnvListResponseSchema,
+});
+
+export const configEnvSetV10 = defineRpcContract({
+  method: "config.env.set",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configEnvSetRequestSchemaV10,
+  responseSchema: configEnvSetResponseSchema,
+});
+
+export const configEnvDeleteV10 = defineRpcContract({
+  method: "config.env.delete",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configEnvDeleteRequestSchema,
+  responseSchema: configEnvDeleteResponseSchema,
+});
+
+/** Reads machine-user-global CLI and host log thresholds; desktop is local-only. */
+export const configLogLevelsGetV10 = defineRpcContract({
+  method: "config.logLevels.get",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configLogLevelsGetRequestSchema,
+  responseSchema: configLogLevelsResponseSchema,
+});
+
+/** Writes one machine-user-global CLI or host log threshold; no desktop scope. */
+export const configLogLevelsSetV10 = defineRpcContract({
+  method: "config.logLevels.set",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configLogLevelsSetRequestSchema,
+  responseSchema: configLogLevelsSetResponseSchema,
+});
+
+/** Reads the machine-user-global agent browser-access switch. */
+export const configBrowserGetV10 = defineRpcContract({
+  method: "config.browser.get",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configBrowserGetRequestSchema,
+  responseSchema: configBrowserResponseSchema,
+});
+
+/** Writes the machine-user-global agent browser-access switch. */
+export const configBrowserSetV10 = defineRpcContract({
+  method: "config.browser.set",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configBrowserSetRequestSchema,
+  responseSchema: configBrowserSetResponseSchema,
+});
+
+/** Reads the machine-user-global policy for worktrees agents create. */
+export const configWorktreesGetV10 = defineRpcContract({
+  method: "config.worktrees.get",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configWorktreesGetRequestSchema,
+  responseSchema: configWorktreesResponseSchema,
+});
+
+/** Writes the machine-user-global policy for worktrees agents create. */
+export const configWorktreesSetV10 = defineRpcContract({
+  method: "config.worktrees.set",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configWorktreesSetRequestSchema,
+  responseSchema: configWorktreesSetResponseSchema,
+});
+
+/** Reads whether agents get the page tools. */
+export const configVisualizationGetV10 = defineRpcContract({
+  method: "config.visualization.get",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configVisualizationGetRequestSchema,
+  responseSchema: configVisualizationResponseSchema,
+});
+
+/** Turns the page tools on or off for agents launched from now on. */
+export const configVisualizationSetV10 = defineRpcContract({
+  method: "config.visualization.set",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configVisualizationSetRequestSchema,
+  responseSchema: configVisualizationSetResponseSchema,
+});
+
+/** Reads the Claude terminal session name template. */
+export const configSessionNamesGetV10 = defineRpcContract({
+  method: "config.sessionNames.get",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configSessionNamesGetRequestSchema,
+  responseSchema: configSessionNamesResponseSchema,
+});
+
+/** Writes the Claude terminal session name template. */
+export const configSessionNamesSetV10 = defineRpcContract({
+  method: "config.sessionNames.set",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configSessionNamesSetRequestSchema,
+  responseSchema: configSessionNamesSetResponseSchema,
+});
+
+/** Reads the shared catalog probe timeout and its bounds. */
+export const configCatalogGetV10 = defineRpcContract({
+  method: "config.catalog.get",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configCatalogGetRequestSchema,
+  responseSchema: configCatalogResponseSchemaV10,
+});
+
+// v1.1 adds `overrides`, each provider's own timeout (Settings > Providers >
+// CLI & Args > Model list, "Same for all providers" off). The extra key is
+// strippable, so a 1.1 host answering a 1.0 client drops it on the wire.
+export const configCatalogGetV11 = defineRpcContract({
+  method: "config.catalog.get",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: configCatalogGetRequestSchema,
+  responseSchema: configCatalogResponseSchema,
+});
+
+// A 1.0 host has no per-provider values, so every provider follows the shared
+// one: `overrides` is empty.
+export const configCatalogGetUpgradeV10ToV11 = defineUpgradePath<
+  typeof configCatalogGetV10,
+  typeof configCatalogGetV11
+>({
+  from: configCatalogGetV10.schemaVersion,
+  to: configCatalogGetV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => ({ ...response, overrides: {} }),
+});
+
+/** Writes the shared catalog probe timeout. */
+export const configCatalogSetV10 = defineRpcContract({
+  method: "config.catalog.set",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: configCatalogSetRequestSchemaV10,
+  responseSchema: configCatalogSetResponseSchemaV10,
+});
+
+// v1.1 writes either the shared value (`scope: "all"`, which leaves providers'
+// own values alone) or one provider's own value (`scope: "harness"`, `null`
+// clears it). The response grows `overrides` as `config.catalog.get` does.
+export const configCatalogSetV11 = defineRpcContract({
+  method: "config.catalog.set",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: configCatalogSetRequestSchema,
+  responseSchema: configCatalogSetResponseSchema,
+});
+
+// A 1.0 body - a bare `{ probeTimeoutSeconds }` - always meant the shared
+// value, so it upgrades to `scope: "all"`, and a 1.0 client keeps working
+// against a 1.1 host unchanged.
+export const configCatalogSetUpgradeV10ToV11 = defineUpgradePath<
+  typeof configCatalogSetV10,
+  typeof configCatalogSetV11
+>({
+  from: configCatalogSetV10.schemaVersion,
+  to: configCatalogSetV11.schemaVersion,
+  upgradeRequest: (request) => ({
+    scope: "all",
+    probeTimeoutSeconds: request.probeTimeoutSeconds,
+  }),
+  upgradeResponse: (response) => ({ ...response, overrides: {} }),
+});
+
+// ── v1.1: the executable-write grant ────────────────────────────────────────
+//
+// Each of these writes can change what a host starts (the shell path and
+// args, a launch-sensitive host-process variable), so it reaches an execution
+// sink and carries `executableWriteGrant`. Every v1.0 line is released
+// (`host-v1.5.1`), so the field opens a minor: a v1.0 caller's request is
+// upgraded with `null`, and a v1.1 request to a v1.0 host is re-parsed onto
+// the v1.0 request, whose non-strict object strips the key. The response is
+// unchanged.
+
+export const configShellSetV11 = defineRpcContract({
+  method: "config.shell.set",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: configShellSetRequestSchema,
+  responseSchema: configShellSetResponseSchema,
+});
+
+export const configShellSetUpgradeV10ToV11 = defineUpgradePath<
+  typeof configShellSetV10,
+  typeof configShellSetV11
+>({
+  from: configShellSetV10.schemaVersion,
+  to: configShellSetV11.schemaVersion,
+  upgradeRequest: (request) => ({ ...request, executableWriteGrant: null }),
+  upgradeResponse: (response) => response,
+});
+
+export const configShellResetV11 = defineRpcContract({
+  method: "config.shell.reset",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: configShellResetRequestSchema,
+  responseSchema: configShellResetResponseSchema,
+});
+
+export const configShellResetUpgradeV10ToV11 = defineUpgradePath<
+  typeof configShellResetV10,
+  typeof configShellResetV11
+>({
+  from: configShellResetV10.schemaVersion,
+  to: configShellResetV11.schemaVersion,
+  upgradeRequest: (request) => ({ ...request, executableWriteGrant: null }),
+  upgradeResponse: (response) => response,
+});
+
+export const configShellAddV11 = defineRpcContract({
+  method: "config.shell.add",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: configShellAddRequestSchema,
+  responseSchema: configShellAddResponseSchema,
+});
+
+export const configShellAddUpgradeV10ToV11 = defineUpgradePath<
+  typeof configShellAddV10,
+  typeof configShellAddV11
+>({
+  from: configShellAddV10.schemaVersion,
+  to: configShellAddV11.schemaVersion,
+  upgradeRequest: (request) => ({ ...request, executableWriteGrant: null }),
+  upgradeResponse: (response) => response,
+});
+
+export const configShellRemoveV11 = defineRpcContract({
+  method: "config.shell.remove",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: configShellRemoveRequestSchema,
+  responseSchema: configShellRemoveResponseSchema,
+});
+
+export const configShellRemoveUpgradeV10ToV11 = defineUpgradePath<
+  typeof configShellRemoveV10,
+  typeof configShellRemoveV11
+>({
+  from: configShellRemoveV10.schemaVersion,
+  to: configShellRemoveV11.schemaVersion,
+  upgradeRequest: (request) => ({ ...request, executableWriteGrant: null }),
+  upgradeResponse: (response) => response,
+});
+
+export const configShellRevertArgsV11 = defineRpcContract({
+  method: "config.shell.revertArgs",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: configShellRevertArgsRequestSchema,
+  responseSchema: configShellRevertArgsResponseSchema,
+});
+
+export const configShellRevertArgsUpgradeV10ToV11 = defineUpgradePath<
+  typeof configShellRevertArgsV10,
+  typeof configShellRevertArgsV11
+>({
+  from: configShellRevertArgsV10.schemaVersion,
+  to: configShellRevertArgsV11.schemaVersion,
+  upgradeRequest: (request) => ({ ...request, executableWriteGrant: null }),
+  upgradeResponse: (response) => response,
+});
+
+export const configEnvSetV11 = defineRpcContract({
+  method: "config.env.set",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: configEnvSetRequestSchema,
+  responseSchema: configEnvSetResponseSchema,
+});
+
+export const configEnvSetUpgradeV10ToV11 = defineUpgradePath<
+  typeof configEnvSetV10,
+  typeof configEnvSetV11
+>({
+  from: configEnvSetV10.schemaVersion,
+  to: configEnvSetV11.schemaVersion,
+  upgradeRequest: (request) => ({ ...request, executableWriteGrant: null }),
+  upgradeResponse: (response) => response,
+});

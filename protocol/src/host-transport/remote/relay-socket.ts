@@ -1,0 +1,858 @@
+import type {
+  IStreamWebSocketFactory,
+  StreamWebSocketLike,
+  StreamWebSocketMessageEvent,
+} from "../stream-websocket";
+import type { WebSocketCloseEvent, WebSocketErrorEvent } from "../websocket";
+import type { TimerHandle, IntervalHandle } from "../timers";
+import { assertRelayAttachUrlSecure } from "@traycer/protocol/host-transport/relay-attach-url";
+import { createRelayPathEstimator } from "@traycer/protocol/host-transport/relay-liveness";
+import {
+  SOCKET_KEEPALIVE_PING,
+  SOCKET_KEEPALIVE_PONG,
+} from "@traycer/protocol/framework/ws-protocol";
+import {
+  RELAY_DIAL_TIMEOUT_MS,
+  RELAY_AWAITING_PING_INTERVAL_MS,
+  RELAY_AWAITING_PONG_TIMEOUT_MS,
+  RELAY_PING_INTERVAL_MS,
+  RELAY_PING_TICK_MS,
+  RELAY_AWAITING_DEADLINE_CAP_MULTIPLE,
+  RELAY_PONG_TIMEOUT_MS,
+} from "./config";
+
+/**
+ * The persistent client↔relay WebSocket leg (T10 wire protocol; relay-do
+ * README). One socket = one relay session = one E2E Noise session (the client's
+ * single socket is its single `sid`; the relay assigns and owns `sid`).
+ *
+ * Responsibilities (transport-only — no Noise, no mux; those sit above):
+ *  - present the `role:"client"` attach grant and await `attach_ack{sid}`;
+ *  - forward opaque DATA (binary) frames both ways — client leg is `[ciphertext]`
+ *    with NO sid prefix (the relay knows the sid from this authenticated socket);
+ *  - surface relay CONTROL (text JSON) lifecycle frames as typed callbacks;
+ *  - drive the `relay-ping`/`relay-pong` keepalive and fail the socket on missed
+ *    pongs (a half-open socket after device sleep);
+ *  - re-present a fresh grant in-band via a `reauth` control frame.
+ *
+ * The grant rides the `?grant=<jws>` query fallback (the relay also accepts the
+ * preferred `Sec-WebSocket-Protocol: …, grant.<jws>` header, but the shared
+ * `IStreamWebSocketFactory` only takes a URL, so the client uses the query form).
+ *
+ * The same socket also serves a DIRECT leg (`directUrl`): the server pool,
+ * dialed with no relay in between. There is no grant and no relay to attach
+ * to, so the socket's own open is the attach (`onAttachAck` fires then), and
+ * relay CONTROL frames are dropped: only a relay may say a host detached or a
+ * peer is gone, and a direct peer claiming either would park or kill a
+ * session on words it has no standing to speak. The keepalive is kept as is -
+ * the peer answers `relay-ping` with `relay-pong` - so half-open detection and
+ * the wake probe behave exactly as they do on the relay leg.
+ */
+
+/**
+ * The close code+reason a failed wake probe reports, exported so the session
+ * above can recognize this loss BY IDENTITY (structured fields on the close
+ * event, not a substring of the composed log line) when deciding whether a
+ * wake-probe verdict earns an immediate redial.
+ */
+export const RELAY_WAKE_PROBE_TIMEOUT_CLOSE_CODE = 4006;
+export const RELAY_WAKE_PROBE_TIMEOUT_CLOSE_REASON = "relay-wake-probe-timeout";
+/**
+ * The one code for a leg this client gives up while it keeps the session. The
+ * relay parks a session on it; 1000 would close the session for good.
+ */
+export const RELAY_RELINK_CLOSE_CODE = 4007;
+export const RELAY_RELINK_CLOSE_REASON = "relay-relink";
+const RELAY_DIAL_TIMEOUT_CLOSE_REASON = "relay-dial-timeout";
+const RELAY_SOCKET_ERROR_CLOSE_REASON = "relay-socket-error";
+const RELAY_MISSED_PONGS_CLOSE_REASON = "relay-missed-pongs";
+const RELAY_PING_SEND_FAILED_CLOSE_REASON = "relay-ping-send-failed";
+
+/** The relay Worker's bound on the whole `prev` value. */
+const RELAY_PREV_MAX_CHARS = 64;
+
+/**
+ * The `prev=<code>:<reason>` value for a leg that closed with `code` and
+ * `reason`, in the shape the relay Worker accepts: the reason lowercased,
+ * each run of characters outside `[a-z0-9]` one `-`, trimmed of `-`, and cut
+ * so the whole value fits the Worker's 64 characters. The relay closes legs
+ * with spaced reasons ("host superseded", "rate limit"), and a value outside
+ * that shape is dropped whole, close code included, while the code is the
+ * measurement. Which reasons count is the Worker's call alone: one it does
+ * not know is recorded as `<code>:other`. The host builds its `prev` with
+ * this function too.
+ */
+export function relayPrevQueryValue(code: number, reason: string): string {
+  const head = `${code}:`;
+  const slug = reason
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, Math.max(0, RELAY_PREV_MAX_CHARS - head.length))
+    .replace(/-+$/, "");
+  return `${head}${slug}`;
+}
+
+/**
+ * Relay session-kill / peer-death reasons (mirror relay-do `KillReason`).
+ *
+ * The relay can add a reason before this client updates. Preserve that reason
+ * rather than rejecting its control frame: unknown kills are transport losses
+ * and therefore retryable by default. The known literals remain here for the
+ * one reason with stronger semantics (`revoked`) and for call-site discovery.
+ */
+export type RelayKillReason =
+  | "reauth_timeout"
+  | "revoked"
+  | "host_gone"
+  | "policy_violation"
+  /**
+   * The host asked the relay to drop this client leg because it can no longer
+   * serve the Noise session behind it (a residual handshake/decrypt failure, a
+   * standing sweep, a slow-session eviction). Known here for its BACKOFF
+   * semantics, not its provenance: it is still `not-host-evidence`, but the
+   * host is demonstrably alive and asking for a re-handshake, so the session
+   * redials at its current ladder rung instead of the congestion cap.
+   */
+  | "session_reset"
+  | (string & {});
+
+export interface RelaySocketHandlers {
+  /**
+   * The relay assigned this client session its `sid`; bridging is live.
+   * `resumeKey` is the key that claims `sid` back after this leg is lost, or
+   * `null` from a relay that cannot park. A secret: never log it.
+   */
+  readonly onAttachAck: (sid: number, resumeKey: string | null) => void;
+  /** An opaque inbound DATA frame (Noise transport bytes for the layer above). */
+  readonly onData: (ciphertext: Uint8Array) => void;
+  /** Optional diagnostic: exact UTF-8 payload size, never the control text. */
+  readonly onTextBytes?: (bytes: number) => void;
+  /** The host's uplink dropped — pause; the same Noise session resumes on re-attach. */
+  readonly onHostDetached: () => void;
+  /** The host's uplink (re)attached — resume sends on the existing Noise session. */
+  readonly onHostAttached: () => void;
+  /** The relay acknowledged an in-band `reauth` grant. */
+  readonly onReauthAck: () => void;
+  /** The peer is gone / the session was killed — the session must full-resume. */
+  readonly onPeerGone: (reason: RelayKillReason) => void;
+  /** A recoverable relay protocol error (no close). */
+  readonly onError: (code: string, message: string) => void;
+  /** The socket dropped (any cause) — the session reconnects from backoff. */
+  readonly onClose: (info: {
+    readonly code: number;
+    readonly reason: string;
+  }) => void;
+}
+
+/** How a leg's socket ended: the close code and reason it reported. */
+export interface RelayLegEnd {
+  readonly code: number;
+  readonly reason: string;
+}
+
+/** Claims a parked relay session back onto a new leg. The key is a secret. */
+export interface RelayResumeClaim {
+  readonly sid: number;
+  readonly key: string;
+}
+
+interface RelayLegOptions {
+  readonly attachBaseUrl: string;
+  readonly grantJws: string;
+  /**
+   * How the last leg that CARRIED a session ended, or `null` while this client
+   * has never had one. Not the dial before this one: a dial that never reached
+   * its attach carried nothing, so it leaves this as it found it. Telemetry
+   * only.
+   */
+  readonly previousLeg: RelayLegEnd | null;
+  /** The session this dial claims back, or `null` for a fresh attach. */
+  readonly resumeClaim: RelayResumeClaim | null;
+  readonly webSocketFactory: IStreamWebSocketFactory;
+  readonly handlers: RelaySocketHandlers;
+}
+
+interface DirectLegOptions {
+  /** The peer's own `wss:` URL; no grant rides on it. */
+  readonly directUrl: string;
+  readonly webSocketFactory: IStreamWebSocketFactory;
+  readonly handlers: RelaySocketHandlers;
+}
+
+export type RelaySocketOptions = RelayLegOptions | DirectLegOptions;
+
+export class RelaySocket {
+  private readonly handlers: RelaySocketHandlers;
+  /** A direct leg: the socket's open is the attach, and control frames are dropped. */
+  private readonly direct: boolean;
+  private socket: StreamWebSocketLike | null;
+  private opened = false;
+  private closed = false;
+  private dialTimer: TimerHandle | null = null;
+  private pingTimer: IntervalHandle | null = null;
+  /**
+   * Armed exactly while a wake-time ping is outstanding, and disarmed by the
+   * next inbound frame - so its survival to the deadline IS the verdict. See
+   * {@link pokeKeepalive}.
+   */
+  private probeTimer: TimerHandle | null = null;
+  /**
+   * Monotonically increasing identity of the current wake-probe arm. Bumped
+   * when an arm is raised AND when one is retired by an inbound answer, so a
+   * scheduled deadline callback can prove it still speaks for the live arm.
+   */
+  private probeArmToken = 0;
+  /** When the current arm's (possibly joined-earlier) deadline fires. */
+  private probeDeadlineAt = 0;
+  /**
+   * True from the moment an arm is raised until an inbound frame answers it.
+   * Deliberately NOT cleared by `close()` - see `pokeKeepalive`'s contract.
+   */
+  private probeUnanswered = false;
+  /** The current arm's effective failure policy (upgrade-only merged). */
+  private probeImmediateRedialOnFailure = false;
+  /** Last time ANY frame arrived from the relay (pong, control, or data). */
+  private lastInboundAt: number;
+  /**
+   * Whether application traffic is currently outstanding - explicit state, NOT
+   * a comparison of the two timestamps.
+   *
+   * `lastOutboundAt > lastInboundAt` looks equivalent and is not: `Date.now()`
+   * has millisecond resolution, so a send issued from an inbound frame's own
+   * handler - a stream frame answered by the next request, the commonest shape
+   * on this socket - reads equal, and a strict comparison resolves the tie as
+   * "not awaiting". That parks a genuinely half-open socket on the 60s idle
+   * deadline instead of the 12s detection one, for exactly the traffic pattern
+   * the fast deadline was added to catch.
+   */
+  private awaitingResponse = false;
+  /** When the current unanswered-send run began; the fast deadline's origin. */
+  private awaitingSince = 0;
+  private lastPingSentAt = 0;
+  /**
+   * This socket's own path estimator (ticket 24, A8) - deliberately not
+   * shared with any other leg or subscription. Feeds the two liveness
+   * deadlines below, which floor on their constants and can therefore only
+   * be lengthened by it.
+   */
+  private readonly path = createRelayPathEstimator();
+
+  constructor(options: RelaySocketOptions) {
+    this.handlers = options.handlers;
+    this.direct = "directUrl" in options;
+    this.lastInboundAt = Date.now();
+    // Before the URL is built, let alone dialed: the grant goes into the query
+    // string below. `beginConnectGuarded` catches a synchronous throw out of
+    // this constructor and re-arms the backoff loop. A direct leg carries no
+    // grant, but its mux frames - the bearer in `open` included - are not
+    // sealed by anything but TLS, so it passes the same gate.
+    let dialUrl: string;
+    if ("directUrl" in options) {
+      assertRelayAttachUrlSecure(options.directUrl);
+      dialUrl = options.directUrl;
+    } else {
+      assertRelayAttachUrlSecure(options.attachBaseUrl);
+      dialUrl = withAttachQuery(
+        options.attachBaseUrl,
+        options.grantJws,
+        options.previousLeg,
+        options.resumeClaim,
+      );
+    }
+    // Not a host method, and not classifiable as one: this is the single
+    // durable leg that MULTIPLEXES every unary call and every stream for a
+    // remote host, so anything queued behind it is queued behind all of them.
+    // It holds a dial slot only while connecting, so it cannot squat.
+    this.socket = options.webSocketFactory.create(dialUrl, "interactive");
+    this.wireSocket(this.socket);
+    this.dialTimer = setTimeout(() => {
+      this.dialTimer = null;
+      if (!this.opened) {
+        this.fail(4000, RELAY_DIAL_TIMEOUT_CLOSE_REASON);
+      }
+    }, RELAY_DIAL_TIMEOUT_MS);
+  }
+
+  /** Sends an opaque DATA frame (client leg: raw `[ciphertext]`, no sid). */
+  sendData(ciphertext: Uint8Array): boolean {
+    const socket = this.socket;
+    if (socket === null || !this.opened) {
+      return false;
+    }
+    try {
+      socket.send(ciphertext);
+      this.noteOutbound();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Re-presents a fresh attach grant in-band on the live socket (§4b). */
+  sendReauth(grantJws: string): boolean {
+    return this.sendControl({ type: "reauth", grant: grantJws });
+  }
+
+  /**
+   * Probes this socket NOW, for a caller that knows the runtime just un-froze
+   * (an OS wake, an app returning to the foreground).
+   *
+   * Two things go wrong across a freeze, and this answers both. The keepalive
+   * is an INTERVAL, and an interval does not run while the runtime is stopped,
+   * so a socket the network dropped mid-freeze is not even looked at until the
+   * overdue tick lands. And the drop itself is frequently silent - the peer
+   * never got to send a close, so the socket reads open and the layer above
+   * keeps parking work on a connection that will never answer.
+   *
+   * So: run the scheduled check off-schedule (a socket already past
+   * `RELAY_PONG_TIMEOUT_MS` fails immediately, exactly as the tick would), and
+   * then hold the ping that check just sent to a much shorter
+   * `probeTimeoutMs` deadline. The 60s allowance is calibrated for
+   * a link that is merely slow; a wake is the one moment we have positive
+   * reason to suspect the socket is dead, and waiting out a minute to find out
+   * is most of what "the app was unusable after switching away" means. The
+   * deadline is the CALLER's because the caller holds the evidence that sizes
+   * it: a desktop wake passes `RELAY_WAKE_PROBE_TIMEOUT_MS` (the socket
+   * usually survived, be generous), a mobile resume after a measured brief
+   * background passes `RELAY_WAKE_PROBE_TIMEOUT_BACKGROUNDED_MS` (the socket
+   * is probably dead, verdict fast).
+   *
+   * An ARMED probe timer is the whole state, and it means exactly "a ping went
+   * out and nothing has answered since". Any inbound frame disarms it; the
+   * timer surviving to its deadline is therefore proof of silence on its own,
+   * with no timestamp to compare. That correlation has to be the timer's own
+   * identity rather than a `lastInboundAt` reading, because `lastInboundAt` is
+   * also stamped when the socket OPENS and is not reset per probe - so
+   * comparing against it both credits a probe with the open's stamp and
+   * credits a later probe with an earlier probe's answer. Silence is the thing
+   * being measured; only the absence of a disarm can measure it.
+   *
+   * One probe ARM is unanswered at a time, and ownership within it is
+   * MONOTONIC. A poke that finds an arm already in flight joins it - no
+   * second ping goes out - and a joiner may only make the arm stricter:
+   * the deadline moves to the EARLIER of the two, and the failure policy
+   * (`immediateRedialOnFailure`) can be raised but never lowered. Wake
+   * bursts arrive from independent triggers with different evidence (a
+   * measured mobile resume beside a generic online edge, in either order),
+   * and whichever is stronger must win regardless of arrival order.
+   *
+   * Any inbound frame RETIRES the arm completely - deadline, policy, and
+   * token - so the poke after an answered one arms a genuinely fresh probe
+   * whose policy starts from its own arguments, never inherited. The arm
+   * token is what keeps a retired arm's scheduled deadline callback inert.
+   * No verdict is duplicated: a probe fails through the same {@link fail}
+   * path. A socket that has not opened, or is closed, has nothing to probe
+   * and is a no-op.
+   *
+   * The unanswered-arm state and its effective policy deliberately survive
+   * {@link close}, so the session's close handler can still read
+   * {@link hasUnansweredImmediateRedialProbe} - a NEGATIVE end of any kind
+   * (the probe's own deadline, an OS-delivered error close, missed pongs)
+   * while the arm was unanswered inherits the arm's policy, not only the
+   * synthetic probe-timeout close. Each connection owns its own socket
+   * object, so nothing here can leak across dials.
+   */
+  pokeKeepalive(
+    probeTimeoutMs: number,
+    immediateRedialOnFailure: boolean,
+  ): void {
+    if (this.closed || !this.opened) {
+      return;
+    }
+    const now = Date.now();
+    if (this.probeTimer !== null) {
+      // Join the in-flight arm: upgrade-only merge, no additional ping.
+      this.probeImmediateRedialOnFailure =
+        this.probeImmediateRedialOnFailure || immediateRedialOnFailure;
+      const joinedDeadlineAt = now + probeTimeoutMs;
+      if (joinedDeadlineAt < this.probeDeadlineAt) {
+        this.probeDeadlineAt = joinedDeadlineAt;
+        clearTimeout(this.probeTimer);
+        this.probeTimer = setTimeout(
+          this.probeDeadlineCallback(this.probeArmToken),
+          probeTimeoutMs,
+        );
+      }
+      return;
+    }
+    this.runKeepaliveTick();
+    if (this.closed) {
+      // The staleness check failed the socket synchronously - no arm was
+      // raised, so the close that just happened inherited no probe policy.
+      return;
+    }
+    this.probeArmToken += 1;
+    this.probeUnanswered = true;
+    this.probeImmediateRedialOnFailure = immediateRedialOnFailure;
+    this.probeDeadlineAt = now + probeTimeoutMs;
+    this.probeTimer = setTimeout(
+      this.probeDeadlineCallback(this.probeArmToken),
+      probeTimeoutMs,
+    );
+  }
+
+  /**
+   * The deadline for one specific arm, pinned by token: a callback whose arm
+   * has been retired (answered, or re-armed later) finds a different token
+   * and does nothing, however late the runtime delivers it.
+   */
+  private probeDeadlineCallback(token: number): () => void {
+    return () => {
+      if (this.closed || token !== this.probeArmToken) {
+        return;
+      }
+      this.probeTimer = null;
+      // Still unanswered at the deadline, so nothing answered the ping this
+      // arm sent - the socket is open in name only.
+      this.fail(
+        RELAY_WAKE_PROBE_TIMEOUT_CLOSE_CODE,
+        RELAY_WAKE_PROBE_TIMEOUT_CLOSE_REASON,
+      );
+    };
+  }
+
+  /**
+   * True while an unanswered wake-probe arm demands that a failure redial
+   * immediately. Readable after {@link close} on purpose - the session's
+   * close handler is the consumer, and the close IS the failure the arm's
+   * policy speaks to. An answered arm reads false forever: liveness was
+   * proven, so a later loss is an ordinary one.
+   */
+  hasUnansweredImmediateRedialProbe(): boolean {
+    return this.probeUnanswered && this.probeImmediateRedialOnFailure;
+  }
+
+  /**
+   * Whether this leg reached WebSocket open. Retained after close so drop
+   * accounting can distinguish a lost live leg from a failed dial.
+   */
+  hasOpened(): boolean {
+    return this.opened;
+  }
+
+  close(code: number, reason: string): void {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    this.teardownTimers();
+    const socket = this.socket;
+    this.socket = null;
+    if (socket === null) {
+      return;
+    }
+    socket.onopen = null;
+    socket.onmessage = null;
+    socket.onerror = null;
+    socket.onclose = null;
+    try {
+      socket.close(code, reason);
+    } catch {
+      // best-effort close
+    }
+  }
+
+  private sendControl(message: { type: "reauth"; grant: string }): boolean {
+    const socket = this.socket;
+    if (socket === null || !this.opened) {
+      return false;
+    }
+    try {
+      socket.send(JSON.stringify(message));
+      this.noteOutbound();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private wireSocket(socket: StreamWebSocketLike): void {
+    socket.onopen = () => {
+      if (socket !== this.socket) {
+        return;
+      }
+      this.opened = true;
+      if (this.dialTimer !== null) {
+        clearTimeout(this.dialTimer);
+        this.dialTimer = null;
+      }
+      const now = Date.now();
+      this.lastInboundAt = now;
+      this.awaitingResponse = false;
+      this.awaitingSince = 0;
+      this.lastPingSentAt = now;
+      this.startKeepalive();
+      if (this.direct) {
+        this.handlers.onAttachAck(0, null);
+      }
+    };
+    socket.onmessage = (event: StreamWebSocketMessageEvent) => {
+      if (socket !== this.socket) {
+        return;
+      }
+      this.noteInbound();
+      if (event.type === "binary") {
+        this.handlers.onData(event.data);
+        return;
+      }
+      if (this.handlers.onTextBytes !== undefined) {
+        this.handlers.onTextBytes(
+          new TextEncoder().encode(event.data).byteLength,
+        );
+      }
+      this.handleTextFrame(event.data);
+    };
+    socket.onerror = (_event: WebSocketErrorEvent) => {
+      if (socket !== this.socket) {
+        return;
+      }
+      this.fail(4005, RELAY_SOCKET_ERROR_CLOSE_REASON);
+    };
+    socket.onclose = (event: WebSocketCloseEvent) => {
+      if (socket !== this.socket) {
+        return;
+      }
+      this.onSocketClosed(event.code, event.reason);
+    };
+  }
+
+  private handleTextFrame(raw: string): void {
+    if (raw === SOCKET_KEEPALIVE_PONG) {
+      // `noteInbound` already stamped it (and disarmed any wake probe); a pong
+      // carries no extra liveness meaning now that every inbound frame counts
+      // as proof the socket carries traffic. It is still the ONLY frame whose
+      // round trip this end initiated, so it is the only one that can measure
+      // the path (ticket 24, A8).
+      this.path.notePongReceived(Date.now());
+      return;
+    }
+    if (raw === SOCKET_KEEPALIVE_PING) {
+      // The relay auto-responds to pings; a relay-originated ping is not
+      // expected, but answer it symmetrically to be safe.
+      const socket = this.socket;
+      if (socket !== null) {
+        try {
+          socket.send(SOCKET_KEEPALIVE_PONG);
+        } catch {
+          // ignore
+        }
+      }
+      return;
+    }
+    if (this.direct) {
+      return;
+    }
+    const control = parseRelayControl(raw);
+    if (control === null) {
+      return;
+    }
+    this.dispatchControl(control);
+  }
+
+  private dispatchControl(control: RelayControlInbound): void {
+    switch (control.type) {
+      case "attach_ack":
+        this.handlers.onAttachAck(control.sid, control.resumeKey);
+        return;
+      case "host_detached":
+        this.handlers.onHostDetached();
+        return;
+      case "host_attached":
+        this.handlers.onHostAttached();
+        return;
+      case "reauth_ack":
+        this.handlers.onReauthAck();
+        return;
+      case "peer_gone":
+      case "killed":
+        this.handlers.onPeerGone(control.reason);
+        return;
+      case "error":
+        this.handlers.onError(control.code, control.message);
+        return;
+    }
+  }
+
+  /**
+   * True once this client has sent application traffic that nothing at all has
+   * come back after. That is the literal definition of a half-open socket, and
+   * it is the only state worth paying the fast cadence for.
+   *
+   * Keepalive pings deliberately do NOT put the socket in this state. A ping
+   * that set it would make every idle session permanently "awaiting" between
+   * its own ping and pong, which is how a cheap idle cadence turns into a 5 s
+   * one for a backgrounded app that has nothing to say.
+   */
+  private isAwaitingResponse(): boolean {
+    return this.awaitingResponse;
+  }
+
+  /**
+   * Records outbound APPLICATION traffic. `awaitingSince` is stamped only when
+   * this send OPENS a new unanswered run, and that is load-bearing rather than
+   * an optimization: the fast deadline has to be measured from the moment we
+   * started waiting, never from `lastInboundAt`. A healthy idle socket's last
+   * inbound can legitimately be a ~25 s-old pong, so a 12 s deadline measured
+   * against it would fail a perfectly good socket the instant the user typed.
+   */
+  private noteOutbound(): void {
+    if (this.awaitingResponse) {
+      return;
+    }
+    this.awaitingResponse = true;
+    this.awaitingSince = Date.now();
+  }
+
+  /**
+   * ANY inbound frame proves the socket carries traffic, not just a pong, and
+   * closes whatever unanswered run was open. Ordering inside `onmessage` is
+   * what makes the tie safe: this runs before the frame is dispatched, so a
+   * send issued from that dispatch re-opens the run under the same clock
+   * reading rather than being swallowed by it.
+   */
+  private noteInbound(): void {
+    this.lastInboundAt = Date.now();
+    this.awaitingResponse = false;
+    // Any inbound frame is the liveness proof a wake-time probe is waiting
+    // for - a pong carries no more evidence than a data frame does.
+    this.clearProbe();
+  }
+
+  private startKeepalive(): void {
+    this.clearKeepalive();
+    this.pingTimer = setInterval(() => {
+      const now = Date.now();
+      const awaiting = this.isAwaitingResponse();
+      const silentSince = awaiting
+        ? Math.max(this.lastInboundAt, this.awaitingSince)
+        : this.lastInboundAt;
+      // Both deadlines FLOOR on their constant and are lengthened - never
+      // shortened - by what this socket has measured of its own path (ticket
+      // 24, A8): a jittery relayed link is what F11's false-positive
+      // `relay-missed-pongs` teardowns were made of.
+      //
+      // The AWAITING lane is additionally CAPPED, because one estimator sizes
+      // both windows and they are not the same kind of window. The idle lane
+      // can absorb whatever a slow path needs; the awaiting lane is a
+      // DETECTION window whose whole value is being fast, and a single
+      // stalled sample near the clamp would otherwise stretch its 12s out to
+      // over a minute - turning the fast detector back into the slow one it
+      // exists to pre-empt.
+      const floorMs = awaiting
+        ? RELAY_AWAITING_PONG_TIMEOUT_MS
+        : RELAY_PONG_TIMEOUT_MS;
+      const derivedMs = this.path.deadlineMs(floorMs);
+      const timeoutMs = awaiting
+        ? Math.min(derivedMs, RELAY_AWAITING_DEADLINE_CAP_MULTIPLE * floorMs)
+        : derivedMs;
+      if (now - silentSince >= timeoutMs) {
+        this.fail(4004, RELAY_MISSED_PONGS_CLOSE_REASON);
+        return;
+      }
+      const socket = this.socket;
+      if (socket === null || !this.opened) {
+        return;
+      }
+      const pingIntervalMs = awaiting
+        ? RELAY_AWAITING_PING_INTERVAL_MS
+        : RELAY_PING_INTERVAL_MS;
+      if (now - this.lastPingSentAt < pingIntervalMs) {
+        return;
+      }
+      this.lastPingSentAt = now;
+      try {
+        socket.send(SOCKET_KEEPALIVE_PING);
+        this.path.notePingSent(now);
+      } catch {
+        this.fail(4005, RELAY_PING_SEND_FAILED_CLOSE_REASON);
+      }
+    }, RELAY_PING_TICK_MS);
+  }
+
+  /**
+   * The wake probe's immediate round, outside the scheduled tick's cadence
+   * gating: fail the socket outright if it is already past the idle deadline
+   * (a runtime frozen for over a minute holds a socket that is dead or
+   * NAT-expired - no reason to spend the probe window confirming it), else
+   * force-send a ping now so the probe's own deadline has an answer to wait
+   * for. Stamps `lastPingSentAt` so the scheduled tick does not double-send.
+   */
+  private runKeepaliveTick(): void {
+    if (this.closed || !this.opened) {
+      return;
+    }
+    if (
+      Date.now() - this.lastInboundAt >=
+      this.path.deadlineMs(RELAY_PONG_TIMEOUT_MS)
+    ) {
+      this.fail(4004, RELAY_MISSED_PONGS_CLOSE_REASON);
+      return;
+    }
+    const socket = this.socket;
+    if (socket === null) {
+      return;
+    }
+    // Deliberately NOT timed into the estimator: this ping is sent at wake,
+    // so its round trip carries the runtime's own resume cost and would
+    // report the path as far worse than it is.
+    this.path.retireRun();
+    this.lastPingSentAt = Date.now();
+    try {
+      socket.send(SOCKET_KEEPALIVE_PING);
+    } catch {
+      this.fail(4005, RELAY_PING_SEND_FAILED_CLOSE_REASON);
+    }
+  }
+
+  private clearKeepalive(): void {
+    if (this.pingTimer !== null) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+  }
+
+  /**
+   * Retires the current wake-probe arm as ANSWERED: liveness is proven, so
+   * the arm's deadline, failure policy, and token all end here. The token
+   * bump is what makes a late deadline callback from this arm inert, and the
+   * policy reset is what keeps an answered arm's `immediateRedialOnFailure`
+   * from ever attaching to a later, unrelated loss.
+   */
+  private clearProbe(): void {
+    if (this.probeTimer !== null) {
+      clearTimeout(this.probeTimer);
+      this.probeTimer = null;
+    }
+    if (this.probeUnanswered) {
+      this.probeUnanswered = false;
+      this.probeImmediateRedialOnFailure = false;
+      this.probeArmToken += 1;
+    }
+  }
+
+  private teardownTimers(): void {
+    this.clearKeepalive();
+    // Only the probe TIMER dies with the socket. The unanswered-arm state and
+    // its failure policy deliberately survive close - retiring them here (via
+    // `clearProbe`) would erase the very evidence the session's close handler
+    // is about to read to decide whether this loss earns an immediate redial.
+    if (this.probeTimer !== null) {
+      clearTimeout(this.probeTimer);
+      this.probeTimer = null;
+    }
+    if (this.dialTimer !== null) {
+      clearTimeout(this.dialTimer);
+      this.dialTimer = null;
+    }
+  }
+
+  /** Local-side failure (timeout, error, missed pongs): close + notify drop. */
+  private fail(code: number, reason: string): void {
+    if (this.closed) {
+      return;
+    }
+    this.close(code, reason);
+    this.handlers.onClose({ code, reason });
+  }
+
+  private onSocketClosed(code: number, reason: string): void {
+    if (this.closed) {
+      return;
+    }
+    this.closed = true;
+    this.teardownTimers();
+    this.socket = null;
+    this.handlers.onClose({ code, reason });
+  }
+}
+
+/**
+ * Appends the attach grant as a `?grant=` query param (fallback presentation),
+ * `park=1` so the relay parks this leg's loss, `resume=<sid>:<key>` for a
+ * claim, and `prev=<code>:<reason>` for the last leg that carried a session.
+ */
+function withAttachQuery(
+  attachBaseUrl: string,
+  grantJws: string,
+  previousLeg: RelayLegEnd | null,
+  resumeClaim: RelayResumeClaim | null,
+): string {
+  const separator = attachBaseUrl.includes("?") ? "&" : "?";
+  const attach = `${attachBaseUrl}${separator}grant=${encodeURIComponent(grantJws)}&park=1`;
+  const url =
+    resumeClaim === null
+      ? attach
+      : `${attach}&resume=${encodeURIComponent(`${resumeClaim.sid}:${resumeClaim.key}`)}`;
+  if (previousLeg === null) {
+    return url;
+  }
+  return `${url}&prev=${encodeURIComponent(relayPrevQueryValue(previousLeg.code, previousLeg.reason))}`;
+}
+
+// -----------------------------------------------------------------------------
+// Inbound relay→peer control parsing (mirror relay-do RelayControlMessage)
+// -----------------------------------------------------------------------------
+
+type RelayControlInbound =
+  | { type: "attach_ack"; sid: number; resumeKey: string | null }
+  | { type: "host_detached" }
+  | { type: "host_attached" }
+  | { type: "reauth_ack" }
+  | { type: "peer_gone"; reason: RelayKillReason }
+  | { type: "killed"; reason: RelayKillReason }
+  | { type: "error"; code: string; message: string };
+
+function parseRelayControl(raw: string): RelayControlInbound | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!isControlRecord(parsed)) {
+    return null;
+  }
+  const record = parsed;
+  const type = record.type;
+  if (type === "attach_ack" && record.role === "client") {
+    return typeof record.sid === "number"
+      ? {
+          type: "attach_ack",
+          sid: record.sid,
+          resumeKey:
+            typeof record.resumeKey === "string" ? record.resumeKey : null,
+        }
+      : null;
+  }
+  if (type === "host_detached") {
+    return { type: "host_detached" };
+  }
+  if (type === "host_attached") {
+    return { type: "host_attached" };
+  }
+  if (type === "reauth_ack") {
+    return { type: "reauth_ack" };
+  }
+  if (
+    (type === "peer_gone" || type === "killed") &&
+    typeof record.reason === "string"
+  ) {
+    const reason: RelayKillReason = record.reason;
+    return type === "peer_gone"
+      ? { type: "peer_gone", reason }
+      : { type: "killed", reason };
+  }
+  if (
+    type === "error" &&
+    typeof record.code === "string" &&
+    typeof record.message === "string"
+  ) {
+    return { type: "error", code: record.code, message: record.message };
+  }
+  return null;
+}
+
+function isControlRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

@@ -1,0 +1,566 @@
+import { describe, expect, it } from "vitest";
+import {
+  upgradeResponseToVersion,
+  validateVersionedRpcRegistry,
+} from "@traycer/protocol/framework/index";
+import {
+  hostRpcRegistry,
+  hostStreamRpcRegistry,
+} from "@traycer/protocol/host/index";
+import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
+import {
+  autoJudgeGetV10,
+  autoJudgeListRecentV10,
+  autoJudgeSelectionSchema,
+  autoJudgeSelectionSchemaPreEffort,
+  autoJudgeSetV10,
+  autoPolicyGetResponseV11Schema,
+  autoPolicyGetUpgradeV10ToV11,
+  autoPolicyGetV10,
+  autoPolicyGetV11,
+  autoPolicySetV10,
+  autoPolicyTeamSchema,
+  autoPolicyTeamStateSchema,
+  providersSetAutoJudgeV10,
+} from "@traycer/protocol/host/auto-mode/contracts";
+import {
+  ALL_PERMISSION_MODES,
+  ALL_PERMISSION_MODES_PRE_AUTO,
+  permissionModeSchema,
+  permissionModeSchemaPreAuto,
+} from "@traycer/protocol/persistence/epic/foundation";
+import { providerCliStateSchema } from "@traycer/protocol/host/provider-schemas";
+
+/**
+ * The auto-mode protocol change, asserted where a compile cannot see it.
+ *
+ * Construction (`define*`) is structural-only and does not walk schemas.
+ * The full structural + schema-compatibility pass - contiguous minors, an
+ * installed `latestMinor`, upgrade paths between consecutive minors, downgrades
+ * anchored at each major's latest, per-lane additivity, and the
+ * `responseGrowthProjectionGated` / `semanticMajorBreakFromPreviousMajor`
+ * annotations being both valid AND load-bearing - runs below on the line this
+ * file guards. A compile cannot see a runtime throw; CI holds every static
+ * registry to the same pass via `protocol/scripts/compat/static-registries.ts`.
+ *
+ * `agent.gui.listHarnesses@9.1` is the annotation this guards today. It grows
+ * `supportedPermissionModes` by one member over 9.0, which the response lane
+ * refuses by default; the entry claims the growth is emission-gated, and the
+ * validator rejects that claim if the growth ever disappears.
+ */
+/**
+ * The minimum a live `ProviderCliState` needs; every other field carries a
+ * `.catch(...)` and fills itself. Deliberately does NOT name `autoJudge` - two
+ * of the assertions below are about what happens when it is absent.
+ */
+function providerStateFixture(): Record<string, unknown> {
+  return {
+    providerId: "claude-code",
+    enabled: true,
+    disabledBy: null,
+    selected: { kind: "bundled" },
+    candidates: [],
+    authPending: false,
+    checkedAt: null,
+    apiKey: { supported: false, configured: false, source: null },
+    auth: { status: "unknown", badgeText: null, label: null, detail: null },
+  };
+}
+
+describe("auto-mode protocol change", () => {
+  it("constructs both host registries (the annotation parses)", () => {
+    expect(() =>
+      validateVersionedRpcRegistry({
+        "agent.gui.listHarnesses": hostRpcRegistry["agent.gui.listHarnesses"],
+      }),
+    ).not.toThrow();
+    expect(Object.keys(hostRpcRegistry).length).toBeGreaterThan(0);
+    expect(Object.keys(hostStreamRpcRegistry).length).toBeGreaterThan(0);
+  });
+
+  it("declares `auto` between auto_accept_edits and full_access", () => {
+    // Order is load-bearing, not cosmetic: `ALL_PERMISSION_MODES` is documented
+    // most-restrictive to most-permissive and the renderer's clamp walks it in
+    // that order. `auto` sits above `auto_accept_edits` because it does
+    // everything that mode does and additionally lets a judge approve commands.
+    expect(ALL_PERMISSION_MODES).toEqual([
+      "supervised",
+      "auto_accept_edits",
+      "auto",
+      "full_access",
+    ]);
+    expect(permissionModeSchema.safeParse("auto").success).toBe(true);
+  });
+
+  it("keeps the frozen mode enum and its default free of `auto`", () => {
+    expect(ALL_PERMISSION_MODES_PRE_AUTO).toEqual([
+      "supervised",
+      "auto_accept_edits",
+      "full_access",
+    ]);
+    expect(permissionModeSchemaPreAuto.safeParse("auto").success).toBe(false);
+    // The default matters as much as the enum: zod fills a `.default(...)`
+    // without re-validating it, so a frozen slot defaulting to the LIVE list
+    // would hand a released peer the very value its enum rejects.
+    expect(ALL_PERMISSION_MODES_PRE_AUTO).not.toContain("auto");
+  });
+
+  it("registers all six settings methods off the released floor", () => {
+    // The floor is fail-closed on the method-name UNION: a name present on only
+    // one peer makes the WHOLE connection incompatible, which is how
+    // `worktree.readScriptsAtRef` broke 1.0.1-rc.1. New methods must therefore
+    // stay out of it and state their missing-peer behaviour instead.
+    //
+    // `autoJudge.get` / `autoJudge.set` head at `1.3` now (`1.2`'s
+    // `lastSelection` response key, then `1.3`'s `reasoningEffort` on the
+    // selection); the other four are still `1.0`.
+    const methods = [
+      { method: "providers.setAutoJudge", latestMinor: 0 },
+      { method: "autoJudge.get", latestMinor: 3 },
+      { method: "autoJudge.set", latestMinor: 3 },
+      // `1.1` adds `team`.
+      { method: "autoPolicy.get", latestMinor: 1 },
+      { method: "autoPolicy.set", latestMinor: 0 },
+      { method: "autoJudge.listRecent", latestMinor: 0 },
+    ] as const;
+
+    for (const { method, latestMinor } of methods) {
+      expect(RELEASED_FLOOR_METHOD_NAMES).not.toContain(method);
+      const entry = hostRpcRegistry[method];
+      expect(entry).toBeDefined();
+      expect(entry.degrade).toEqual({ kind: "unsupported" });
+      expect(entry[1].latestMinor).toBe(latestMinor);
+    }
+
+    expect(
+      hostRpcRegistry["providers.setAutoJudge"][1].versions[0].contract,
+    ).toBe(providersSetAutoJudgeV10);
+    expect(hostRpcRegistry["autoJudge.get"][1].versions[0].contract).toBe(
+      autoJudgeGetV10,
+    );
+    expect(hostRpcRegistry["autoJudge.set"][1].versions[0].contract).toBe(
+      autoJudgeSetV10,
+    );
+    expect(hostRpcRegistry["autoPolicy.get"][1].versions[0].contract).toBe(
+      autoPolicyGetV10,
+    );
+    expect(hostRpcRegistry["autoPolicy.set"][1].versions[0].contract).toBe(
+      autoPolicySetV10,
+    );
+    expect(
+      hostRpcRegistry["autoJudge.listRecent"][1].versions[0].contract,
+    ).toBe(autoJudgeListRecentV10);
+  });
+
+  it("keeps the judge selection's harness id an open string", () => {
+    // A closed enum here would make a selection written on a newer harness
+    // roster fail an older client's decode - and it is the whole selection that
+    // fails, not the id. The host is the only side that resolves it to a real
+    // adapter.
+    expect(
+      autoJudgeSelectionSchema.safeParse({
+        harnessId: "a-harness-this-build-has-never-heard-of",
+        model: "some-model",
+        profileId: null,
+        reasoningEffort: null,
+      }).success,
+    ).toBe(true);
+    // Open, not absent: an empty id is still a bug.
+    expect(
+      autoJudgeSelectionSchema.safeParse({
+        harnessId: "",
+        model: "m",
+        profileId: null,
+        reasoningEffort: null,
+      }).success,
+    ).toBe(false);
+    // The frozen `<=1.2` selection has the same openness, minus the effort.
+    expect(
+      autoJudgeSelectionSchemaPreEffort.safeParse({
+        harnessId: "a-harness-this-build-has-never-heard-of",
+        model: "some-model",
+        profileId: null,
+      }).success,
+    ).toBe(true);
+  });
+
+  it("widens autoJudge get/set responses in place while preserving legacy output", () => {
+    const selection = {
+      harnessId: "claude",
+      model: "claude-sonnet",
+      profileId: null,
+    };
+    const legacy = autoJudgeGetV10.responseSchema.parse({ selection });
+    expect(legacy.selection).toEqual(selection);
+    expect(Object.hasOwn(legacy, "effective")).toBe(false);
+    expect(Object.hasOwn(legacy, "blocked")).toBe(false);
+
+    const widened = autoJudgeGetV10.responseSchema.parse({
+      selection,
+      effective: {
+        harnessId: "claude",
+        model: "claude-sonnet",
+        source: "selection",
+      },
+      blocked: null,
+    });
+    expect(widened.effective).toEqual({
+      harnessId: "claude",
+      model: "claude-sonnet",
+      source: "selection",
+    });
+    expect(widened.blocked).toBeNull();
+
+    const blocked = autoJudgeSetV10.responseSchema.parse({
+      selection: null,
+      effective: null,
+      blocked: { reason: "provider-disabled" },
+    });
+    expect(blocked.selection).toBeNull();
+    expect(blocked.effective).toBeNull();
+    expect(blocked.blocked).toEqual({ reason: "provider-disabled" });
+
+    // Both new objects are open only over their documented enum members.
+    expect(
+      autoJudgeGetV10.responseSchema.safeParse({
+        selection: null,
+        effective: { harnessId: "traycer", model: "m", source: "guess" },
+      }).success,
+    ).toBe(false);
+    expect(
+      autoJudgeGetV10.responseSchema.safeParse({
+        selection: null,
+        blocked: { reason: "availability-probe" },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("keeps the 1.0, 1.1 and 1.2 autoJudge lines installed and frozen, with 1.3 as the head", () => {
+    // `1.0` shipped (`host-v1.3.2-staging.39`) and `1.1` shipped (every host
+    // tag from `host-v1.3.2-staging.52` on), so both stay installed and
+    // immutable; `1.2` (`lastSelection`) is spoken by a released desktop, so
+    // it is fixed too; `1.3` is the head that carries `reasoningEffort`.
+    for (const method of ["autoJudge.get", "autoJudge.set"] as const) {
+      const entry = hostRpcRegistry[method];
+      expect(entry[1].latestMinor).toBe(3);
+      expect(entry[1].versions[0].contract.schemaVersion).toEqual({
+        major: 1,
+        minor: 0,
+      });
+      expect(entry[1].versions[1].contract.schemaVersion).toEqual({
+        major: 1,
+        minor: 1,
+      });
+      expect(entry[1].versions[2].contract.schemaVersion).toEqual({
+        major: 1,
+        minor: 2,
+      });
+      expect(entry[1].versions[3].contract.schemaVersion).toEqual({
+        major: 1,
+        minor: 3,
+      });
+      expect(RELEASED_FLOOR_METHOD_NAMES).not.toContain(method);
+    }
+  });
+
+  it("publishes the stored judge on the head providers.list line only", () => {
+    // `providers.setAutoJudge` writes; without this read half the Providers >
+    // General switch could not show its own value after a reload.
+    const majorNine = hostRpcRegistry["providers.list"][9];
+    const head = majorNine.versions[majorNine.latestMinor].contract;
+    const frozen = majorNine.versions[0].contract;
+
+    const withJudge = {
+      ...providerStateFixture(),
+      autoJudge: "provider" as const,
+    };
+    const headParsed = head.responseSchema.parse({
+      providers: [withJudge],
+      native: null,
+    });
+    expect(headParsed.providers[0].autoJudge).toBe("provider");
+
+    // 9.0 needs no bridge: a new KEY is STRIPPED by the within-major re-parse,
+    // unlike a new enum member, which would fail the whole response. That is
+    // the entire reason this rides a minor with no emission gating.
+    const frozenParsed = frozen.responseSchema.parse({
+      providers: [withJudge],
+      native: null,
+    });
+    expect(Object.hasOwn(frozenParsed.providers[0], "autoJudge")).toBe(false);
+  });
+
+  it("leaves `autoJudge` absent rather than defaulted", () => {
+    // `.optional()`, not `.default("traycer")`: absent must stay absent so the
+    // field is not required on OUTPUT, which is what keeps it out of every
+    // `ProviderCliState` construction site in the renderer. Readers spell the
+    // fallback themselves.
+    const parsed = providerCliStateSchema.parse(providerStateFixture());
+    expect(Object.hasOwn(parsed, "autoJudge")).toBe(false);
+    expect(parsed.autoJudge ?? "traycer").toBe("traycer");
+  });
+
+  it("rejects an unknown judge kind", () => {
+    expect(
+      providersSetAutoJudgeV10.requestSchema.safeParse({
+        harnessId: "claude",
+        autoJudge: "somebody-else",
+      }).success,
+    ).toBe(false);
+    expect(
+      providersSetAutoJudgeV10.requestSchema.safeParse({
+        harnessId: "claude",
+        autoJudge: "traycer",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("distinguishes an unreadable read from a stale one, and both from an absent readState", () => {
+    // Three responses that could easily collapse to the same decoded shape if
+    // `readState` were defaulted instead of left optional - the panel treats
+    // all three as different situations, so the schema must keep them apart.
+    const neverWrittenOrOlderHost = autoPolicyGetV10.responseSchema.parse({
+      body: null,
+      updatedAt: null,
+      source: "account",
+    });
+    const unreadable = autoPolicyGetV10.responseSchema.parse({
+      body: null,
+      updatedAt: null,
+      source: "account",
+      readState: "unreadable",
+    });
+    const stale = autoPolicyGetV10.responseSchema.parse({
+      body: "a cached policy body",
+      updatedAt: null,
+      source: "account",
+      readState: "stale",
+    });
+
+    expect(unreadable.readState).toBe("unreadable");
+    expect(stale.readState).toBe("stale");
+    expect(stale.body).toBe("a cached policy body");
+    // `neverWrittenOrOlderHost` and `unreadable` share body/updatedAt exactly -
+    // the only wire signal that tells them apart is whether `readState` is
+    // present at all.
+    expect(neverWrittenOrOlderHost.body).toBe(unreadable.body);
+    expect(neverWrittenOrOlderHost.updatedAt).toBe(unreadable.updatedAt);
+  });
+
+  it("decodes a response without `readState` with the property absent, not defaulted", () => {
+    // `.optional()`, not `.default("fresh")`: the fallback belongs to the
+    // READER (`autoPolicyReadStateFor`), because a schema-level default would
+    // make an older host's response indistinguishable, on the wire, from one
+    // that positively answered "fresh".
+    const parsed = autoPolicyGetV10.responseSchema.parse({
+      body: "hello",
+      updatedAt: "2026-09-10T00:00:00.000Z",
+      source: "account",
+    });
+    expect(Object.hasOwn(parsed, "readState")).toBe(false);
+    expect(parsed.readState).toBeUndefined();
+  });
+
+  it("rejects an unknown read state", () => {
+    expect(
+      autoPolicyGetV10.responseSchema.safeParse({
+        body: null,
+        updatedAt: null,
+        source: "account",
+        readState: "corrupted",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("round-trips `shippedDefaults` verbatim and leaves it absent when not sent", () => {
+    const document = "## Allow exceptions\n\n- Read files in the workspace.\n";
+    const withShipped = autoPolicyGetV10.responseSchema.parse({
+      body: null,
+      updatedAt: null,
+      source: "account",
+      shippedDefaults: document,
+    });
+    expect(withShipped.shippedDefaults).toBe(document);
+
+    const withoutShipped = autoPolicyGetV10.responseSchema.parse({
+      body: null,
+      updatedAt: null,
+      source: "account",
+    });
+    expect(Object.hasOwn(withoutShipped, "shippedDefaults")).toBe(false);
+  });
+});
+
+describe("autoPolicy.get 1.1: the team policy state", () => {
+  const ACCOUNT = { body: null, updatedAt: null, source: "account" };
+
+  it("registers latestMinor 1 with 1.0 and 1.1 bound to their own contracts and the upgrade between them", () => {
+    const line = hostRpcRegistry["autoPolicy.get"][1];
+
+    expect(line.latestMinor).toBe(1);
+    expect(line.versions[0].contract).toBe(autoPolicyGetV10);
+    expect(line.versions[1].contract).toBe(autoPolicyGetV11);
+    expect(line.versions[1].upgradeFromPreviousVersion).toBe(
+      autoPolicyGetUpgradeV10ToV11,
+    );
+    expect(autoPolicyGetV11.schemaVersion).toEqual({ major: 1, minor: 1 });
+    expect(autoPolicyGetV10.schemaVersion).toEqual({ major: 1, minor: 0 });
+  });
+
+  it("keeps the unsupported degrade and stays off the released floor", () => {
+    expect(hostRpcRegistry["autoPolicy.get"].degrade).toEqual({
+      kind: "unsupported",
+    });
+    expect(RELEASED_FLOOR_METHOD_NAMES).not.toContain("autoPolicy.get");
+  });
+
+  it("keeps the request as it was: 1.1 asks nothing more", () => {
+    expect(autoPolicyGetV11.requestSchema).toBe(autoPolicyGetV10.requestSchema);
+  });
+
+  it("parses with team null, as a personal host answers", () => {
+    const parsed = autoPolicyGetResponseV11Schema.safeParse({
+      ...ACCOUNT,
+      team: null,
+    });
+
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.team).toBeNull();
+  });
+
+  it.each([
+    ["none", null],
+    ["applied", "42"],
+    ["lapsed", "42"],
+    ["applied", "0"],
+  ] as const)(
+    "parses team state %s with policyVersion %s",
+    (state, policyVersion) => {
+      const parsed = autoPolicyGetResponseV11Schema.safeParse({
+        ...ACCOUNT,
+        team: { state, policyVersion },
+      });
+
+      expect(parsed.success).toBe(true);
+      expect(parsed.success && parsed.data.team).toEqual({
+        state,
+        policyVersion,
+      });
+    },
+  );
+
+  it("closes the state list at none, applied and lapsed", () => {
+    for (const state of ["none", "applied", "lapsed"]) {
+      expect(autoPolicyTeamStateSchema.safeParse(state).success).toBe(true);
+    }
+    for (const other of ["expired", "held", "", "APPLIED", null, 1]) {
+      expect(autoPolicyTeamStateSchema.safeParse(other).success).toBe(false);
+    }
+  });
+
+  it.each([
+    ["an unknown state", { state: "stale", policyVersion: null }],
+    ["a numeric version", { state: "applied", policyVersion: 7 }],
+    ["a non-decimal version", { state: "applied", policyVersion: "v7" }],
+    ["a leading-zero version", { state: "applied", policyVersion: "07" }],
+    ["a negative version", { state: "applied", policyVersion: "-1" }],
+    ["a missing version", { state: "applied" }],
+    ["a missing state", { policyVersion: "7" }],
+  ])("refuses a team with %s", (_label, team) => {
+    expect(autoPolicyTeamSchema.safeParse(team).success).toBe(false);
+    expect(
+      autoPolicyGetResponseV11Schema.safeParse({ ...ACCOUNT, team }).success,
+    ).toBe(false);
+  });
+
+  it("requires the team key at 1.1 (null, never absent)", () => {
+    expect(autoPolicyGetResponseV11Schema.safeParse(ACCOUNT).success).toBe(
+      false,
+    );
+  });
+
+  it("carries the 1.0 fields unchanged beside team", () => {
+    const parsed = autoPolicyGetResponseV11Schema.parse({
+      body: "account text",
+      updatedAt: "2026-10-16T00:00:00.000Z",
+      source: "account",
+      readState: "stale",
+      shippedDefaults: "## shipped",
+      team: { state: "none", policyVersion: null },
+    });
+
+    expect(parsed).toMatchObject({
+      body: "account text",
+      source: "account",
+      readState: "stale",
+      shippedDefaults: "## shipped",
+    });
+  });
+
+  it("upgrades a 1.0 response to team: null, valid under the 1.1 schema, keeping every 1.0 field", () => {
+    const v10 = {
+      body: "account text",
+      updatedAt: "2026-10-16T00:00:00.000Z",
+      source: "account",
+      readState: "fresh",
+      shippedDefaults: "## shipped",
+    } as const;
+
+    const direct = autoPolicyGetUpgradeV10ToV11.upgradeResponse(v10);
+    expect(direct).toEqual({ ...v10, team: null });
+    expect(autoPolicyGetResponseV11Schema.safeParse(direct).success).toBe(true);
+
+    const viaRegistry = upgradeResponseToVersion(
+      hostRpcRegistry["autoPolicy.get"],
+      { major: 1, minor: 0 },
+      { major: 1, minor: 1 },
+      v10,
+    );
+    expect(viaRegistry).toEqual({ ...v10, team: null });
+    expect(autoPolicyGetResponseV11Schema.safeParse(viaRegistry).success).toBe(
+      true,
+    );
+  });
+
+  it("upgrades a 1.0 response that omits readState and shippedDefaults without inventing them", () => {
+    const direct = autoPolicyGetUpgradeV10ToV11.upgradeResponse({
+      body: null,
+      updatedAt: null,
+      source: "account",
+    });
+
+    expect(direct).toEqual({ ...ACCOUNT, team: null });
+    expect(Object.hasOwn(direct, "readState")).toBe(false);
+    expect(Object.hasOwn(direct, "shippedDefaults")).toBe(false);
+  });
+
+  it("passes the request through the upgrade untouched", () => {
+    expect(autoPolicyGetUpgradeV10ToV11.upgradeRequest({})).toEqual({});
+  });
+
+  it("a 1.1 response still parses under the 1.0 schema: an older peer drops team and keeps the rest", () => {
+    const parsed = autoPolicyGetV10.responseSchema.safeParse({
+      ...ACCOUNT,
+      readState: "fresh",
+      team: { state: "applied", policyVersion: "9" },
+    });
+
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data).toMatchObject({
+      source: "account",
+      readState: "fresh",
+    });
+    expect(parsed.success && Object.hasOwn(parsed.data, "team")).toBe(false);
+  });
+
+  it("never carries a policy body: a body sent beside the state is dropped by the team schema", () => {
+    const parsed = autoPolicyTeamSchema.parse({
+      state: "applied",
+      policyVersion: "9",
+      body: "TEAM RULES",
+    });
+
+    expect(parsed).toEqual({ state: "applied", policyVersion: "9" });
+    expect(JSON.stringify(parsed)).not.toContain("TEAM RULES");
+  });
+});

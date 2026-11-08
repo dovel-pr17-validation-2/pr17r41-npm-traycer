@@ -1,0 +1,289 @@
+import {
+  approvalBlockSchema,
+  artifactOperationBlockSchema,
+  autonomousResumeBlockSchema,
+  commandBlockSchema,
+  compactionBlockSchema,
+  errorBlockSchema,
+  fileChangeBlockSchema,
+  interviewBlockSchema,
+  planBlockSchema,
+  planSourceSchema,
+  providerNoticeMetadataSchema,
+  reasoningBlockSchema,
+  steerBlockSchema,
+  subAgentBlockSchema,
+  textBlockSchema,
+  todoBlockSchema,
+  toolCallBlockSchema,
+} from "@traycer/protocol/persistence/epic/content-blocks";
+import { chatEventSchema } from "@traycer/protocol/persistence/epic/chat-events";
+import { chatRunSettingsSchema } from "@traycer/protocol/persistence/epic/foundation";
+import {
+  userMessageSchema,
+  userMessageSenderTypeFor,
+} from "@traycer/protocol/persistence/epic/messages";
+import {
+  agentSenderSchema,
+  userSenderSchema,
+} from "@traycer/protocol/persistence/epic/senders";
+import { z } from "zod";
+import { lazySchema } from "@traycer/protocol/framework/lazy-schema";
+import { openHarnessIdSchema } from "@traycer/protocol/persistence/epic/open-harness-records";
+
+/**
+ * Open harness ids for the `chat-head` / `chat-shard` records.
+ *
+ * The epic tree spells harness ids as a closed enum (`guiHarnessIdSchema`,
+ * and the shared `harness-id` common record). That is right for a record whose
+ * reader is the host that wrote it. It is wrong here: this record's readers
+ * are shipped cloud renderers and clone targets, the harness roster grows most
+ * releases, and a closed enum turns "this chat runs on a harness you have not
+ * heard of" into a hard reject of the WHOLE snapshot - the message's `role` is
+ * known, so the passthrough carrier hands it to the known schema, which then
+ * fails on the enum. Adding a harness would silently make every affected
+ * chat unreadable to every shipped reader.
+ *
+ * So every closed harness-id leaf reachable from the presentation core is
+ * reopened to a plain string here. Readers must render an unrecognized id as a
+ * generic label rather than assuming a known provider.
+ *
+ * The leaves, as swept from the record's domain JSON Schema:
+ *
+ * | Leaf | Reopened via |
+ * |---|---|
+ * | `core.settings.harnessId` | `snapshotChatRunSettingsSchema` |
+ * | `messages[].sender` (user + assistant) | `snapshotAgentSenderSchema` |
+ * | `blocks[].text.providerNotice.harnessId` | `snapshotProviderNoticeMetadataSchema` |
+ * | `blocks[].plan.harnessId` / `.source.harnessId` | `snapshotPlanBlockSchema` |
+ * | `blocks[].steer.sender` | `snapshotSteerBlockSchema` |
+ * | `events[].actor` | `snapshotChatEventSchema` |
+ *
+ * Two NON-harness leaves are reopened here too, on identical reasoning:
+ * `blocks[].text.providerNotice.noticeKind` (see the note on
+ * `snapshotProviderNoticeMetadataSchema`) and `core.settings.permissionMode`
+ * (see `openPermissionModeSchema`). Both are out of the table above because the
+ * sweep test that backs the table is specifically a harness-id sweep.
+ *
+ * `messages[].sessionAnchor` is not in this table because it is no longer in
+ * the presentation core at all. Its harness id is a per-variant discriminator
+ * in a nested discriminated union, so reopening it is not even possible
+ * without forking every anchor variant - and a non-null anchor from a new
+ * harness would have hard-rejected the whole record, since `role: "user"` is
+ * known and the passthrough hands the message to the known schema. Session
+ * anchors are session-chain state, which the record's partition puts in the
+ * opaque `hostPrivate` section; the host keys them there however it likes. An
+ * anchor a writer leaves on the message anyway is simply an unmodeled key: it
+ * survives in the message's preserved `raw` and never reaches a schema that
+ * could reject it. `chat-sync-open-harness.test.ts` sweeps the record
+ * surface and fails if ANY closed harness-id leaf appears.
+ *
+ * Copies here are DERIVED from the base schema's live shape, never hand-copied
+ * field-for-field. The hand-copy convention next door exists for wire freezes,
+ * where a future field must not leak onto a released line; the opposite is
+ * wanted here - one leaf is widened and every other field keeps flowing from
+ * the single source of truth in the epic tree, at its live TYPE, not just its
+ * live name.
+ *
+ * Two bases carry `superRefine` checks, which closes Zod's own derivation
+ * helpers for a WIDENING replacement: `.extend()` and `.omit()` refuse outright
+ * on a refined schema, and `.safeExtend()` only accepts a narrowing
+ * replacement - enum-to-string is precisely what it rejects. Those two spread
+ * `base.shape` into a fresh `z.object(...)` and re-apply the check, which keeps
+ * the derivation while sidestepping the helpers.
+ */
+
+// A harness id as this record carries it: any non-empty string, shared with the
+// epic record readers (`persistence/epic/open-harness-records.ts`). Renderers
+// treat an id they do not recognize as a generic agent, never as a failure.
+export { openHarnessIdSchema };
+
+/**
+ * A provider-notice kind as this record carries it: any non-empty string.
+ * Renderers already read only `tone` / `title` / `message` / `details`, so an
+ * unrecognized kind is not a rendering decision - it is just a label they do
+ * not need. See `snapshotProviderNoticeMetadataSchema` for why it is open.
+ */
+export const openProviderNoticeKindSchema = lazySchema(() => z.string().min(1));
+
+/**
+ * A permission mode as this record carries it: any non-empty string.
+ *
+ * Reopened for the same reason as `noticeKind` beside it, and the reasoning
+ * transfers line for line. The mode roster grows (`auto` is the third addition
+ * to it), a published chat's `core.settings` is ALWAYS present so there is no
+ * unknown-variant passthrough to catch a bad value, and a closed enum therefore
+ * turns "this chat runs in a mode you have not heard of" into a hard reject of
+ * the whole head - which is to say, a chat published in `auto` would be
+ * unreadable to every shipped cloud reader and every clone target.
+ *
+ * No reader needs the enum. The cloud renderer shows the mode as a label and
+ * nothing switches on it; the value is authoritative only to the host that
+ * wrote it, which reads it back through `chatRunSettingsSchema`, not this one.
+ */
+export const openPermissionModeSchema = lazySchema(() => z.string().min(1));
+
+// ---- Senders ----------------------------------------------------------- //
+
+export const snapshotAgentSenderSchema = lazySchema(() =>
+  agentSenderSchema.extend({
+    harnessId: openHarnessIdSchema,
+  }),
+);
+export type SnapshotAgentSender = z.infer<typeof snapshotAgentSenderSchema>;
+
+export const snapshotUserMessageSenderSchema = lazySchema(() =>
+  z.discriminatedUnion("type", [userSenderSchema, snapshotAgentSenderSchema]),
+);
+export type SnapshotUserMessageSender = z.infer<
+  typeof snapshotUserMessageSenderSchema
+>;
+
+// ---- Run settings ------------------------------------------------------ //
+
+export const snapshotChatRunSettingsSchema = lazySchema(() =>
+  chatRunSettingsSchema.extend({
+    harnessId: openHarnessIdSchema,
+    permissionMode: openPermissionModeSchema,
+  }),
+);
+export type SnapshotChatRunSettings = z.infer<
+  typeof snapshotChatRunSettingsSchema
+>;
+
+// ---- Content blocks ---------------------------------------------------- //
+
+// Spread from the base's live shape rather than `.extend()`: Zod refuses
+// `.extend()` / `.omit()` on a schema carrying refinements, and
+// `.safeExtend()` only accepts a REPLACEMENT that narrows - widening an enum
+// to a string is exactly what it rejects. Spreading `.shape` keeps every other
+// field bound to the base's live schema (its type, not just its name), so an
+// upstream change lands here with no edit; only the check has to be re-applied
+// by hand.
+//
+// `noticeKind` is reopened for the SAME reason as the harness id beside it, and
+// the reasoning transfers exactly: the kind roster grows whenever a harness
+// gains a notice worth persisting, the block's `type` is `"text"` and therefore
+// KNOWN, so the passthrough hands it to this schema, and a closed enum then
+// fails on the value and takes the whole shard with it. A cloud renderer needs
+// the kind for nothing - it renders `tone` / `title` / `message` / `details` and
+// no shipped consumer switches on it - so the enum bought type precision the
+// record cannot afford. `metadata` stays closed by the logged decision in
+// `COMPATIBILITY.md` §5; the re-applied check below still binds the two, and a
+// kind an old reader does not know arrives with `metadata: null`.
+export const snapshotProviderNoticeMetadataSchema = lazySchema(() =>
+  z
+    .object({
+      ...providerNoticeMetadataSchema.shape,
+      harnessId: openHarnessIdSchema,
+      noticeKind: openProviderNoticeKindSchema,
+    })
+    .superRefine((notice, ctx) => {
+      if (
+        notice.metadata !== null &&
+        notice.noticeKind !== notice.metadata.type
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "noticeKind must match metadata.type",
+          path: ["metadata", "type"],
+        });
+      }
+    }),
+);
+
+const snapshotTextBlockSchema = lazySchema(() =>
+  textBlockSchema.extend({
+    providerNotice: snapshotProviderNoticeMetadataSchema
+      .nullable()
+      .default(null),
+  }),
+);
+
+const snapshotPlanSourceSchema = lazySchema(() =>
+  planSourceSchema.extend({
+    harnessId: openHarnessIdSchema,
+  }),
+);
+
+const snapshotPlanBlockSchema = lazySchema(() =>
+  planBlockSchema.extend({
+    harnessId: openHarnessIdSchema,
+    source: snapshotPlanSourceSchema,
+  }),
+);
+
+const snapshotSteerBlockSchema = lazySchema(() =>
+  steerBlockSchema.extend({
+    sender: snapshotUserMessageSenderSchema.nullable().default(null),
+  }),
+);
+
+/** An unknown artifact kind must not reject a whole shard. */
+export const snapshotArtifactOperationBlockSchema = lazySchema(() =>
+  artifactOperationBlockSchema.extend({ kind: z.string().min(1) }),
+);
+
+/**
+ * The epic content-block union with its harness-bearing members and artifact
+ * kind reopened. A new member must be added here; chat-sync-open-harness.test.ts
+ * enforces that by comparing member sets.
+ */
+export const snapshotContentBlockSchema = lazySchema(() =>
+  z.discriminatedUnion("type", [
+    snapshotTextBlockSchema,
+    reasoningBlockSchema,
+    toolCallBlockSchema,
+    fileChangeBlockSchema,
+    commandBlockSchema,
+    subAgentBlockSchema,
+    approvalBlockSchema,
+    todoBlockSchema,
+    snapshotPlanBlockSchema,
+    errorBlockSchema,
+    compactionBlockSchema,
+    autonomousResumeBlockSchema,
+    snapshotSteerBlockSchema,
+    interviewBlockSchema,
+    snapshotArtifactOperationBlockSchema,
+  ]),
+);
+export type SnapshotContentBlock = z.infer<typeof snapshotContentBlockSchema>;
+
+// ---- Messages + events ------------------------------------------------- //
+
+// Derived from the base's live shape for the same reason as the provider
+// notice above; the sender-matches-kind invariant is re-applied, a Slack
+// message's `user` sender included (`userMessageSenderTypeFor`).
+export const snapshotUserMessageSchema = lazySchema(() => {
+  // `sessionAnchor` is dropped from the base shape, not widened: it is
+  // session-chain state, which belongs in the opaque `hostPrivate` section
+  // (see the module note above). Keeping it here would have meant a non-null
+  // anchor from a newly added harness rejecting the whole record. Read inside
+  // the thunk: a module-scope `.shape` read builds the base at import.
+  const { sessionAnchor: _sessionAnchor, ...userMessageBaseShape } =
+    userMessageSchema.shape;
+  return z
+    .object({
+      ...userMessageBaseShape,
+      sender: snapshotUserMessageSenderSchema,
+    })
+    .superRefine((message, ctx) => {
+      if (
+        message.sender.type === userMessageSenderTypeFor(message.message.kind)
+      )
+        return;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["message", "kind"],
+        message: "User message sender.type must match message.kind.",
+      });
+    });
+});
+
+export const snapshotChatEventSchema = lazySchema(() =>
+  chatEventSchema.extend({
+    actor: snapshotUserMessageSenderSchema.nullable(),
+  }),
+);
+export type SnapshotChatEvent = z.infer<typeof snapshotChatEventSchema>;

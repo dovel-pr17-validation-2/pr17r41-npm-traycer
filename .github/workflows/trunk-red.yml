@@ -1,0 +1,96 @@
+name: Trunk red
+
+# A team PR into `main` runs no CI but the CodeQL scan (see the `if:` on the
+# jobs of the workflows below); the full suite runs once, on the merged
+# commit. That moves the first sight of a break from the pull request to
+# `main`, so a red merge run has to be noticed by something other than whoever
+# happens to look.
+#
+# NO RETRY: A FAILURE IS RED ON ATTEMPT 1. No test may need a retry; a test
+# passes on its first attempt (owner ruling, 3 Nov 2026). This workflow re-runs
+# nothing: a failed push run on `main` is reported as it stands, and the
+# failure is fixed forward.
+#
+# REPORTED MEANS THIS JOB FAILS, with the workflow, the commit, its author and
+# the run in its summary. It sends nothing anywhere. So this workflow's own
+# result is the signal: a green run of it had nothing to do, a red run of it
+# means `main` is red. Whatever tells people (a Slack automation, a
+# notification rule) has that one thing to watch.
+#
+# Every conclusion other than success, skipped and cancelled is answered, so
+# one nobody thought to list cannot leave `main` red in silence. A cancelled
+# run is ignored: a person cancelled it. A `startup_failure` (a broken
+# workflow file) is reported with its conclusion. Only attempt 1 is judged: a
+# later attempt is a person's re-run, so a re-run of a reported run is not
+# reported again.
+#
+# Only push runs count. A pull-request run is its author's to read, a schedule
+# run (CodeQL's weekly scan) has no commit to blame, and a manual run is
+# somebody's experiment.
+#
+# `workflows:` must list the `name:` of every workflow that runs on a push to
+# `main`; a workflow missing here can go red on `main` unseen. `DCO` is absent
+# on purpose: it has no push trigger, because it checks a pull request's own
+# commits. `scripts/__tests__/ci-pull-request-gate.test.mjs` fails when this
+# list and the workflows' push triggers disagree.
+#
+# No secret, no token scope, no checkout and no third-party action: the job
+# reads only the event.
+
+on:
+  workflow_run:
+    workflows:
+      - Tests
+      - pre-commit
+      - Protocol Compatibility
+      - Browser regressions
+      - Formal regressions
+      - Real supervisor (macOS launchd integration)
+      - CodeQL
+      - Secret scan
+      - Gradle wrapper
+      - Scorecard supply-chain security
+    types: [completed]
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  report:
+    name: Report
+    if: >-
+      github.event.workflow_run.event == 'push'
+      && github.event.workflow_run.run_attempt == 1
+      && github.event.workflow_run.conclusion != 'success'
+      && github.event.workflow_run.conclusion != 'skipped'
+      && github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Fail with the red run's report
+        env:
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          COMMIT_MESSAGE: ${{ github.event.workflow_run.head_commit.message }}
+          COMMIT_AUTHOR: ${{ github.event.workflow_run.head_commit.author.name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          short="${HEAD_SHA:0:12}"
+          # The first line of the commit message: the pull request's title on a
+          # squash merge.
+          title="${COMMIT_MESSAGE%%$'\n'*}"
+
+          # Nothing is sent anywhere: the line goes to this job's summary and
+          # the job FAILS, so a failed run of this workflow means the branch is
+          # red, and that is the one thing an alert has to watch. The title and
+          # the author are text somebody else wrote, so they go to the summary
+          # only, never into a workflow command.
+          printf '%s is red: %s failed (%s) on %s "%s" by %s: %s\n' \
+            "${BRANCH}" "${WORKFLOW_NAME}" "${CONCLUSION}" "${short}" "${title}" "${COMMIT_AUTHOR}" "${RUN_URL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::${BRANCH} is red: ${WORKFLOW_NAME} failed (${CONCLUSION}) on ${short}."
+          exit 1

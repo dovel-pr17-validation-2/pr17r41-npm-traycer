@@ -1,0 +1,980 @@
+import { describe, expect, it } from "vitest";
+import type { JsonContent } from "@traycer/protocol/common/registry";
+import {
+  messageSchema,
+  type Message,
+} from "@traycer/protocol/persistence/epic/messages";
+import {
+  buildRowSkeleton,
+  type TranscriptPreviewProjection,
+} from "@traycer/protocol/persistence/chat-transcript/build-skeleton";
+import {
+  assistantRowId,
+  assistantSliceRowId,
+  projectTranscriptRows,
+  type TranscriptRowDescriptor,
+  type TranscriptRowProjectionInput,
+} from "@traycer/protocol/persistence/chat-transcript/row-projection";
+import {
+  locateTranscriptRowOrdinal,
+  type TranscriptRowLocator,
+} from "@traycer/protocol/persistence/chat-transcript/locate-row";
+
+/**
+ * `locateTranscriptRowOrdinal` answers a cross-tile jump for the five target
+ * kinds a windowed client cannot resolve on its own: a `block` (walking the
+ * rendered segment tree), a `sent-message` (matching an `agentMessageSend`
+ * enrichment), a `receipt` (matching an `agentMessageReceipt` enrichment),
+ * an `approval` (matching a plan block's `approvalId`), and a `message`
+ * naming an ASSISTANT record, whose rows are turn-keyed and therefore never
+ * named by the durable id. The invariant these tests exist to pin is that
+ * the ordinal it returns is an index into the SAME enumeration
+ * `buildRowSkeleton` publishes - by construction, since both are built from
+ * `projectTranscriptRows` - so every assertion here is phrased against the
+ * skeleton, never against a hand-counted ordinal.
+ */
+
+const previewText: TranscriptPreviewProjection = (content: JsonContent) =>
+  content.text ?? "";
+
+function humanUserMessage(fields: {
+  messageId: string;
+  timestamp: number;
+  text: string;
+}): Message {
+  return messageSchema.parse({
+    role: "user",
+    messageId: fields.messageId,
+    sender: { type: "user", userId: "u-1" },
+    message: { kind: "user", content: { type: "text", text: fields.text } },
+    timestamp: fields.timestamp,
+    sessionAnchor: null,
+  });
+}
+
+/**
+ * An assistant turn built from raw block shapes, parsed through
+ * `messageSchema` so every defaulted field (`agentMessageSend`,
+ * `parentBlockId`, `imageResults`, ...) is filled the way a real persisted
+ * record would be - mirrors `build-skeleton.test.ts`'s own fixtures.
+ */
+function assistantMessageWithBlocks(fields: {
+  readonly messageId: string;
+  readonly timestamp: number;
+  readonly turnId: string | null;
+  readonly blocks: ReadonlyArray<Record<string, unknown>>;
+}): Message {
+  return messageSchema.parse({
+    role: "assistant",
+    messageId: fields.messageId,
+    sender: {
+      type: "agent",
+      harnessId: "claude",
+      agentId: "agent-1",
+      displayName: null,
+      reply: { expectsReply: false },
+      inReplyTo: null,
+    },
+    blocks: fields.blocks,
+    startedAt: null,
+    timestamp: fields.timestamp,
+    turnId: fields.turnId,
+    usage: null,
+    reasoningEffort: null,
+    serviceTier: null,
+    imageResolutions: [],
+  });
+}
+
+/** Resolves a locator or fails the test - every case below expects a hit. */
+function locateOrThrow(
+  rows: readonly TranscriptRowDescriptor[],
+  messages: readonly Message[],
+  locator: TranscriptRowLocator,
+): number {
+  const ordinal = locateTranscriptRowOrdinal({ rows, messages }, locator);
+  if (ordinal === null) throw new Error("expected an ordinal");
+  return ordinal;
+}
+
+describe("locateTranscriptRowOrdinal resolves into the same enumeration buildRowSkeleton publishes", () => {
+  it("rows and skeleton agree on length and row id at every ordinal, including one a locator resolves", () => {
+    const human = humanUserMessage({
+      messageId: "m-1",
+      timestamp: 1,
+      text: "hi",
+    });
+    const steered = humanUserMessage({
+      messageId: "m-steer",
+      timestamp: 5,
+      text: "also do y",
+    });
+    const turn = assistantMessageWithBlocks({
+      messageId: "m-turn",
+      timestamp: 10,
+      turnId: "turn-x",
+      blocks: [
+        {
+          type: "tool_call",
+          blockId: "tc-a",
+          status: "completed",
+          timestamp: 6,
+          toolName: "Read",
+          error: null,
+        },
+        {
+          type: "steer",
+          blockId: "b-steer",
+          status: "completed",
+          timestamp: 7,
+          queueItemId: "q-1",
+          messageId: "m-steer",
+          content: { type: "doc" },
+          mode: "safe_point",
+          sender: null,
+        },
+        {
+          type: "tool_call",
+          blockId: "tc-b",
+          status: "completed",
+          timestamp: 8,
+          toolName: "Write",
+          error: null,
+        },
+      ],
+    });
+    const input: TranscriptRowProjectionInput = {
+      messages: [human, steered, turn],
+      events: [],
+      activeTurnId: null,
+      chatId: "chat-1",
+    };
+    const rows = projectTranscriptRows(input);
+    const skeleton = buildRowSkeleton(input, previewText, null);
+
+    expect(rows.length).toBe(skeleton.length);
+    expect(rows.map((row) => row.rowId)).toEqual(
+      skeleton.map((entry) => entry.rowId),
+    );
+
+    for (const blockId of ["tc-a", "b-steer", "tc-b"]) {
+      const ordinal = locateOrThrow(rows, input.messages, {
+        kind: "block",
+        blockId,
+      });
+      expect(rows[ordinal]?.rowId).toBe(skeleton[ordinal]?.rowId);
+    }
+  });
+});
+
+describe("locateTranscriptRowOrdinal: block targets", () => {
+  it("resolves a block on a plain, unsplit assistant turn", () => {
+    const human = humanUserMessage({
+      messageId: "m-1",
+      timestamp: 1,
+      text: "go",
+    });
+    const assistant = assistantMessageWithBlocks({
+      messageId: "m-2",
+      timestamp: 2,
+      turnId: "turn-1",
+      blocks: [
+        {
+          type: "tool_call",
+          blockId: "tc-1",
+          status: "completed",
+          timestamp: 2,
+          toolName: "Bash",
+          error: null,
+        },
+      ],
+    });
+    const input: TranscriptRowProjectionInput = {
+      messages: [human, assistant],
+      events: [],
+      activeTurnId: null,
+      chatId: "chat-1",
+    };
+    const rows = projectTranscriptRows(input);
+    const skeleton = buildRowSkeleton(input, previewText, null);
+
+    const ordinal = locateOrThrow(rows, input.messages, {
+      kind: "block",
+      blockId: "tc-1",
+    });
+
+    expect(skeleton[ordinal]?.rowId).toBe(assistantRowId("turn-1"));
+  });
+
+  it("resolves a block in a LATER slice of a turn split by a steer, not the first slice", () => {
+    // A naive "first assistant row of the turn" answer would land on
+    // `tc-early`'s slice instead - the split is exactly what makes that wrong.
+    const steered = humanUserMessage({
+      messageId: "m-steer",
+      timestamp: 5,
+      text: "wait, also do y",
+    });
+    const turn = assistantMessageWithBlocks({
+      messageId: "m-turn",
+      timestamp: 10,
+      turnId: "turn-2",
+      blocks: [
+        {
+          type: "tool_call",
+          blockId: "tc-early",
+          status: "completed",
+          timestamp: 6,
+          toolName: "Read",
+          error: null,
+        },
+        {
+          type: "steer",
+          blockId: "b-steer",
+          status: "completed",
+          timestamp: 7,
+          queueItemId: "q-1",
+          messageId: "m-steer",
+          content: { type: "doc" },
+          mode: "safe_point",
+          sender: null,
+        },
+        {
+          type: "tool_call",
+          blockId: "tc-late",
+          status: "completed",
+          timestamp: 8,
+          toolName: "Write",
+          error: null,
+        },
+      ],
+    });
+    const input: TranscriptRowProjectionInput = {
+      messages: [steered, turn],
+      events: [],
+      activeTurnId: null,
+      chatId: "chat-1",
+    };
+    const rows = projectTranscriptRows(input);
+    const skeleton = buildRowSkeleton(input, previewText, null);
+
+    const lateOrdinal = locateOrThrow(rows, input.messages, {
+      kind: "block",
+      blockId: "tc-late",
+    });
+    const earlyOrdinal = locateOrThrow(rows, input.messages, {
+      kind: "block",
+      blockId: "tc-early",
+    });
+
+    expect(skeleton[lateOrdinal]?.rowId).toBe(
+      assistantSliceRowId("turn-2", 1, true),
+    );
+    expect(skeleton[earlyOrdinal]?.rowId).toBe(
+      assistantSliceRowId("turn-2", 0, true),
+    );
+    expect(lateOrdinal).not.toBe(earlyOrdinal);
+  });
+
+  it("resolves a nested tool_call block (parentBlockId -> a subagent card) to the row that renders its parent", () => {
+    // Blocks are persisted FLAT on the message - the nesting is a
+    // rendering-time grouping - so the nested block must resolve to the row
+    // that renders its parent's card without walking `parentBlockId` at all.
+    const turn = assistantMessageWithBlocks({
+      messageId: "m-turn-3",
+      timestamp: 20,
+      turnId: "turn-3",
+      blocks: [
+        {
+          type: "subagent",
+          blockId: "sa-1",
+          status: "completed",
+          timestamp: 20,
+          name: "Explorer",
+          task: "look around",
+          progressUpdates: [],
+          result: "done",
+        },
+        {
+          type: "tool_call",
+          blockId: "tc-nested",
+          status: "completed",
+          timestamp: 21,
+          toolName: "Read",
+          error: null,
+          parentBlockId: "sa-1",
+        },
+      ],
+    });
+    const input: TranscriptRowProjectionInput = {
+      messages: [turn],
+      events: [],
+      activeTurnId: null,
+      chatId: "chat-1",
+    };
+    const rows = projectTranscriptRows(input);
+    const skeleton = buildRowSkeleton(input, previewText, null);
+
+    const parentOrdinal = locateOrThrow(rows, input.messages, {
+      kind: "block",
+      blockId: "sa-1",
+    });
+    const nestedOrdinal = locateOrThrow(rows, input.messages, {
+      kind: "block",
+      blockId: "tc-nested",
+    });
+
+    expect(nestedOrdinal).toBe(parentOrdinal);
+    expect(skeleton[nestedOrdinal]?.rowId).toBe(assistantRowId("turn-3"));
+  });
+
+  it("returns null for a block id that does not exist", () => {
+    const turn = assistantMessageWithBlocks({
+      messageId: "m-turn-6",
+      timestamp: 50,
+      turnId: "turn-6",
+      blocks: [
+        {
+          type: "tool_call",
+          blockId: "tc-1",
+          status: "completed",
+          timestamp: 50,
+          toolName: "Bash",
+          error: null,
+        },
+      ],
+    });
+    const input: TranscriptRowProjectionInput = {
+      messages: [turn],
+      events: [],
+      activeTurnId: null,
+      chatId: "chat-1",
+    };
+    const rows = projectTranscriptRows(input);
+
+    expect(
+      locateTranscriptRowOrdinal(
+        { rows, messages: input.messages },
+        { kind: "block", blockId: "does-not-exist" },
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("locateTranscriptRowOrdinal: sent-message targets", () => {
+  it("resolves to the tool_call block whose agentMessageSend matches receiver and verbatim text", () => {
+    const turn = assistantMessageWithBlocks({
+      messageId: "m-turn-4",
+      timestamp: 30,
+      turnId: "turn-4",
+      blocks: [
+        {
+          type: "tool_call",
+          blockId: "tc-send",
+          status: "completed",
+          timestamp: 30,
+          toolName: "SendMessage",
+          error: null,
+          startedAt: 30,
+          agentMessageSend: {
+            receiverAgentId: "agent-recv",
+            message: "please review PR 42",
+            responseId: null,
+            expectReply: false,
+          },
+        },
+      ],
+    });
+    const input: TranscriptRowProjectionInput = {
+      messages: [turn],
+      events: [],
+      activeTurnId: null,
+      chatId: "chat-1",
+    };
+    const rows = projectTranscriptRows(input);
+    const skeleton = buildRowSkeleton(input, previewText, null);
+
+    const ordinal = locateOrThrow(rows, input.messages, {
+      kind: "sent-message",
+      receiverAgentId: "agent-recv",
+      messageText: "please review PR 42",
+      timestamp: 30,
+    });
+
+    expect(skeleton[ordinal]?.rowId).toBe(assistantRowId("turn-4"));
+  });
+
+  it("breaks a tie between two matching sends by the one nearest the target timestamp", () => {
+    // Two DIFFERENT turns so the winning block is observable at the row
+    // level: if both candidates folded into one row this could not
+    // distinguish "picked the nearest" from "picked either".
+    const far = assistantMessageWithBlocks({
+      messageId: "m-far",
+      timestamp: 40,
+      turnId: "turn-far",
+      blocks: [
+        {
+          type: "tool_call",
+          blockId: "tc-far",
+          status: "completed",
+          timestamp: 40,
+          toolName: "SendMessage",
+          error: null,
+          startedAt: 100,
+          agentMessageSend: {
+            receiverAgentId: "agent-recv",
+            message: "ping",
+            responseId: null,
+            expectReply: false,
+          },
+        },
+      ],
+    });
+    const near = assistantMessageWithBlocks({
+      messageId: "m-near",
+      timestamp: 41,
+      turnId: "turn-near",
+      blocks: [
+        {
+          type: "tool_call",
+          blockId: "tc-near",
+          status: "completed",
+          timestamp: 41,
+          toolName: "SendMessage",
+          error: null,
+          startedAt: 205,
+          agentMessageSend: {
+            receiverAgentId: "agent-recv",
+            message: "ping",
+            responseId: null,
+            expectReply: false,
+          },
+        },
+      ],
+    });
+    // `far` listed FIRST: proves the winner is picked by distance, not by
+    // "first match wins" - `far` is first and still loses.
+    const input: TranscriptRowProjectionInput = {
+      messages: [far, near],
+      events: [],
+      activeTurnId: null,
+      chatId: "chat-1",
+    };
+    const rows = projectTranscriptRows(input);
+    const skeleton = buildRowSkeleton(input, previewText, null);
+
+    // |205 - 200| = 5 beats |100 - 200| = 100.
+    const ordinal = locateOrThrow(rows, input.messages, {
+      kind: "sent-message",
+      receiverAgentId: "agent-recv",
+      messageText: "ping",
+      timestamp: 200,
+    });
+
+    expect(skeleton[ordinal]?.rowId).toBe(assistantRowId("turn-near"));
+    expect(skeleton[ordinal]?.rowId).not.toBe(assistantRowId("turn-far"));
+  });
+
+  it("returns null for a sent-message target whose text matches nothing", () => {
+    const turn = assistantMessageWithBlocks({
+      messageId: "m-turn-7",
+      timestamp: 60,
+      turnId: "turn-7",
+      blocks: [
+        {
+          type: "tool_call",
+          blockId: "tc-send-7",
+          status: "completed",
+          timestamp: 60,
+          toolName: "SendMessage",
+          error: null,
+          agentMessageSend: {
+            receiverAgentId: "agent-recv",
+            message: "hello",
+            responseId: null,
+            expectReply: false,
+          },
+        },
+      ],
+    });
+    const input: TranscriptRowProjectionInput = {
+      messages: [turn],
+      events: [],
+      activeTurnId: null,
+      chatId: "chat-1",
+    };
+    const rows = projectTranscriptRows(input);
+
+    expect(
+      locateTranscriptRowOrdinal(
+        { rows, messages: input.messages },
+        {
+          kind: "sent-message",
+          receiverAgentId: "agent-recv",
+          messageText: "nothing matches this",
+          timestamp: 60,
+        },
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("locateTranscriptRowOrdinal: receipt targets", () => {
+  function sendBlock(fields: {
+    readonly blockId: string;
+    readonly timestamp: number;
+    readonly receiptMessageId: string | null;
+    readonly parentBlockId: string | null;
+  }): Record<string, unknown> {
+    return {
+      type: "tool_call",
+      blockId: fields.blockId,
+      status: "completed",
+      timestamp: fields.timestamp,
+      toolName: "SendMessage",
+      error: null,
+      parentBlockId: fields.parentBlockId,
+      agentMessageSend: {
+        receiverAgentId: "agent-recv",
+        message: "ping",
+        responseId: null,
+        expectReply: false,
+      },
+      agentMessageReceipt:
+        fields.receiptMessageId === null
+          ? null
+          : {
+              receiverAgentId: "agent-recv",
+              messageId: fields.receiptMessageId,
+            },
+    };
+  }
+
+  it("resolves to the tool_call block whose agentMessageReceipt names the delivered message", () => {
+    // Two sends of the SAME text to the SAME receiver in different turns:
+    // the text heuristic could not tell them apart without a clock, the
+    // receipt can. The target is the SECOND turn, so a "first send wins"
+    // implementation is observable.
+    const first = assistantMessageWithBlocks({
+      messageId: "m-first",
+      timestamp: 10,
+      turnId: "turn-first",
+      blocks: [
+        sendBlock({
+          blockId: "tc-first",
+          timestamp: 10,
+          receiptMessageId: "recv-msg-1",
+          parentBlockId: null,
+        }),
+      ],
+    });
+    const second = assistantMessageWithBlocks({
+      messageId: "m-second",
+      timestamp: 20,
+      turnId: "turn-second",
+      blocks: [
+        sendBlock({
+          blockId: "tc-second",
+          timestamp: 20,
+          receiptMessageId: "recv-msg-2",
+          parentBlockId: null,
+        }),
+      ],
+    });
+    const input: TranscriptRowProjectionInput = {
+      messages: [first, second],
+      events: [],
+      activeTurnId: null,
+      chatId: "chat-1",
+    };
+    const rows = projectTranscriptRows(input);
+    const skeleton = buildRowSkeleton(input, previewText, null);
+
+    const ordinal = locateOrThrow(rows, input.messages, {
+      kind: "receipt",
+      messageId: "recv-msg-2",
+    });
+
+    expect(skeleton[ordinal]?.rowId).toBe(assistantRowId("turn-second"));
+  });
+
+  it("finds a subagent-routed send, which is nested only when drawn", () => {
+    const turn = assistantMessageWithBlocks({
+      messageId: "m-sub",
+      timestamp: 30,
+      turnId: "turn-sub",
+      blocks: [
+        {
+          type: "tool_call",
+          blockId: "tc-task",
+          status: "completed",
+          timestamp: 30,
+          toolName: "Task",
+          error: null,
+        },
+        sendBlock({
+          blockId: "tc-nested-send",
+          timestamp: 31,
+          receiptMessageId: "recv-msg-nested",
+          parentBlockId: "tc-task",
+        }),
+      ],
+    });
+    const input: TranscriptRowProjectionInput = {
+      messages: [turn],
+      events: [],
+      activeTurnId: null,
+      chatId: "chat-1",
+    };
+    const rows = projectTranscriptRows(input);
+    const skeleton = buildRowSkeleton(input, previewText, null);
+
+    const ordinal = locateOrThrow(rows, input.messages, {
+      kind: "receipt",
+      messageId: "recv-msg-nested",
+    });
+
+    expect(skeleton[ordinal]?.rowId).toBe(assistantRowId("turn-sub"));
+  });
+
+  it("returns null when no block carries the receipt (a send persisted before receipts existed)", () => {
+    const turn = assistantMessageWithBlocks({
+      messageId: "m-old",
+      timestamp: 40,
+      turnId: "turn-old",
+      blocks: [
+        sendBlock({
+          blockId: "tc-old",
+          timestamp: 40,
+          receiptMessageId: null,
+          parentBlockId: null,
+        }),
+      ],
+    });
+    const input: TranscriptRowProjectionInput = {
+      messages: [turn],
+      events: [],
+      activeTurnId: null,
+      chatId: "chat-1",
+    };
+    const rows = projectTranscriptRows(input);
+
+    expect(
+      locateTranscriptRowOrdinal(
+        { rows, messages: input.messages },
+        { kind: "receipt", messageId: "recv-msg-missing" },
+      ),
+    ).toBeNull();
+  });
+
+  it("resolves a bot's channel post to the send call in its session that wrote it", () => {
+    const reply = (blockId: string, messageId: string, timestamp: number) => ({
+      type: "tool_call",
+      blockId,
+      status: "completed",
+      timestamp,
+      toolName: "mcp__traycer_a2a__traycer_reply",
+      error: null,
+      parentBlockId: null,
+      botSendReceipt: {
+        conversationId: "channel-1",
+        messageId,
+        requestId: null,
+        kind: "reply",
+        slack: null,
+      },
+    });
+    const first = assistantMessageWithBlocks({
+      messageId: "m-reply-1",
+      timestamp: 50,
+      turnId: "turn-reply-1",
+      blocks: [reply("tc-reply-1", "post-1", 50)],
+    });
+    const second = assistantMessageWithBlocks({
+      messageId: "m-reply-2",
+      timestamp: 60,
+      turnId: "turn-reply-2",
+      blocks: [reply("tc-reply-2", "post-2", 60)],
+    });
+    const input: TranscriptRowProjectionInput = {
+      messages: [first, second],
+      events: [],
+      activeTurnId: null,
+      chatId: "chat-1",
+    };
+    const rows = projectTranscriptRows(input);
+    const skeleton = buildRowSkeleton(input, previewText, null);
+
+    const ordinal = locateOrThrow(rows, input.messages, {
+      kind: "receipt",
+      messageId: "post-2",
+    });
+
+    expect(skeleton[ordinal]?.rowId).toBe(assistantRowId("turn-reply-2"));
+  });
+
+  it("does not resolve a send posted in Slack, whose receipt names no channel post", () => {
+    const turn = assistantMessageWithBlocks({
+      messageId: "m-slack",
+      timestamp: 70,
+      turnId: "turn-slack",
+      blocks: [
+        {
+          type: "tool_call",
+          blockId: "tc-slack",
+          status: "completed",
+          timestamp: 70,
+          toolName: "mcp__traycer_a2a__traycer_reply",
+          error: null,
+          parentBlockId: null,
+          botSendReceipt: {
+            conversationId: "thread-1",
+            messageId: "relay-item-1",
+            requestId: null,
+            kind: "reply",
+            slack: { channelId: "C0CHAN001", threadTs: "1760000000.000100" },
+          },
+        },
+      ],
+    });
+    const input: TranscriptRowProjectionInput = {
+      messages: [turn],
+      events: [],
+      activeTurnId: null,
+      chatId: "chat-1",
+    };
+
+    expect(
+      locateTranscriptRowOrdinal(
+        { rows: projectTranscriptRows(input), messages: input.messages },
+        { kind: "receipt", messageId: "relay-item-1" },
+      ),
+    ).toBeNull();
+  });
+
+  it("resolves a receipt of an unparsed older block, which carries no slack key", () => {
+    // A caller holding blocks as persisted before the member existed: the
+    // receipt object has no `slack` key at all, which no parse would allow.
+    const older: Message = JSON.parse(`{
+      "role": "assistant",
+      "messageId": "m-older",
+      "sender": {
+        "type": "agent",
+        "harnessId": "claude",
+        "agentId": "agent-1",
+        "displayName": null,
+        "reply": { "expectsReply": false },
+        "inReplyTo": null
+      },
+      "blocks": [
+        {
+          "type": "tool_call",
+          "blockId": "tc-older",
+          "status": "completed",
+          "timestamp": 80,
+          "toolName": "mcp__traycer_a2a__traycer_reply",
+          "error": null,
+          "parentBlockId": null,
+          "agentMessageSend": null,
+          "agentMessageReceipt": null,
+          "imageResults": [],
+          "botSendReceipt": {
+            "conversationId": "channel-1",
+            "messageId": "post-older",
+            "requestId": null,
+            "kind": "reply"
+          }
+        }
+      ],
+      "startedAt": null,
+      "timestamp": 80,
+      "turnId": "turn-older",
+      "usage": null,
+      "reasoningEffort": null,
+      "serviceTier": null,
+      "imageResolutions": []
+    }`);
+    const input: TranscriptRowProjectionInput = {
+      messages: [older],
+      events: [],
+      activeTurnId: null,
+      chatId: "chat-1",
+    };
+    const rows = projectTranscriptRows(input);
+    const skeleton = buildRowSkeleton(input, previewText, null);
+
+    const ordinal = locateOrThrow(rows, input.messages, {
+      kind: "receipt",
+      messageId: "post-older",
+    });
+
+    expect(skeleton[ordinal]?.rowId).toBe(assistantRowId("turn-older"));
+  });
+});
+
+describe("locateTranscriptRowOrdinal: message targets", () => {
+  /**
+   * One human turn, one steer, one assistant turn split by it. Enough to make
+   * every distinction this locator has to draw: a user row named by its own id,
+   * a steer row named by the record it steered, and an assistant record that
+   * names TWO rows and no row id at all.
+   */
+  function splitTurnTranscript(): TranscriptRowProjectionInput {
+    return {
+      messages: [
+        humanUserMessage({ messageId: "m-1", timestamp: 1, text: "go" }),
+        humanUserMessage({
+          messageId: "m-steer",
+          timestamp: 5,
+          text: "also do y",
+        }),
+        assistantMessageWithBlocks({
+          messageId: "m-turn",
+          timestamp: 10,
+          turnId: "turn-1",
+          blocks: [
+            {
+              type: "tool_call",
+              blockId: "tc-early",
+              status: "completed",
+              timestamp: 6,
+              toolName: "Read",
+              error: null,
+            },
+            {
+              type: "steer",
+              blockId: "b-steer",
+              status: "completed",
+              timestamp: 7,
+              queueItemId: "q-1",
+              messageId: "m-steer",
+              content: { type: "doc" },
+              mode: "safe_point",
+              sender: null,
+            },
+            {
+              type: "tool_call",
+              blockId: "tc-late",
+              status: "completed",
+              timestamp: 8,
+              toolName: "Write",
+              error: null,
+            },
+          ],
+        }),
+      ],
+      events: [],
+      activeTurnId: null,
+      chatId: "chat-1",
+    };
+  }
+
+  it("resolves an ASSISTANT record, whose rows no id-as-row-id read can find", () => {
+    // The whole reason this kind exists. `m-turn` is not a row id anywhere in
+    // the skeleton, so a client looking it up there waits forever.
+    const input = splitTurnTranscript();
+    const rows = projectTranscriptRows(input);
+    const skeleton = buildRowSkeleton(input, previewText, null);
+    expect(skeleton.map((entry) => entry.rowId)).not.toContain("m-turn");
+
+    const ordinal = locateOrThrow(rows, input.messages, {
+      kind: "message",
+      messageId: "m-turn",
+    });
+
+    // The TRAILING slice, matching the client's own `messageIdForTranscriptTarget`:
+    // a completion or failure notification describes the terminal edge of the
+    // record, and the two resolvers must not disagree about which row that is.
+    expect(skeleton[ordinal]?.rowId).toBe(
+      assistantSliceRowId("turn-1", 1, true),
+    );
+  });
+
+  it("resolves a USER record to its own row", () => {
+    const input = splitTurnTranscript();
+    const rows = projectTranscriptRows(input);
+    const skeleton = buildRowSkeleton(input, previewText, null);
+
+    const ordinal = locateOrThrow(rows, input.messages, {
+      kind: "message",
+      messageId: "m-1",
+    });
+
+    expect(skeleton[ordinal]?.rowId).toBe("m-1");
+  });
+
+  it("resolves a STEERED record to its steer row, not to the turn that names it", () => {
+    // `m-steer` appears in `steeredMessageIds` on every slice of the turn, so a
+    // search that matched anywhere the id occurs would answer with an assistant
+    // slice - and jump the reader past the bubble they asked for.
+    const input = splitTurnTranscript();
+    const rows = projectTranscriptRows(input);
+    const skeleton = buildRowSkeleton(input, previewText, null);
+
+    const ordinal = locateOrThrow(rows, input.messages, {
+      kind: "message",
+      messageId: "m-steer",
+    });
+
+    expect(skeleton[ordinal]?.rowId).toBe("m-steer");
+  });
+
+  it("returns null for a record the transcript no longer holds", () => {
+    const input = splitTurnTranscript();
+    const rows = projectTranscriptRows(input);
+
+    expect(
+      locateTranscriptRowOrdinal(
+        { rows, messages: input.messages },
+        { kind: "message", messageId: "m-trimmed-by-a-restore" },
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("locateTranscriptRowOrdinal: approval targets", () => {
+  it("resolves a plan approval to the row that renders that plan block", () => {
+    const human = humanUserMessage({
+      messageId: "m-1",
+      timestamp: 1,
+      text: "plan this",
+    });
+    const assistant = assistantMessageWithBlocks({
+      messageId: "m-2",
+      timestamp: 2,
+      turnId: "turn-1",
+      blocks: [
+        {
+          type: "plan",
+          blockId: "plan-block-1",
+          status: "completed",
+          timestamp: 2,
+          planStatus: "awaiting_approval",
+          planId: "plan-1",
+          harnessId: "claude",
+          source: { harnessId: "claude", kind: "provider-plan" },
+          approvalId: "approval-plan",
+        },
+      ],
+    });
+    const input: TranscriptRowProjectionInput = {
+      messages: [human, assistant],
+      events: [],
+      activeTurnId: null,
+      chatId: "chat-1",
+    };
+    const rows = projectTranscriptRows(input);
+    const skeleton = buildRowSkeleton(input, previewText, null);
+
+    const ordinal = locateOrThrow(rows, input.messages, {
+      kind: "approval",
+      approvalId: "approval-plan",
+    });
+    expect(skeleton[ordinal]?.rowId).toBe(rows[ordinal]?.rowId);
+    expect(
+      locateTranscriptRowOrdinal(
+        { rows, messages: input.messages },
+        { kind: "approval", approvalId: "missing" },
+      ),
+    ).toBeNull();
+  });
+});

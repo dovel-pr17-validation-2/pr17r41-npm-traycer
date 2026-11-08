@@ -1,0 +1,571 @@
+import { z } from "zod";
+import { lazySchema } from "@traycer/protocol/framework/lazy-schema";
+
+/**
+ * Private Zod values for the auth / session / MCP-server records and
+ * their non-record extension shapes.
+ *
+ * These schemas are the contract authority. Types for the records they
+ * define are derived in `protocol/auth/registry.ts` via `RecordValue<>`,
+ * so the runtime check and the compile-time shape stay in lock-step
+ * automatically - there is no plain TS duplicate that could drift.
+ *
+ * Non-record extension shapes (e.g. `traycerUserSubscriptionSchema`)
+ * compose against the registered base schemas using `.extend(...)`, so
+ * the inferred TypeScript shape of any record that embeds them lines up
+ * with the public extension types in `protocol/auth/user.ts` by
+ * construction - no `satisfies` annotation needed.
+ *
+ * Only `protocol/auth/registry.ts` is allowed to import from this
+ * module. Every other consumer reaches a record through
+ * `getRecordSchema(authRecordRegistry, "<record-name>")` and reads
+ * record types from the registry.
+ *
+ * Date fields use `z.coerce.date()` so wire JSON (ISO strings) and
+ * native `Date` instances both validate; the inferred TypeScript type
+ * remains `Date`.
+ *
+ * ## The `*PreApple` schemas
+ *
+ * Adding `APPLE` to the provider enum is a breaking change by the
+ * framework's rules - a released client validating `GET /api/v3/user`
+ * refuses a value its closed enum does not list - so the records that
+ * carry a user went to major 2 with a 2-to-1 downgrade bridge. The
+ * `*PreApple` name is the shape major 1 is FROZEN at, and it is the
+ * schema the major-1 contract in `registry.ts` binds. Every pair is
+ * spelled as `<frozen>.extend({ ... })` so the two majors differ only in
+ * what the bump is about; `auth-record-major-1-frozen.test.ts`
+ * fingerprints the frozen side so an in-place edit fails there rather
+ * than on a released client.
+ *
+ * ## `lazySchema`
+ *
+ * Every module-scope initialiser here is a `lazySchema` thunk, and a
+ * thunk encloses its whole initialiser including the base lookup - the
+ * `.extend(...)` of a frozen twin and the `.options` read that composes
+ * the latest provider enum from the frozen one both sit INSIDE the
+ * thunk, so declaring a major-2 pair builds no zod instance until
+ * something reads it.
+ */
+
+// ---- Enums -------------------------------------------------------------- //
+
+/**
+ * The provider enum as it shipped before Sign in with Apple - the shape
+ * every RELEASED client validates `GET /api/v3/user` against, and the one
+ * record major 1 is frozen at.
+ *
+ * Its own `z.enum(...)` instance, never an alias of `providerTypeSchema`:
+ * the whole point of the major-2 split is that growing the latest enum
+ * must not grow the frozen one. `providerTypeSchema` composes from
+ * `.options` (the `harnessIdSchema` pattern) so the four shared values
+ * cannot drift apart, while the two remain distinct schemas - and
+ * `auth-record-major-1-frozen.test.ts` fingerprints this one, so an edit
+ * HERE fails loudly instead of silently widening every frozen record.
+ */
+export const providerTypeSchemaPreApple = lazySchema(() =>
+  z.enum(["GITHUB", "GOOGLE", "GITLAB", "EMAIL"]),
+);
+
+/**
+ * The latest provider enum (record major 2). Closed, by decision D3 of the
+ * Sign in with Apple plan: the next provider is another major plus another
+ * bridge, rather than an `UNKNOWN` fallback that every reader would have to
+ * handle.
+ *
+ * The `.options` read is inside the thunk, so it forces the frozen enum
+ * only when this one is first read, never at import.
+ */
+export const providerTypeSchema = lazySchema(() =>
+  z.enum([...providerTypeSchemaPreApple.options, "APPLE"]),
+);
+
+export const seatAllocationSchema = lazySchema(() =>
+  z.enum(["MANUAL", "AUTO_ALLOCATION"]),
+);
+
+export const subscriptionStatusSchema = lazySchema(() =>
+  z.enum([
+    "PENDING",
+    "FREE",
+    "PRO_LEGACY",
+    "PRO",
+    "PRO_PLUS",
+    "LITE",
+    "LITE_V2",
+    "PRO_V2",
+    "PRO_PLUS_V2",
+    "LITE_V3",
+    "PRO_V3",
+    "ULTRA_1X_V3",
+    "ULTRA_2X_V3",
+    "ULTRA_3X_V3",
+    "ULTRA_4X_V3",
+    "ULTRA_5X_V3",
+    "BYOA_V3",
+  ]),
+);
+
+// ---- Core entities (registered records) -------------------------------- //
+
+/**
+ * The `organization` record stays at major 1 forever: its `providerType` is
+ * always `EMAIL` on the wire, so it has no reason to carry the wider enum,
+ * and widening it would break the out-of-repo readers of the legacy
+ * envelope it is embedded in.
+ */
+export const organizationSchema = lazySchema(() =>
+  z.object({
+    id: z.string(),
+    providerId: z.string(),
+    providerHandle: z.string(),
+    providerType: providerTypeSchemaPreApple,
+    privacyMode: z.boolean(),
+    seatAllocation: seatAllocationSchema,
+    createdAt: z.coerce.date(),
+    updatedAt: z.coerce.date(),
+  }),
+);
+
+/** The `user` record at major 1 - four provider values, frozen. */
+export const userSchemaPreApple = lazySchema(() =>
+  z.object({
+    id: z.string(),
+    name: z.string().nullable(),
+    providerId: z.string(),
+    providerHandle: z.string(),
+    providerType: providerTypeSchemaPreApple,
+    email: z.string().nullable(),
+    avatarUrl: z.string().nullable(),
+    activatedAt: z.coerce.date().nullable(),
+    createdAt: z.coerce.date(),
+    updatedAt: z.coerce.date(),
+    lastSeenAt: z.coerce.date().nullable(),
+    privacyMode: z.boolean(),
+    isLearningEnabled: z.boolean(),
+  }),
+);
+
+/**
+ * The `user` record at major 2 - identical to major 1 but for the provider
+ * enum. Spelled as an `.extend` of the frozen shape rather than a second
+ * field list so the two majors cannot drift on any field except the one
+ * the major bump is ABOUT; `.extend` replaces the key in place, so the
+ * rendered property order is unchanged too.
+ */
+export const userSchema = lazySchema(() =>
+  userSchemaPreApple.extend({
+    providerType: providerTypeSchema,
+  }),
+);
+
+export const teamSchema = lazySchema(() =>
+  z.object({
+    id: z.string(),
+    slug: z.string(),
+    avatarUrl: z.string().nullable(),
+    privacyMode: z.boolean(),
+    createdAt: z.coerce.date(),
+    updatedAt: z.coerce.date(),
+  }),
+);
+
+export const subscriptionSchema = lazySchema(() =>
+  z.object({
+    id: z.string(),
+    userID: z.string().nullable(),
+    orgID: z.string().nullable(),
+    teamID: z.string().nullable(),
+    customerId: z.string(),
+    createdAt: z.coerce.date(),
+    updatedAt: z.coerce.date(),
+    subscriptionExpiry: z.coerce.date().nullable(),
+    trialEndsAt: z.coerce.date().nullable(),
+    subscriptionStatus: subscriptionStatusSchema,
+    hasPaymentMethod: z.boolean().nullable(),
+  }),
+);
+
+export const creditSchema = lazySchema(() =>
+  z.object({
+    id: z.string(),
+    userId: z.string(),
+    customerId: z.string(),
+    bonusCredits: z.number(),
+    consumedFromPlan: z.number(),
+    consumedFromBonus: z.number(),
+    lastResetAt: z.coerce.date(),
+  }),
+);
+
+export const payAsYouGoUsageSchema = lazySchema(() =>
+  z.object({
+    allowPayAsYouGo: z.boolean(),
+  }),
+);
+
+export const bundleSummarySchema = lazySchema(() =>
+  z.object({
+    bundleTotal: z.number(),
+    bundleConsumed: z.number(),
+    bundleRemaining: z.number(),
+  }),
+);
+
+// ---- Non-record extension shapes --------------------------------------- //
+
+export const organizationCreditSchema = lazySchema(() =>
+  creditSchema.extend({
+    orgId: z.string(),
+  }),
+);
+
+export const traycerOrganizationSubscriptionSchema = lazySchema(() =>
+  subscriptionSchema.extend({
+    organization: organizationSchema.optional(),
+    isInTrial: z.boolean(),
+    bundleSummary: bundleSummarySchema.optional(),
+    credit: organizationCreditSchema.optional(),
+    totalPlanCredits: z.number().optional(),
+    rechargeRateSeconds: z.number(),
+    hasActiveBundle: z.boolean().optional(),
+  }),
+);
+
+export const traycerUserSubscriptionSchema = lazySchema(() =>
+  subscriptionSchema.extend({
+    isInTrial: z.boolean(),
+    bundleSummary: bundleSummarySchema.optional(),
+    credit: creditSchema.optional(),
+    totalPlanCredits: z.number().optional(),
+    rechargeRateSeconds: z.number(),
+    hasActiveBundle: z.boolean().optional(),
+  }),
+);
+
+export const traycerTeamSubscriptionSchema = lazySchema(() =>
+  subscriptionSchema.extend({
+    team: teamSchema,
+    isInTrial: z.boolean(),
+    bundleSummary: bundleSummarySchema,
+    credit: organizationCreditSchema.optional(),
+    totalPlanCredits: z.number(),
+    rechargeRateSeconds: z.number(),
+    hasActiveBundle: z.boolean(),
+  }),
+);
+
+export const authenticatedUserBaseSchemaPreApple = lazySchema(() =>
+  z.object({
+    user: userSchemaPreApple,
+    userSubscription: traycerUserSubscriptionSchema,
+    payAsYouGoUsage: payAsYouGoUsageSchema,
+  }),
+);
+
+export const authenticatedUserBaseSchema = lazySchema(() =>
+  authenticatedUserBaseSchemaPreApple.extend({
+    user: userSchema,
+  }),
+);
+
+// ---- Authenticated-user response records ------------------------------- //
+
+/**
+ * What `authenticated-user-response` adds to the base, shared by both
+ * majors so the two cannot drift on anything the major bump is not about.
+ * A field added here lands on major 1 as well, which is exactly what
+ * `auth-record-major-1-frozen.test.ts` exists to catch.
+ *
+ * A container, not a schema, so each slot carries its own `lazySchema`
+ * stand-in: declaring it builds nothing, and the `.extend` that reads
+ * the slots runs inside the two thunks below.
+ */
+const authenticatedUserResponseFields = {
+  /**
+   * Verified device identity for a host-audience bearer. User-audience and
+   * legacy bearers resolve to null/absence. Data-plane writers that require
+   * device ownership bind their request hostId to this claim.
+   */
+  hostId: lazySchema(() => z.string().nullable().optional()),
+  teamSubscriptions: lazySchema(() => z.array(traycerTeamSubscriptionSchema)),
+};
+
+export const authenticatedUserSchemaPreApple = lazySchema(() =>
+  authenticatedUserBaseSchemaPreApple.extend(authenticatedUserResponseFields),
+);
+
+/**
+ * A credit campaign the caller claimed and that has not ended: what is left of
+ * its grant, spendable only on the charges the campaign covers, so it is never
+ * part of `userSubscription`'s balance.
+ */
+const campaignCreditSchema = lazySchema(() =>
+  z.object({
+    campaignId: z.string(),
+    name: z.string(),
+    description: z.string().nullable(),
+    grantCredits: z.number().nonnegative(),
+    remainingCredits: z.number().nonnegative(),
+    endsAt: z.iso.datetime({ offset: true }),
+  }),
+);
+
+/**
+ * On major 2 and up only, never `authenticatedUserResponseFields`, whose
+ * fields land on major 1 too. `.catch(undefined)` keeps a malformed list from
+ * failing the whole identity response: the reader loses the campaigns, not the
+ * session.
+ */
+export const authenticatedUserSchema = lazySchema(() =>
+  authenticatedUserBaseSchema.extend({
+    ...authenticatedUserResponseFields,
+    campaignCredits: z.array(campaignCreditSchema).optional().catch(undefined),
+  }),
+);
+
+/**
+ * The caller's environment ids, as authn holds them. `personal: null`, or a
+ * team the caller belongs to that is missing from `teams`, means authn holds
+ * no row for that owner YET - a reader treats it as not yet available, never
+ * as a reason to mint one.
+ */
+const callerEnvironmentsSchema = lazySchema(() =>
+  z.object({
+    personal: z.string().nullable(),
+    teams: z.array(z.object({ teamId: z.string(), environmentId: z.string() })),
+  }),
+);
+
+/** The environment an act-as grant acts for; `null` for any other bearer. */
+const actingAsSchema = lazySchema(() =>
+  z.object({ environmentId: z.string() }).nullable(),
+);
+
+/**
+ * Major 3: major 2 plus the two fields a server authorizes with. An
+ * extension of the major-2 schema, never of `authenticatedUserResponseFields`,
+ * whose fields land on major 1 too. Both are REQUIRED, which is what makes
+ * this a major: a reader can tell "the caller has no environments" from
+ * "authn did not say".
+ */
+export const authenticatedUserSchemaWithEnvironments = lazySchema(() =>
+  authenticatedUserSchema.extend({
+    environments: callerEnvironmentsSchema,
+    actingAs: actingAsSchema,
+  }),
+);
+
+/**
+ * `legacy-authenticated-user-response` is the frozen wire contract for
+ * out-of-repo extension builds, so it stays at major 1 and keeps the
+ * pre-Apple user. An Apple user reaching this envelope is downgraded
+ * through the `user` bridge at send time, never widened here.
+ */
+export const legacyAuthenticatedUserSchema = lazySchema(() =>
+  authenticatedUserBaseSchemaPreApple.extend({
+    organizationSubscription: traycerOrganizationSubscriptionSchema.optional(),
+    rechargeRateSeconds: z.number(),
+    organizationSubscriptions: z
+      .array(traycerOrganizationSubscriptionSchema)
+      .optional(),
+  }),
+);
+
+// ---- HTTP response envelopes (token / auth) ---------------------------- //
+
+// Existing cloud-ui/extension auth routes return a single opaque combined JWE
+// token. The app-stack `/api/v3/auth/*` routes return a JWS access token plus
+// a separate refresh token.
+export const providerLoginResponseSchemaPreApple = lazySchema(() =>
+  z.object({
+    token: z.string(),
+    refreshToken: z.string().optional(),
+    user: userSchemaPreApple,
+  }),
+);
+
+export const providerLoginResponseSchema = lazySchema(() =>
+  providerLoginResponseSchemaPreApple.extend({
+    user: userSchema,
+  }),
+);
+
+export const refreshTokenResponseSchema = lazySchema(() =>
+  z.object({
+    token: z.string(),
+    refreshToken: z.string().optional(),
+  }),
+);
+
+export const exchangeTokenResponseSchemaPreApple = lazySchema(() =>
+  refreshTokenResponseSchema.extend({
+    user: authenticatedUserSchemaPreApple,
+  }),
+);
+
+export const exchangeTokenResponseSchema = lazySchema(() =>
+  refreshTokenResponseSchema.extend({
+    user: authenticatedUserSchema,
+  }),
+);
+
+export const validateCouponResponseSchema = lazySchema(() =>
+  z.discriminatedUnion("ok", [
+    z.object({
+      ok: z.literal(true),
+      valid: z.boolean(),
+    }),
+    z.object({
+      ok: z.literal(false),
+      error: z.string(),
+    }),
+  ]),
+);
+
+export const emailOtpResponseSchema = lazySchema(() =>
+  z.object({
+    success: z.boolean(),
+  }),
+);
+
+// ---- MCP server entities ----------------------------------------------- //
+
+export const mcpServerStatusSchema = lazySchema(() =>
+  z.enum([
+    "CONNECTED",
+    "CONNECTING",
+    "DISCONNECTED",
+    "UNAUTHORIZED",
+    "AUTHORIZING",
+    "AUTHORIZATION_FAILED",
+  ]),
+);
+
+export const mcpServerAuthTypeSchema = lazySchema(() =>
+  z.enum(["NO_AUTH", "PAT", "OAUTH"]),
+);
+
+export const mcpServerRowSchema = lazySchema(() =>
+  z.object({
+    id: z.string(),
+    name: z.string(),
+    url: z.string(),
+    status: mcpServerStatusSchema,
+    userId: z.string().nullable(),
+    orgId: z.string().nullable(),
+    teamId: z.string().nullable(),
+    isConsentGiven: z.boolean(),
+    authType: mcpServerAuthTypeSchema,
+    patEncrypted: z.string().nullable(),
+    patIV: z.string().nullable(),
+    patTag: z.string().nullable(),
+    customHeadersEncrypted: z.string().nullable(),
+    customHeadersIV: z.string().nullable(),
+    customHeadersTag: z.string().nullable(),
+    oauthAccessTokenEncrypted: z.string().nullable(),
+    oauthAccessTokenIV: z.string().nullable(),
+    oauthAccessTokenTag: z.string().nullable(),
+    oauthAccessTokenExpiresAt: z.coerce.date().nullable(),
+    oauthRefreshTokenEncrypted: z.string().nullable(),
+    oauthRefreshTokenIV: z.string().nullable(),
+    oauthRefreshTokenTag: z.string().nullable(),
+    oauthClientId: z.string().nullable(),
+    oauthClientSecretEncrypted: z.string().nullable(),
+    oauthClientSecretIV: z.string().nullable(),
+    oauthClientSecretTag: z.string().nullable(),
+    enabledToolNames: z.unknown(),
+    createdAt: z.coerce.date(),
+    updatedAt: z.coerce.date(),
+  }),
+);
+
+export const mcpToolSchema = lazySchema(() =>
+  z.object({
+    name: z.string(),
+    description: z.string(),
+    inputSchema: z.record(z.string(), z.unknown()),
+    outputSchema: z.record(z.string(), z.unknown()).optional(),
+  }),
+);
+
+export const mcpServerSchema = lazySchema(() =>
+  mcpServerRowSchema.extend({
+    tools: z.array(mcpToolSchema),
+    instructions: z.string().nullable(),
+    customHeaderKeys: z.array(z.string()),
+  }),
+);
+
+// ---- MCP HTTP response envelopes --------------------------------------- //
+
+export const installMcpServerResponseSchema = lazySchema(() =>
+  z.object({
+    server: mcpServerSchema,
+    authorizationUrl: z.string().nullable(),
+  }),
+);
+
+export const listMcpServersResponseSchema = lazySchema(() =>
+  z.object({
+    servers: z.array(mcpServerSchema),
+  }),
+);
+
+export const refreshMcpServersResponseSchema = listMcpServersResponseSchema;
+
+export const userMcpServersSchemaPreApple = lazySchema(() =>
+  z.object({
+    user: userSchemaPreApple,
+    servers: z.array(mcpServerSchema),
+  }),
+);
+
+export const userMcpServersSchema = lazySchema(() =>
+  userMcpServersSchemaPreApple.extend({
+    user: userSchema,
+  }),
+);
+
+export const organizationMcpServersSchema = lazySchema(() =>
+  z.object({
+    organization: organizationSchema,
+    servers: z.array(mcpServerSchema),
+  }),
+);
+
+export const listAllMcpServersResponseSchemaPreApple = lazySchema(() =>
+  z.object({
+    user: userMcpServersSchemaPreApple,
+    organizations: z.array(organizationMcpServersSchema),
+  }),
+);
+
+export const listAllMcpServersResponseSchema = lazySchema(() =>
+  listAllMcpServersResponseSchemaPreApple.extend({
+    user: userMcpServersSchema,
+  }),
+);
+
+export const disconnectMcpServerResponseSchema = listMcpServersResponseSchema;
+
+export const connectMcpServerResponseSchema = installMcpServerResponseSchema;
+
+export const updateMcpServerResponseSchema = installMcpServerResponseSchema;
+
+export const listMcpServerToolsResponseSchema = lazySchema(() =>
+  z.array(mcpToolSchema),
+);
+
+export const executeMcpServerToolResponseSchema = lazySchema(() =>
+  z.discriminatedUnion("ok", [
+    z.object({
+      ok: z.literal(true),
+      result: z.string(),
+    }),
+    z.object({
+      ok: z.literal(false),
+      error: z.string(),
+    }),
+  ]),
+);

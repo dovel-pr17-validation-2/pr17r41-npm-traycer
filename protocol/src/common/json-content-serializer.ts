@@ -1,0 +1,2240 @@
+import type { JsonContent } from "./registry";
+import { isDefaultGithubMentionHost } from "./github-mention-host";
+
+export enum ContextType {
+  File = "file",
+  Folder = "folder",
+  Worktree = "worktree",
+  GithubIssue = "github_issue",
+  GithubPullRequest = "github_pull_request",
+  Attachment = "attachment",
+  Phase = "phase",
+  ReviewComment = "review_comment",
+  Git = "git",
+  Epic = "epic",
+  Spec = "spec",
+  Ticket = "ticket",
+  Story = "story",
+  Review = "review",
+  /**
+   * An HTML artifact or a canvas. Both are folders on the host's disk, so the
+   * agent form points at the folder rather than at a body file.
+   */
+  Html = "html",
+  Canvas = "canvas",
+  /**
+   * A file artifact (an image, a PDF, any loose object under the task's
+   * artifacts). Spelled apart from `File`, which is a workspace path: the two
+   * resolve through different fields and the host converter dispatches on
+   * this attribute.
+   */
+  FileArtifact = "file-artifact",
+  WorkflowCommand = "workflow_command",
+  Chat = "chat",
+  /**
+   * A referenceable Agent that uses the Terminal interface.
+   *
+   * Additive sibling of `Chat`, NOT a replacement: `Chat` is a released token
+   * carried by persisted mentions and must keep its value. Agent is the durable
+   * entity and Chat/Terminal are its interfaces, so both members serialize to
+   * the same interface-agnostic `@agent:` reference form for the coding agent -
+   * referring to an Agent means the same thing either way (Core Flows, Flow 3).
+   */
+  TerminalAgent = "terminal-agent",
+  /**
+   * A plain interactive terminal - a shell a person or an agent is working
+   * in, not an Agent. Distinct from `TerminalAgent` for exactly that reason:
+   * `TerminalAgent` names an Agent reached through the terminal interface and
+   * projects as `@agent:`, while this names the terminal itself, which a
+   * coding agent can only READ (`traycer_read_terminal` / `traycer terminal
+   * output`) and never talk to.
+   */
+  Terminal = "terminal",
+  /**
+   * A browser tab the coding agent can read (title/URL/page contents) but not
+   * drive - a reference by identity, not a control surface. Mirrors `Terminal`
+   * exactly: display title plus the durable `tabId` the runtime resolves it
+   * with, and no `TerminalAgent`-style interface duality since a browser tab
+   * is never itself an Agent.
+   */
+  BrowserTab = "browser-tab",
+  /**
+   * A bot, mentioned from an agent chat. Not an Agent of the task, so it does
+   * not share the `@agent:` projection: the chip names the bot and its trunk
+   * agent, the two ids `traycer_send_message` needs, since an agent cannot
+   * list bots.
+   */
+  Bot = "bot",
+  Execution = "execution",
+  User = "user",
+}
+
+export interface SerializerOptions {
+  mentionFormat: "user" | "llm";
+  platform: "POSIX" | "WINDOWS";
+  listIndent?: number;
+  bulletMarker?: "-" | "*" | "+";
+  validationResults?: Map<string, ValidationResult>;
+}
+
+export interface ValidationResult {
+  exists: boolean;
+  isDeleted?: boolean;
+}
+
+interface SerializerContext {
+  options: SerializerOptions;
+  listDepth: number;
+  // The column the current list's item markers start at. A nested list starts
+  // at its parent item's content column, which is past an ordered marker's
+  // width (`1. ` is three columns), not at `listDepth * listIndent`.
+  listColumn: number;
+  orderedListIndex: number;
+  inListItem: boolean;
+  // True while rendering the content of a GFM table cell: inline text is
+  // escaped per text node, mark-aware, so a literal `|` cannot split the cell
+  // (see `escapeTableCellText` / `escapeTableCellCode`).
+  inTableCell: boolean;
+  // True for an artifact body (`jsonContentToArtifactMarkdown`): plain text
+  // is escaped wherever the parser would otherwise read markup, so the
+  // md -> doc -> md pass every agent write and every projection runs is a
+  // fixed point. Prompts, comments and the composer keep the raw text
+  // (`jsonContentToMarkdown`), because a model or a person reads those
+  // directly and gains nothing from a backslash.
+  escapeText: boolean;
+  // Whether both artifact readers keep the block image a paragraph here reads
+  // back as, so an unresolved image's fallback text may be written raw here
+  // (`serializeParagraph`). False on a list item's marker line, in a task item
+  // or a table cell, and under lists of mixed kinds - where the readers put
+  // the image inside a paragraph and the schema drops it, or the readers
+  // disagree. Pinned against both readers by the differential tests.
+  imageKept: boolean;
+  // The kind of the lists this rendering is inside, for `imageKept`.
+  imageListKind: "bullet" | "ordered" | null;
+  // True while rendering a heading's content, which is one line.
+  inHeading: boolean;
+  // The placeholder for the space after an empty ordered or task marker; see
+  // `keptMarkerSpaceFor`. Empty in the first rendering, which chooses it.
+  keptMarkerSpace: string;
+  // How many empty items' marker spaces the rendering wrote, shared by every
+  // context derived from this one.
+  keptMarkerSpaceUses: { count: number };
+}
+
+function createContext(
+  options: SerializerOptions,
+  escapeText: boolean,
+  keptMarkerSpace: string,
+): SerializerContext {
+  return {
+    options: {
+      listIndent: 2,
+      bulletMarker: "-",
+      ...options,
+    },
+    listDepth: 0,
+    listColumn: 0,
+    orderedListIndex: 0,
+    inListItem: false,
+    inTableCell: false,
+    escapeText,
+    imageKept: true,
+    imageListKind: null,
+    inHeading: false,
+    keptMarkerSpace,
+    keptMarkerSpaceUses: { count: 0 },
+  };
+}
+
+function getIndent(ctx: SerializerContext): string {
+  return " ".repeat(ctx.listDepth * (ctx.options.listIndent ?? 2));
+}
+
+export function escapeXmlAttr(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+export function escapeXmlContent(str: string): string {
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+interface RenderableMark {
+  key: string;
+  type: string;
+  open: string;
+  close: string;
+  // A link's destination, so the run's escaping can write its `](href)`.
+  href: string | null;
+}
+
+function markDelimiters(mark: {
+  type: string;
+  attrs?: Record<string, unknown>;
+}): { open: string; close: string } | null {
+  switch (mark.type) {
+    case "bold":
+      return { open: "**", close: "**" };
+    case "italic":
+      return { open: "*", close: "*" };
+    case "code":
+      return { open: "`", close: "`" };
+    case "strike":
+      return { open: "~~", close: "~~" };
+    case "autolink": {
+      const href = mark.attrs?.href;
+      if (typeof href === "string" && href.length > 0) {
+        return { open: "<", close: ">" };
+      }
+      return null;
+    }
+    case "link": {
+      const href = mark.attrs?.href;
+      if (typeof href === "string" && href.length > 0) {
+        return { open: "[", close: `](${href})` };
+      }
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
+// Maps a node's marks to the delimiters the serializer can render, keeping
+// the stored order except `code`, which is forced innermost: markdown
+// renders formatting delimiters inside inline code literally, so the
+// backticks must hug the text.
+function renderableMarks(
+  marks: JsonContent["marks"] | undefined,
+): RenderableMark[] {
+  if (!marks || marks.length === 0) return [];
+  const rendered = marks.flatMap((mark) => {
+    const delimiters = markDelimiters(mark);
+    if (!delimiters) return [];
+    return [
+      {
+        key: `${mark.type}:${JSON.stringify(mark.attrs ?? {})}`,
+        type: mark.type,
+        ...delimiters,
+        href:
+          mark.type === "link" && typeof mark.attrs?.href === "string"
+            ? mark.attrs.href
+            : null,
+      },
+    ];
+  });
+  return [
+    ...rendered.filter((mark) => mark.type !== "code"),
+    ...rendered.filter((mark) => mark.type === "code"),
+  ];
+}
+
+interface TextRunEscaping {
+  text: (text: string, marks: RenderableMark[]) => string;
+  // Applied to every mark delimiter. The only delimiter carrying variable
+  // content is a link's `](href)`; the fixed ones (`**`, `` ` ``, `~~`, `[`)
+  // contain nothing a cell escape touches, so this is a no-op for them.
+  delimiter: (delimiter: string) => string;
+  // A link's closing `](href)`, passed through `delimiter` by the caller.
+  linkClose: (href: string) => string;
+  // Whether a code span's backticks are sized to its text. A fixed single
+  // backtick closes early on a backtick in the text, and CommonMark strips a
+  // space from each end of a span that has one at both.
+  sizeCodeSpans: boolean;
+}
+
+const plainLinkClose = (href: string): string => `](${href})`;
+
+const noEscaping: TextRunEscaping = {
+  text: (text) => text,
+  delimiter: (delimiter) => delimiter,
+  linkClose: plainLinkClose,
+  sizeCodeSpans: false,
+};
+
+// GFM table cells escape a literal `|` as `\|`. The parser (marked's
+// `splitCells`) decides whether a pipe is escaped by the PARITY of the
+// backslashes in front of it, then strips exactly one backslash from each
+// `\|`. Outside inline code that is the ordinary CommonMark escape: doubling
+// every backslash keeps a literal `\` literal and guarantees the `\|` we add
+// is read as escaped even after a trailing `\`.
+function escapeTableCellText(text: string): string {
+  // A typed `<br>` is escaped too: in a cell `<br>` is the serializer's own
+  // line break (`tableCellLine`), so a literal one has to read back as text.
+  return text
+    .replace(/\\/g, "\\\\")
+    .replace(/\|/g, "\\|")
+    .replace(/<(?=br\b)/gi, "\\<");
+}
+
+// Inside inline code CommonMark processes no escapes, so a doubled backslash
+// comes back doubled and doubles AGAIN on the next md → doc → md pass. Every
+// agent write to an artifact is such a pass; three regex backslashes in one
+// table row grew to 3 × 2^21 characters in ~40 appends and blocked the host's
+// event loop inside the markdown lexer for good. Code text therefore keeps
+// its backslashes and escapes only the pipe. When the pipe follows an ODD run
+// of backslashes one more is added so the parity still reads "escaped" and
+// the cell cannot split: GFM has no encoding for a literal `\|` inside code,
+// so that one case is lossy by design, but it converges after a single pass
+// instead of growing (pinned by `json-content-serializer-tables.test.ts`).
+function escapeTableCellCode(text: string): string {
+  return text.replace(
+    /\|/g,
+    (_pipe: string, offset: number, source: string): string => {
+      let run = 0;
+      for (let i = offset - 1; i >= 0 && source[i] === "\\"; i--) run++;
+      return run % 2 === 1 ? "\\\\|" : "\\|";
+    },
+  );
+}
+
+const tableCellEscaping: TextRunEscaping = {
+  text: (text, marks) =>
+    marks.some((mark) => mark.type === "code")
+      ? escapeTableCellCode(text)
+      : escapeTableCellText(text),
+  // A link destination is parsed with CommonMark escapes (and marked strips
+  // the `\|`), so the plain-text escape round-trips it exactly as the whole
+  // cell used to.
+  delimiter: escapeTableCellText,
+  linkClose: plainLinkClose,
+  sizeCodeSpans: false,
+};
+
+// ASCII punctuation: the characters a CommonMark backslash can escape.
+const ASCII_PUNCTUATION = /[!-/:-@[-`{-~]/;
+const WORD_CHARACTER = /[\p{L}\p{N}]/u;
+const HTML_OR_AUTOLINK_START = /[A-Za-z/!?]/;
+// The schemes a GFM reader links without angle brackets, matched against the
+// five characters before a `:`. Not only at a word start: marked ends a text
+// token before `https://` wherever it stands.
+const EXTENDED_AUTOLINK_SCHEME = /(?:https?|ftp)$/i;
+// An email's local part as CommonMark's angle autolink allows it (a superset
+// of the GFM bare form), and the first character of its domain.
+const EMAIL_LOCAL_CHARACTER = /[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]/;
+const EMAIL_DOMAIN_START = /[A-Za-z0-9_-]/;
+const ENTITY_REFERENCE =
+  /^&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]*);/;
+
+/**
+ * Escapes artifact text so the parser reads it back as the same text.
+ *
+ * The parser drops the backslash of every CommonMark escape, so a text node
+ * can hold a literal `*`, `_`, `[`, `` ` ``, `~`, `<` or `&amp;` that came from
+ * an escaped source. Written back raw it re-parses as emphasis, a link, code,
+ * strikethrough, HTML or an entity: the content changes on the next pass.
+ * Each character is escaped only where it can form markup:
+ *
+ * - `\` before ASCII punctuation or a newline, or last in its segment (where
+ *   a mark delimiter or a line end follows it and it would escape that
+ *   instead, or turn the line end into a hard break);
+ * - `*`, `` ` `` and `~` always (emphasis, code, strikethrough);
+ * - `_` unless it sits between two word characters, where it cannot open or
+ *   close emphasis, so `foo_bar_baz` stays as written;
+ * - `[` always, and `]` inside link text, where it would close the text;
+ * - `<` only before what opens HTML or an autolink;
+ * - the punctuation a GFM reader links bare text by, which plain text must
+ *   not gain on the next read: the `:` of `http://`, `https://` or
+ *   `ftp://`, the `.` of `www.`, and an `@` between what can be an email's
+ *   local part and its domain (this also keeps `<123@example.com>` from
+ *   reading as an email autolink);
+ * - `&` only before a complete entity reference;
+ * - `|` inside a table cell, where it would end the cell. The `\` rule above
+ *   already doubles a backslash in front of it, so the parser's pipe-parity
+ *   check reads the added `\|` as escaped.
+ */
+function escapeArtifactText(
+  text: string,
+  inLink: boolean,
+  inTableCell: boolean,
+): string {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    out += escapesArtifactChar(text, i, inLink, inTableCell)
+      ? `\\${char}`
+      : char;
+  }
+  return out;
+}
+
+// Characters that can open markup wherever they stand.
+const ALWAYS_ESCAPED_ARTIFACT_CHARS: ReadonlySet<string> = new Set([
+  "*",
+  "`",
+  "~",
+  "[",
+]);
+
+// Lookups rather than a `switch`: the composer's recovery classification
+// guard reads every `case "..."` label in this file as a node or mark kind.
+function escapesArtifactChar(
+  text: string,
+  i: number,
+  inLink: boolean,
+  inTableCell: boolean,
+): boolean {
+  const char = text[i];
+  const next = text[i + 1];
+  if (ALWAYS_ESCAPED_ARTIFACT_CHARS.has(char)) return true;
+  if (char === "\\") {
+    // Before a newline a lone backslash is CommonMark's hard break.
+    return next === undefined || next === "\n" || ASCII_PUNCTUATION.test(next);
+  }
+  if (char === "]") return inLink;
+  if (char === "|") return inTableCell;
+  if (char === "_") {
+    const previous = text[i - 1];
+    return !(
+      previous !== undefined &&
+      next !== undefined &&
+      WORD_CHARACTER.test(previous) &&
+      WORD_CHARACTER.test(next)
+    );
+  }
+  if (char === "<") {
+    return next !== undefined && HTML_OR_AUTOLINK_START.test(next);
+  }
+  if (char === ":") {
+    return (
+      text.startsWith("//", i + 1) &&
+      EXTENDED_AUTOLINK_SCHEME.test(text.slice(Math.max(0, i - 5), i))
+    );
+  }
+  if (char === ".") return text.slice(i - 3, i).toLowerCase() === "www";
+  if (char === "@") {
+    const previous = text[i - 1];
+    return (
+      previous !== undefined &&
+      next !== undefined &&
+      EMAIL_LOCAL_CHARACTER.test(previous) &&
+      EMAIL_DOMAIN_START.test(next)
+    );
+  }
+  if (char === "&") return ENTITY_REFERENCE.test(text.slice(i));
+  return false;
+}
+
+const artifactTextEscaping: TextRunEscaping = {
+  text: (text, marks) =>
+    marks.some((mark) => mark.type === "code" || mark.type === "autolink")
+      ? text
+      : escapeArtifactText(
+          text,
+          marks.some((mark) => mark.type === "link"),
+          false,
+        ),
+  delimiter: (delimiter) => delimiter,
+  // Written like an image's destination: a bare `](a)b)` or `](a b)` would
+  // end the destination early or not be a link at all.
+  linkClose: (href) => `](${markdownDestination(href)})`,
+  sizeCodeSpans: true,
+};
+
+// A table cell in artifact Markdown is parsed back like any other inline text,
+// so it needs the artifact escapes too: a literal `*x*` written raw comes back
+// italic. Composed with the cell's own pipe rule rather than layered on top -
+// doubling every backslash, as `escapeTableCellText` does, would turn each
+// artifact escape into a literal backslash. Code and autolink text process no
+// escapes, so both keep `escapeTableCellCode`'s pipe-only rule.
+const artifactTableCellEscaping: TextRunEscaping = {
+  text: (text, marks) =>
+    marks.some((mark) => mark.type === "code" || mark.type === "autolink")
+      ? escapeTableCellCode(text)
+      : escapeArtifactText(
+          text,
+          marks.some((mark) => mark.type === "link"),
+          true,
+        ),
+  // Doubling every backslash, as the plain cell escape does, would undo the
+  // destination's own escapes. The cell splitter only needs each `|` escaped:
+  // every backslash run the destination writes before one is even, so one
+  // more makes it odd, and the splitter takes exactly that one off again.
+  delimiter: (delimiter) =>
+    delimiter.startsWith("](") ? delimiter : escapeTableCellText(delimiter),
+  linkClose: (href) => `](${markdownDestination(href).replace(/\|/g, "\\|")})`,
+  sizeCodeSpans: true,
+};
+
+/**
+ * Escapes what would open a block at the start of a paragraph line.
+ *
+ * Inline escaping already covers `*`, `` ` ``, `~`, `[`, `<` and `_`, so a
+ * fence, an HTML block, a `*` bullet, a `***` or `___` break and a task
+ * checkbox cannot open here. What is left is `#` (ATX heading), `-` and `+`
+ * (bullet item, `---` break, setext underline), `>` (block quote), an
+ * ordered marker and, on a line after the first, a `===` setext underline or
+ * a GFM table delimiter row. The first line of a list item's paragraph sits
+ * after the item marker, and `- # x` would read as a heading inside the item,
+ * so the same rules apply there. A line start inside an inline code span is
+ * left alone: code text is literal.
+ */
+function escapeParagraphLineStarts(
+  rendered: string,
+  inListItem: boolean,
+): string {
+  let out = "";
+  let codeRun = 0;
+  let insertAt = -1;
+  for (let i = 0; i < rendered.length;) {
+    if ((i === 0 || rendered[i - 1] === "\n") && codeRun === 0) {
+      const firstLine = i === 0;
+      // Up to three leading spaces read back as the line's own text, and the
+      // marker behind them is escaped below. Four or more (or a tab):
+      // - on a paragraph's first line would open an indented code block
+      //   (CommonMark 4.4), and no escape or entity this parser reads can
+      //   carry a leading space, so that whitespace is dropped, once;
+      // - on a later line of a list item's paragraph, the item's parser
+      //   takes four columns off a line indented four or more past its
+      //   content column, so four more are written in front and the line
+      //   reads back with exactly its own;
+      // - on a later line of a top-level paragraph, read back as written.
+      if (INDENTED_CODE_START.test(rendered.slice(i, i + 4))) {
+        if (firstLine) {
+          while (rendered[i] === " " || rendered[i] === "\t") i++;
+          if (i >= rendered.length) break;
+        } else if (inListItem) {
+          out += LIST_CONTINUATION_DEDENT;
+        }
+      }
+      const newline = rendered.indexOf("\n", i);
+      const line = rendered.slice(
+        i,
+        newline === -1 ? rendered.length : newline,
+      );
+      const offset = lineStartEscapeOffset(line, firstLine);
+      insertAt = offset === -1 ? -1 : i + offset;
+    }
+    if (i === insertAt) {
+      out += "\\";
+      insertAt = -1;
+    }
+    const char = rendered[i];
+    if (char === "\\" && codeRun === 0) {
+      out += rendered.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+    if (char === "`") {
+      let run = 0;
+      while (rendered[i + run] === "`") run++;
+      if (codeRun === 0) codeRun = run;
+      else if (run === codeRun) codeRun = 0;
+      out += rendered.slice(i, i + run);
+      i += run;
+      continue;
+    }
+    out += char;
+    i++;
+  }
+  return out;
+}
+
+const INDENTED_CODE_START = /^(?: {4}| {0,3}\t)/;
+const LIST_CONTINUATION_DEDENT = "    ";
+const ATX_HEADING_START = /^#{1,6}(?=[ \t]|$)/;
+const BULLET_START = /^[-+](?=[ \t]|$)/;
+const DASH_BREAK_OR_UNDERLINE = /^-(?:[ \t]*-)*[ \t]*$/;
+const EQUALS_UNDERLINE = /^=+[ \t]*$/;
+const ORDERED_START = /^([0-9]{1,9})([.)])(?=[ \t]|$)/;
+
+// A GFM delimiter row: `|? cell (| cell)* |?` and trailing spaces or tabs,
+// each cell `:?-+:?` padded with spaces or tabs. A scan, because the regex
+// form backtracks quadratically over a long run of spaces between a cell
+// and a character that ends the match.
+function isTableDelimiterRow(text: string): boolean {
+  let i = text[0] === "|" ? 1 : 0;
+  let cells = 0;
+  for (;;) {
+    let j = i;
+    while (isSpaceOrTab(text[j])) j++;
+    if (text[j] === ":") j++;
+    const dashes = j;
+    while (text[j] === "-") j++;
+    if (j === dashes) break;
+    if (text[j] === ":") j++;
+    while (isSpaceOrTab(text[j])) j++;
+    cells++;
+    i = j;
+    if (text[i] !== "|") break;
+    i++;
+  }
+  while (isSpaceOrTab(text[i])) i++;
+  return cells > 0 && i === text.length;
+}
+
+// Where a backslash goes so `line` cannot open a block, or -1. The line is
+// the whole paragraph line; the inserted backslash always precedes any code
+// span on it, because every rule reads only the line's opening characters.
+function lineStartEscapeOffset(line: string, firstLine: boolean): number {
+  // Block syntax may sit behind up to three spaces, so the escape goes in
+  // front of the marker, not in front of the line.
+  const indent = (/^ {0,3}/.exec(line)?.[0] ?? "").length;
+  const rest = line.slice(indent);
+  if (
+    ATX_HEADING_START.test(rest) ||
+    BULLET_START.test(rest) ||
+    DASH_BREAK_OR_UNDERLINE.test(rest) ||
+    rest.startsWith(">")
+  ) {
+    return indent;
+  }
+  const ordered = ORDERED_START.exec(rest);
+  // Only a list starting at 1 can interrupt a paragraph, so a later line
+  // needs the escape only for that one.
+  if (ordered !== null && (firstLine || ordered[1] === "1")) {
+    return indent + ordered[1].length;
+  }
+  if (!firstLine && EQUALS_UNDERLINE.test(rest)) return indent;
+  // A delimiter row needs a pipe or a colon (`:-:` alone is one); a line of
+  // only dashes is a setext underline, escaped above.
+  if (
+    !firstLine &&
+    (rest.includes("|") || rest.includes(":")) &&
+    isTableDelimiterRow(rest)
+  ) {
+    return indent + rest.indexOf("-");
+  }
+  return -1;
+}
+
+// Node types whose serializer renders its inline content through
+// `serializeChildren` and therefore escapes it per text node while
+// `inTableCell` is set. Anything else that lands in a cell (mention, image,
+// hard break, unknown nodes) is escaped as a rendered whole, exactly as the
+// entire cell used to be.
+const TABLE_CELL_CONTAINER_TYPES: ReadonlySet<string> = new Set([
+  "paragraph",
+  "heading",
+  "bulletList",
+  "orderedList",
+  "listItem",
+  "taskList",
+  "taskItem",
+  "table",
+]);
+
+/**
+ * Exported for the composer's recovery seam, which quotes a dead send's text
+ * back to its author and is held to PARITY with this serializer: the marks a
+ * resend would carry have to be the marks the recovery copy shows. It reuses
+ * this rather than imitating it because the run discipline below is the
+ * subtle part, and a second implementation would drift from it silently.
+ *
+ * Serializes a run of consecutive inline text nodes, emitting mark
+ * delimiters only where the mark set changes between nodes. Wrapping each
+ * node independently corrupts continuous marks that contain nested marks:
+ * `**bold `code` bold**` splits into three text nodes and would serialize
+ * as `**bold **` + `` **`code`** `` + `** bold**`, whose doubled `****`
+ * runs re-parse as literal asterisks.
+ *
+ * A mark stays open across a boundary when it is still present in the next
+ * node's mark set, regardless of its position there: ProseMirror stores
+ * marks sorted by schema rank, so `[italic]` followed by `[bold, italic]`
+ * is a continuous italic span gaining bold, not an italic/bold swap.
+ *
+ * Newly opened marks nest by continuation length - a mark that spans more
+ * of the remaining run opens first (outermost). Without this, `_**b** i_`
+ * would open bold outside italic (schema-rank order), and bold ending
+ * after "b" would force italic closed and reopened, doubling delimiters.
+ */
+export function serializeTextRun(nodes: JsonContent[]): string {
+  return serializeTextRunWith(nodes, noEscaping);
+}
+
+interface TextSegment {
+  text: string;
+  marks: RenderableMark[];
+}
+
+function sameMarkKeys(a: RenderableMark[], b: RenderableMark[]): boolean {
+  if (a.length !== b.length) return false;
+  const keys = new Set(b.map((mark) => mark.key));
+  return a.every((mark) => keys.has(mark.key));
+}
+
+// Adjacent text nodes carrying the same renderable marks are one continuous
+// span in the output - nothing closes or opens between them under the
+// boundary rules in `serializeTextRunWith` - so they are joined here and
+// escaped as ONE string. For the plain-text cell escape that changes nothing
+// (it is context-free per character), but the inline-code pipe escape reads
+// the backslash PARITY in front of the pipe, and a mark that renders nothing
+// (a thread anchor) can split one code span between a trailing `\` and a
+// leading `|`. Escaped on its own the second node sees no backslash, emits
+// `\|`, and the parser reads `a\\|b` as an even run and splits the cell.
+function coalesceTextSegments(nodes: JsonContent[]): TextSegment[] {
+  const segments: TextSegment[] = [];
+  for (const node of nodes) {
+    if (!node.text) continue;
+    const marks = renderableMarks(node.marks);
+    const last = segments[segments.length - 1];
+    if (last !== undefined && sameMarkKeys(last.marks, marks)) {
+      last.text += node.text;
+    } else {
+      segments.push({ text: node.text, marks });
+    }
+  }
+  return segments;
+}
+
+// `escaping.text` sees each segment's text together with its renderable
+// marks, so a table cell can escape plain text and code text differently
+// (see `tableCellEscaping`); `escaping.delimiter` sees each mark delimiter.
+function serializeTextRunWith(
+  nodes: JsonContent[],
+  escaping: TextRunEscaping,
+): string {
+  const segments = coalesceTextSegments(nodes);
+  const nodeMarks = segments.map((segment) => segment.marks);
+
+  const continuation = (key: string, start: number): number => {
+    let end = start;
+    while (
+      end < nodeMarks.length &&
+      nodeMarks[end].some((mark) => mark.key === key)
+    ) {
+      end++;
+    }
+    return end - start;
+  };
+
+  let out = "";
+  let open: RenderableMark[] = [];
+
+  const closeDownTo = (depth: number): void => {
+    for (let i = open.length - 1; i >= depth; i--) {
+      out += escaping.delimiter(open[i].close);
+    }
+    open = open.slice(0, depth);
+  };
+
+  segments.forEach((segment, index) => {
+    const marks = nodeMarks[index];
+    const nextKeys = new Set(marks.map((mark) => mark.key));
+
+    let keep = 0;
+    while (keep < open.length && nextKeys.has(open[keep].key)) {
+      keep++;
+    }
+    // Inline code renders nested delimiters literally, so nothing may open
+    // inside a kept code mark - close it and reopen it innermost instead.
+    // A kept code mark is always at the top of the stack (code sorts last).
+    const keptKeys = new Set(open.slice(0, keep).map((mark) => mark.key));
+    const hasNewMarks = marks.some((mark) => !keptKeys.has(mark.key));
+    if (hasNewMarks && keep > 0 && open[keep - 1].type === "code") {
+      keep--;
+      keptKeys.delete(open[keep].key);
+    }
+
+    closeDownTo(keep);
+
+    const toOpen = marks
+      .filter((mark) => !keptKeys.has(mark.key))
+      .sort((a, b) => continuation(b.key, index) - continuation(a.key, index));
+    const ordered = [
+      ...toOpen.filter((mark) => mark.type !== "code"),
+      ...toOpen.filter((mark) => mark.type === "code"),
+    ];
+    for (const ordinary of ordered) {
+      const mark = delimitedFor(ordinary, segment.text, escaping);
+      out += escaping.delimiter(mark.open);
+      open.push(mark);
+    }
+    out += escaping.text(segment.text, marks);
+  });
+
+  closeDownTo(0);
+  return out;
+}
+
+// A code span holds exactly one segment's text (see the kept-code rule
+// above), so its backticks are sized here, when it opens: a run longer or
+// shorter than every backtick run in the text, and a space inside each end
+// when the text starts or ends with a backtick or has a space at both ends.
+function delimitedFor(
+  mark: RenderableMark,
+  text: string,
+  escaping: TextRunEscaping,
+): RenderableMark {
+  if (mark.type === "link" && mark.href !== null) {
+    return { ...mark, close: escaping.linkClose(mark.href) };
+  }
+  if (mark.type !== "code" || !escaping.sizeCodeSpans) return mark;
+  const runs = new Set((text.match(/`+/g) ?? []).map((run) => run.length));
+  let length = 1;
+  while (runs.has(length)) length++;
+  const fence = "`".repeat(length);
+  const padded =
+    text.startsWith("`") ||
+    text.endsWith("`") ||
+    (text.length > 1 &&
+      text.startsWith(" ") &&
+      text.endsWith(" ") &&
+      text.trim() !== "");
+  const pad = padded ? " " : "";
+  return { ...mark, open: `${fence}${pad}`, close: `${pad}${fence}` };
+}
+
+function getValidationMarker(nodeId: string, ctx: SerializerContext): string {
+  const validation = ctx.options.validationResults?.get(nodeId);
+  if (!validation) return "";
+  if (!validation.exists) return " [NOT FOUND]";
+  if (validation.isDeleted) return " [DELETED]";
+  return "";
+}
+
+export interface MentionAttrs {
+  contextType: string;
+  id?: string;
+  label?: string;
+  relPath?: string;
+  worktreePath?: string;
+  epicId?: string;
+  organizationLogin?: string;
+  repositoryName?: string;
+  issueNumber?: number;
+  githubHost?: string;
+  branchName?: string;
+  commitHash?: string;
+  gitType?: string;
+  fileName?: string;
+  phaseId?: string;
+  reviewCommentId?: string;
+  terminalId?: string;
+  tabId?: string;
+  botId?: string;
+  botTrunkChatId?: string;
+  commandName?: string;
+  workflowId?: string;
+  b64content?: string;
+  url?: string;
+}
+
+export function formatMentionForDisplayQuery(attrs: MentionAttrs): string {
+  if (!attrs) return "";
+
+  switch (attrs.contextType) {
+    case ContextType.File:
+    case ContextType.Folder:
+      return attrs.relPath || attrs.id || "";
+    case ContextType.Worktree:
+      return attrs.worktreePath || attrs.label || attrs.id || "";
+    case ContextType.Spec: {
+      const title = attrs.label || attrs.id || "";
+      return `spec:${title}`;
+    }
+    case ContextType.Ticket: {
+      const title = attrs.label || attrs.id || "";
+      return `ticket:${title}`;
+    }
+    case ContextType.Story: {
+      const title = attrs.label || attrs.id || "";
+      return `story:${title}`;
+    }
+    case ContextType.Review: {
+      const title = attrs.label || attrs.id || "";
+      return `review:${title}`;
+    }
+    case ContextType.Html: {
+      const title = attrs.label || attrs.id || "";
+      return `html:${title}`;
+    }
+    case ContextType.Canvas: {
+      const title = attrs.label || attrs.id || "";
+      return `canvas:${title}`;
+    }
+    case ContextType.FileArtifact: {
+      const title = attrs.label || attrs.id || "";
+      return `file:${title}`;
+    }
+    case ContextType.Epic: {
+      const title = attrs.label || attrs.id || "";
+      return `epic:${title}`;
+    }
+    case ContextType.GithubIssue:
+    case ContextType.GithubPullRequest: {
+      const org = attrs.organizationLogin || "";
+      const repo = attrs.repositoryName || "";
+      const issue = attrs.issueNumber || "";
+      const reference = `${org}/${repo}#${issue}`;
+      // Same default-host rule as the LLM form below: github.com is what an
+      // unqualified reference already means, while an enterprise reference
+      // with the same coordinates is a different thing and must not read
+      // identically to the human this string is for.
+      if (attrs.githubHost && !isDefaultGithubMentionHost(attrs.githubHost)) {
+        return `${attrs.githubHost}/${reference}`;
+      }
+      return reference;
+    }
+    case ContextType.Git: {
+      const { branchName, commitHash } = attrs;
+      if (branchName) return `git:against_branch:${branchName}`;
+      if (commitHash) return `git:against_commit:${commitHash}`;
+      return "git:against_uncommitted_changes";
+    }
+    case ContextType.Attachment:
+      return `attachment:${attrs.fileName || attrs.label || ""}`;
+    case ContextType.Phase:
+      return `phase:${attrs.phaseId || attrs.id || ""}`;
+    case ContextType.ReviewComment:
+      return `review:${attrs.reviewCommentId || attrs.id || ""}`;
+    case ContextType.WorkflowCommand: {
+      const name = attrs.commandName || attrs.label || "";
+      return `workflow:${name}`;
+    }
+    // Agent is the durable entity a human reads here; Chat and Terminal are
+    // only the interfaces used to reach one. Both arms therefore project as
+    // `agent:` - prefixing by interface (`chat:` / `terminal-agent:`) would
+    // render the two as sibling entity types, which is the model this replaces.
+    // The enum values stay `chat` / `terminal-agent`; only the projection moved.
+    case ContextType.Chat:
+    case ContextType.TerminalAgent: {
+      const title = attrs.label || attrs.id || "";
+      return `agent:${title}`;
+    }
+    case ContextType.Terminal: {
+      const title = attrs.label || attrs.terminalId || attrs.id || "";
+      return `terminal:${title}`;
+    }
+    case ContextType.BrowserTab: {
+      const title = attrs.label || attrs.tabId || attrs.id || "";
+      return `browser-tab:${title}`;
+    }
+    case ContextType.Bot: {
+      const title = attrs.label || attrs.botId || attrs.epicId || "";
+      return `bot:${title}`;
+    }
+    case ContextType.Execution: {
+      const title = attrs.label || attrs.id || "";
+      return `execution:${title}`;
+    }
+    case ContextType.User: {
+      const name = attrs.label || attrs.id || "";
+      return `@${name}`;
+    }
+    default:
+      return attrs.label || attrs.id || "";
+  }
+}
+
+// Narrow `Record<string, unknown>` mention attrs to the typed mention
+// shape at the boundary. The TipTap document schema is open
+// (`attrs: Record<string, unknown>`) but mention nodes always carry a
+// `MentionAttrs`-shaped payload by upstream validation.
+function asMentionAttrs(
+  attrs: Record<string, unknown> | undefined,
+): Partial<MentionAttrs> {
+  return (attrs ?? {}) as Partial<MentionAttrs>;
+}
+
+// Reads a string-typed attribute from a JsonContent `attrs` bag. Returns
+// the empty string when missing or non-string so atom serializers can omit
+// malformed values without special-casing each call site.
+function readStringAttr(
+  attrs: Record<string, unknown> | undefined,
+  key: string,
+): string {
+  const value = attrs?.[key];
+  return typeof value === "string" ? value : "";
+}
+
+// Reads a numeric-typed attribute with a default fallback when the
+// attribute is absent or not a finite number.
+function readNumberAttr(
+  attrs: Record<string, unknown> | undefined,
+  key: string,
+  fallback: number,
+): number {
+  const value = attrs?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function formatMentionForLLMQuery(
+  node: JsonContent,
+  ctx: SerializerContext,
+): string {
+  if (!node.attrs) return "";
+  const attrs = asMentionAttrs(node.attrs);
+
+  const marker = getValidationMarker(attrs.id || "", ctx);
+  const atRef = (value: string): string =>
+    value.length === 0 ? marker.trimStart() : `@${value}${marker}`;
+
+  switch (attrs.contextType) {
+    case ContextType.File:
+    case ContextType.Folder: {
+      return atRef(attrs.relPath || attrs.id || "");
+    }
+    case ContextType.Worktree: {
+      // A worktree lives outside the workspace root, so its absolute
+      // directory is the only path that resolves for the agent.
+      return atRef(attrs.worktreePath || attrs.id || "");
+    }
+    case ContextType.Spec:
+    case ContextType.Ticket:
+    case ContextType.Story:
+    case ContextType.Review:
+    case ContextType.Html:
+    case ContextType.Canvas:
+    case ContextType.FileArtifact:
+      return atRef(requiredArtifactRelPath(attrs));
+    case ContextType.Epic:
+      return atRef(attrs.relPath || `epic:${attrs.epicId || attrs.id || ""}`);
+    case ContextType.GithubIssue:
+    case ContextType.GithubPullRequest: {
+      const org = attrs.organizationLogin || "";
+      const repo = attrs.repositoryName || "";
+      const issue = attrs.issueNumber || "";
+      const prefix =
+        attrs.contextType === ContextType.GithubPullRequest
+          ? "github-pr"
+          : "github-issue";
+      const reference = `@${prefix}:${org}/${repo}#${issue}`;
+      // `url` is still optional on the node, so the suffix is only appended
+      // when there is one. Emitting `[url=]` for a node that predates the
+      // attribute - or for any caller that omits it - turns a reference that
+      // used to serialize cleanly into malformed metadata, and hands the agent
+      // an empty fallback instead of no fallback.
+      if (attrs.url) return `${reference} [url=${attrs.url}]`;
+      // Without a URL, the host is the only thing that can disambiguate an
+      // enterprise reference: `org/repo#123` on ghe.example.com is a different
+      // artifact from the same coordinates on github.com, and the node keeps
+      // `githubHost` even when no `url` was ever set. github.com stays bare -
+      // it is the default every unqualified reference already means, and
+      // qualifying it would churn every serialization that was fine.
+      if (attrs.githubHost && !isDefaultGithubMentionHost(attrs.githubHost)) {
+        return `${reference} [host=${attrs.githubHost}]`;
+      }
+      return reference;
+    }
+    case ContextType.Git: {
+      if (attrs.branchName)
+        return `@git-diff:branch:${attrs.branchName}...HEAD`;
+      if (attrs.commitHash)
+        return `@git-diff:commit:${attrs.commitHash}...HEAD`;
+      return "@git-diff:working-tree";
+    }
+    case ContextType.Attachment:
+      return `attachment:${attrs.fileName || attrs.label || attrs.id || ""}`;
+    case ContextType.Phase:
+      return `phase:${attrs.phaseId || attrs.id || ""}`;
+    case ContextType.ReviewComment:
+      return `review:${attrs.reviewCommentId || attrs.id || ""}`;
+    case ContextType.WorkflowCommand: {
+      // Support both lean attrs (id="wfId/cmdName") and rich attrs (workflowId+commandName)
+      if (attrs.id) {
+        return `workflow:${attrs.id}`;
+      }
+      const wfId = attrs.workflowId || "";
+      const cmdName = attrs.commandName || "";
+      return cmdName ? `workflow:${wfId}/${cmdName}` : `workflow:${wfId}`;
+    }
+    // Both Agent interfaces share this arm deliberately. "Refer to Agent B"
+    // must mean the same thing to the coding agent whether B uses the Chat or
+    // the Terminal interface, so both emit the interface-agnostic `@agent:`
+    // marker plus the durable id the agent needs for `traycer_send_message` /
+    // `traycer_get_transcript`. Falling through to `default:` dropped the id
+    // entirely and handed the runtime a bare title.
+    case ContextType.Chat:
+    case ContextType.TerminalAgent: {
+      const agentId = attrs.id || "";
+      const title = attrs.label || "untitled";
+      return agentId.length === 0
+        ? `@agent:${title} [agentId is unavailable]`
+        : `@agent:${title} [agentId=${agentId}]`;
+    }
+    // Mirrors the agent arm above: a human-readable title so the reference
+    // reads as the user wrote it, plus the durable id the read tools address
+    // (`traycer_read_terminal`, `traycer terminal output`). Without the id the
+    // runtime is handed a bare title it cannot resolve.
+    case ContextType.Terminal: {
+      const terminalId = attrs.terminalId || attrs.id || "";
+      const title = attrs.label || "untitled";
+      return terminalId.length === 0
+        ? `@terminal:${title} [terminalId is unavailable]`
+        : `@terminal:${title} [terminalId=${terminalId}]`;
+    }
+    // Mirrors the terminal arm above exactly: a browser tab is readable but
+    // not addressable as an Agent, so it gets the same title+id shape rather
+    // than the `@agent:` projection.
+    case ContextType.BrowserTab: {
+      const tabId = attrs.tabId || attrs.id || "";
+      const title = attrs.label || "untitled";
+      return tabId.length === 0
+        ? `@browser-tab:${title} [tabId is unavailable]`
+        : `@browser-tab:${title} [tabId=${tabId}]`;
+    }
+    // The ids travel in the text, as a GitHub mention carries its URL: an
+    // agent cannot list bots, and messages one with the bot id as `taskId`
+    // and the trunk agent id as `toAgentId`.
+    case ContextType.Bot: {
+      const botId = attrs.botId || attrs.epicId || "";
+      const trunkChatId = attrs.botTrunkChatId || "";
+      const title = attrs.label || "untitled";
+      if (botId.length === 0) return `@bot:${title} (bot id is unavailable)`;
+      return trunkChatId.length === 0
+        ? `@bot:${title} (bot ${botId})`
+        : `@bot:${title} (bot ${botId}, trunk agent ${trunkChatId})`;
+    }
+    case ContextType.Execution: {
+      const epicPart = attrs.epicId ? `${attrs.epicId}/` : "";
+      return `execution:${epicPart}${attrs.id}${marker}`;
+    }
+    case ContextType.User: {
+      const name = attrs.label || attrs.id || "";
+      return `@${name}`;
+    }
+    default:
+      return attrs.label || attrs.id || "";
+  }
+}
+
+function requiredArtifactRelPath(attrs: Partial<MentionAttrs>): string {
+  if (attrs.relPath && attrs.relPath.length > 0) return attrs.relPath;
+  throw new Error(
+    `Artifact mention is missing resolved path: contextType=${attrs.contextType ?? ""} id=${attrs.id ?? ""}`,
+  );
+}
+
+function formatMentionForUser(
+  node: JsonContent,
+  ctx: SerializerContext,
+): string {
+  if (!node.attrs) return "";
+  const attrs = asMentionAttrs(node.attrs);
+
+  const marker = getValidationMarker(attrs.id || "", ctx);
+
+  // For files/folders, prefer relPath over absolute path
+  if (
+    attrs.contextType === ContextType.File ||
+    attrs.contextType === ContextType.Folder
+  ) {
+    const displayPath = attrs.relPath || attrs.id || "";
+    return `\`${displayPath}\`${marker}`;
+  }
+
+  if (attrs.contextType === ContextType.Worktree) {
+    const displayPath = attrs.worktreePath || attrs.label || attrs.id || "";
+    return `\`${displayPath}\`${marker}`;
+  }
+
+  if (attrs.contextType === ContextType.User) {
+    const name = attrs.label || attrs.id || "";
+    return `@${name}`;
+  }
+
+  // GitHub references carry their durable URL in the LLM form and are never
+  // materialized against this host. Unlike file/artifact references, a stale
+  // validation result must not append `[NOT FOUND]` to either kind of chip.
+  if (
+    attrs.contextType === ContextType.GithubIssue ||
+    attrs.contextType === ContextType.GithubPullRequest
+  ) {
+    const formatted = formatMentionForDisplayQuery({
+      ...attrs,
+      contextType: attrs.contextType,
+    });
+    return `\`${formatted}\``;
+  }
+
+  // Use shared formatting for all other types. `contextType` is
+  // guaranteed by upstream validation; default to empty so the helper
+  // falls through to its `default` branch on malformed inputs.
+  const formatted = formatMentionForDisplayQuery({
+    ...attrs,
+    contextType: attrs.contextType ?? "",
+  });
+  return `\`${formatted}\`${marker}`;
+}
+
+function serializeMention(node: JsonContent, ctx: SerializerContext): string {
+  if (ctx.options.mentionFormat === "llm") {
+    return formatMentionForLLMQuery(node, ctx);
+  }
+  return formatMentionForUser(node, ctx);
+}
+
+function serializeSlashCommand(
+  node: JsonContent,
+  ctx: SerializerContext,
+): string {
+  if (ctx.options.mentionFormat === "llm") {
+    return "";
+  }
+  const commandName = readStringAttr(node.attrs, "commandName");
+  return `/${commandName}`;
+}
+
+function serializeText(node: JsonContent): string {
+  if (node.type !== "text" || !node.text) return "";
+  return serializeTextRun([node]);
+}
+
+// A bare newline is a soft break to the parser: in artifact Markdown, which
+// is parsed back, the hard break would come back as a newline inside the
+// text. A backslash before the newline is CommonMark's hard break, and reads
+// back as one. A table cell keeps the bare newline: it cannot hold a line
+// break at all.
+// A heading is one line, so on the artifact path its hard break is written
+// as `<br>`, which the reader reads back as one (a typed `<br>` is escaped
+// by the inline rules, so it reads back as text).
+function serializeHardBreak(ctx: SerializerContext): string {
+  if (ctx.escapeText && ctx.inHeading) return "<br>";
+  return ctx.escapeText && !ctx.inTableCell ? "\\\n" : "\n";
+}
+
+function serializeCodeBlock(node: JsonContent, ctx: SerializerContext): string {
+  const language = readStringAttr(node.attrs, "language");
+  const indent = getIndent(ctx);
+  let code = "";
+
+  if (node.content) {
+    code = node.content
+      .map((child) => (child.type === "text" ? child.text || "" : ""))
+      .join("");
+  }
+
+  if (code.endsWith("\n")) {
+    code = code.slice(0, -1);
+  }
+
+  const lines = code.split("\n");
+  const indentedCode = lines.map((line) => `${indent}${line}`).join("\n");
+  const fence = fenceFor(code, language, ctx);
+
+  return `${indent}${fence}${language}\n${indentedCode}\n${indent}${fence}`;
+}
+
+// On the artifact path a fence is longer than every run of its character in
+// the content, so no line of the content can close it early; a language that
+// holds a backtick takes a tilde fence, since a backtick fence's info string
+// cannot. The prompt path keeps its three backticks.
+function fenceFor(
+  content: string,
+  language: string,
+  ctx: SerializerContext,
+): string {
+  if (!ctx.escapeText) return "```";
+  const char = language.includes("`") ? "~" : "`";
+  const runs = content.match(char === "`" ? /`+/g : /~+/g) ?? [];
+  const longest = runs.reduce((max, run) => Math.max(max, run.length), 0);
+  return char.repeat(Math.max(3, longest + 1));
+}
+
+function serializeMermaidBlock(
+  node: JsonContent,
+  ctx: SerializerContext,
+): string {
+  const indent = getIndent(ctx);
+  const code = readStringAttr(node.attrs, "code");
+  const lines = code.split("\n");
+  const indentedCode = lines.map((line) => `${indent}${line}`).join("\n");
+  const fence = fenceFor(code, "mermaid", ctx);
+  return `${indent}${fence}mermaid\n${indentedCode}\n${indent}${fence}`;
+}
+
+function serializeUIPreviewBlock(
+  node: JsonContent,
+  ctx: SerializerContext,
+): string {
+  const indent = getIndent(ctx);
+  const htmlContent = readStringAttr(node.attrs, "htmlContent");
+  const lines = htmlContent.split("\n");
+  const indentedHtml = lines.map((line) => `${indent}${line}`).join("\n");
+  const fence = fenceFor(htmlContent, "wireframe", ctx);
+  return `${indent}${fence}wireframe\n${indentedHtml}\n${indent}${fence}`;
+}
+
+function serializeHeading(node: JsonContent, ctx: SerializerContext): string {
+  const level = readNumberAttr(node.attrs, "level", 1);
+  const prefix = "#".repeat(level);
+  const content = serializeChildren(node.content, { ...ctx, inHeading: true });
+  return `${prefix} ${ctx.escapeText ? withoutClosingSequence(content) : content}`;
+}
+
+// A run of `#` at the end of an ATX heading, after a space or tab or as its
+// whole content, is the optional closing sequence (CommonMark 4.2), which the
+// parser drops - so heading text `Title #` written as is reads back `Title`.
+// Escaping the run's first `#` leaves no unescaped run behind a space.
+function withoutClosingSequence(content: string): string {
+  return content.replace(/(^|[ \t])(#+[ \t]*)$/, "$1\\$2");
+}
+
+/** An image's alt text and source, as an artifact reader reads it back. */
+export interface ArtifactImage {
+  readonly alt: string;
+  readonly src: string;
+}
+
+/**
+ * A destination as artifact Markdown writes it, for image nodes, fallback text
+ * and link marks alike: bare when the source holds nothing a bare
+ * destination cannot carry as written, else bracketed with `<`, `>` and `\`
+ * escaped. Both artifact readers decode either back to the exact source
+ * (pinned by the differential tests).
+ */
+function markdownDestination(src: string): string {
+  return /[\s()<>\\\x00-\x1f\x7f]/.test(src)
+    ? `<${src.replace(/[<>\\]/g, "\\$&")}>`
+    : src;
+}
+
+/**
+ * The paragraph text the host keeps in place of an artifact image it cannot
+ * resolve yet (a missing file, a failed download): the image's own Markdown,
+ * `![alt](dest)`, with the alt's brackets escaped and the destination as
+ * `markdownDestination` writes it. The host builds its fallback with this, so
+ * the serializer recognizes it by exact equality.
+ */
+export function unresolvedArtifactImageText(alt: string, src: string): string {
+  return `![${alt.replace(/[[\]]/g, "\\$&")}](${markdownDestination(src)})`;
+}
+
+/**
+ * The exact inverse of `unresolvedArtifactImageText`, in one linear pass: the
+ * image whose fallback text `text` is, or `null` when it is not one, or is one
+ * the artifact readers do not read back as exactly that image. It accepts only
+ * the part of marked's image grammar the producer writes - escape pairs and
+ * backtick code spans in the label, a bare or bracketed destination - and
+ * rejects every shape the readers would read as something else: a backslash
+ * that escapes the label's closing bracket, an unmatched backtick, an
+ * unescaped bracket, a carriage return or NUL (the readers rewrite both), and
+ * a label line a paragraph would not carry as written. The differential tests
+ * pin "accepted means both readers read back exactly this image".
+ */
+export function decodeUnresolvedArtifactImageText(
+  text: string,
+): ArtifactImage | null {
+  if (!text.startsWith("![") || /[\r\x00]/.test(text)) return null;
+  const end = text.length;
+  let i = 2;
+  for (;;) {
+    if (i >= end) return null;
+    const char = text[i];
+    if (char === "]") break;
+    if (char === "[") return null;
+    if (char === "\\") {
+      i += 2;
+      continue;
+    }
+    if (char === "`") {
+      // A code span: this run, then everything up to the next run, which
+      // closes it whatever its length; inside it a bracket closes nothing.
+      let close = i;
+      while (close < end && text[close] === "`") close++;
+      while (close < end && text[close] !== "`") close++;
+      if (close >= end) return null;
+      while (close < end && text[close] === "`") close++;
+      i = close;
+      continue;
+    }
+    i++;
+  }
+  const label = text.slice(2, i);
+  if (text[i + 1] !== "(" || !labelLinesStayInParagraph(label)) return null;
+  i += 2;
+  let src = "";
+  if (text[i] === "<") {
+    i++;
+    for (;;) {
+      if (i >= end) return null;
+      const char = text[i];
+      if (char === ">") break;
+      if (char === "\n" || char === "<") return null;
+      if (char === "\\") {
+        const escaped = text[i + 1];
+        if (escaped !== "<" && escaped !== ">" && escaped !== "\\") return null;
+        src += escaped;
+        i += 2;
+        continue;
+      }
+      src += char;
+      i++;
+    }
+    i++;
+  } else {
+    src = text.slice(i, end - 1);
+    i = end - 1;
+  }
+  if (i !== end - 1 || text[i] !== ")") return null;
+  const alt = label.replace(/\\([[\]])/g, "$1");
+  return unresolvedArtifactImageText(alt, src) === text ? { alt, src } : null;
+}
+
+// What ends a paragraph, or turns it into something else, at the start of a
+// continuation line: an ATX heading, a fence, a quote, a bullet or an ordered
+// item (a list starting at any number: inside a list item the host's parser
+// opens one there), an HTML block, and a line of only rule, setext or table
+// delimiter characters (a thematic break, a setext underline, a GFM delimiter
+// row that makes the line above a table header). The delimiter-only lines are
+// matched by a scan: as a regex, two runs of those characters around a
+// required one backtrack quadratically on a long near-match.
+const PARAGRAPH_ENDING_START =
+  /^(?:#{1,6}(?:[ \t]|$)|`{3,}|~{3,}|>|[*+-](?:[ \t]|$)|[0-9]{1,9}[.)](?:[ \t]|$)|<)/;
+
+function endsParagraph(line: string): boolean {
+  return PARAGRAPH_ENDING_START.test(line) || isDelimiterOnlyLine(line);
+}
+
+function isDelimiterOnlyLine(line: string): boolean {
+  let sawDelimiter = false;
+  for (const char of line) {
+    if (char === "-" || char === "=" || char === "*" || char === "_") {
+      sawDelimiter = true;
+    } else if (char !== "|" && char !== ":" && !isSpaceOrTab(char)) {
+      return false;
+    }
+  }
+  return sawDelimiter;
+}
+
+function isSpaceOrTab(char: string | undefined): boolean {
+  return char === " " || char === "\t";
+}
+
+// Every line of a label after its first is a paragraph continuation line, so
+// it must not be blank, must not start with whitespace (the paragraph strips
+// it) or with what ends the paragraph, and the line before it must not end in
+// whitespace.
+function labelLinesStayInParagraph(label: string): boolean {
+  const lines = label.split("\n");
+  for (let index = 1; index < lines.length; index++) {
+    const line = lines[index];
+    if (
+      line === "" ||
+      /^\s/.test(line) ||
+      endsParagraph(line) ||
+      isSpaceOrTab(lines[index - 1].at(-1))
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Written back raw, the host's fallback text for an unresolved image parses
+// as that image again on the next read, which is how a later write retries
+// it; escaped, it stays text for good. So a paragraph whose only content is
+// one unmarked text node that decodes as a fallback is written raw - where
+// `imageKept` says the ingest keeps the block image it reads back as. Any
+// other paragraph, and a fallback anywhere else, is escaped like any other
+// text and reads back as the same text.
+function unresolvedImageSourceText(node: JsonContent): string | null {
+  const only = node.content?.length === 1 ? node.content[0] : undefined;
+  if (
+    only?.type !== "text" ||
+    typeof only.text !== "string" ||
+    (only.marks?.length ?? 0) > 0
+  ) {
+    return null;
+  }
+  return decodeUnresolvedArtifactImageText(only.text) === null
+    ? null
+    : only.text;
+}
+
+// A hard break that ends a paragraph breaks no line, and CommonMark has no
+// way to write one: `\` before the paragraph's end reads back as a literal
+// backslash the person never typed. So the artifact form leaves it out, and
+// the paragraph reads back without it. "Ends" counts what renders as nothing:
+// unmarked text of only spaces and tabs is trimmed off the line anyway, so a
+// hard break before it would end the paragraph's text all the same.
+function withoutTrailingHardBreaks(
+  content: JsonContent[] | undefined,
+): JsonContent[] | undefined {
+  if (content === undefined) return undefined;
+  let end = content.length;
+  while (end > 0 && rendersAsParagraphEnd(content[end - 1])) end--;
+  return end === content.length ? content : content.slice(0, end);
+}
+
+function rendersAsParagraphEnd(node: JsonContent | undefined): boolean {
+  return (
+    node?.type === "hardBreak" ||
+    (node?.type === "text" &&
+      (node.marks?.length ?? 0) === 0 &&
+      /^[ \t]*$/.test(node.text ?? ""))
+  );
+}
+
+function serializeParagraph(node: JsonContent, ctx: SerializerContext): string {
+  const indent = ctx.inListItem ? "" : getIndent(ctx);
+  if (ctx.escapeText && ctx.imageKept && !ctx.inTableCell) {
+    const fallback = unresolvedImageSourceText(node);
+    if (fallback !== null) return `${indent}${fallback}`;
+  }
+  const children = serializeChildren(
+    ctx.escapeText && !ctx.inTableCell
+      ? withoutTrailingHardBreaks(node.content)
+      : node.content,
+    ctx,
+  );
+  const content =
+    ctx.escapeText && !ctx.inTableCell
+      ? escapeParagraphLineStarts(children, ctx.inListItem)
+      : children;
+  return `${indent}${content}`;
+}
+
+function serializeBlockquote(node: JsonContent): string {
+  const quoteLines: string[] = [];
+
+  if (node.content) {
+    for (const child of node.content) {
+      quoteLines.push(extractTextFromNode(child));
+    }
+  }
+
+  const quoted = quoteLines.join("\n");
+  const escapedContent = escapeXmlContent(quoted);
+
+  return `<user_quoted_section>${escapedContent}</user_quoted_section>`;
+}
+
+// An artifact's quote is written as a markdown block quote, its blocks and
+// marks intact, because the artifact is parsed back into the same document.
+// The `<user_quoted_section>` form above is a prompt format: it flattens the
+// quote to plain text, and re-parsed it is a paragraph of literal tag text,
+// so the quote and its formatting were gone after one pass.
+function serializeArtifactBlockquote(
+  node: JsonContent,
+  ctx: SerializerContext,
+): string {
+  // The quote's own `> ` prefix starts its lines afresh, so a list inside it
+  // starts at column zero whatever list the quote itself sits in, and its
+  // content is not a task item's even when the quote is inside one.
+  const quoteCtx: SerializerContext = {
+    ...ctx,
+    listDepth: 0,
+    listColumn: 0,
+    inListItem: false,
+  };
+  const blocks = (node.content ?? [])
+    .map((child) => serializeNode(child, quoteCtx))
+    .filter((block) => block.length > 0);
+  return blocks
+    .join("\n\n")
+    .split("\n")
+    .map((line) => (line.length > 0 ? `> ${line}` : ">"))
+    .join("\n");
+}
+
+function serializeSourcedQuote(node: JsonContent): string {
+  const sourceType = readStringAttr(node.attrs, "sourceType");
+  const sourceId = readStringAttr(node.attrs, "sourceId");
+  const sourceEpicId = readStringAttr(node.attrs, "sourceEpicId");
+  const quoteLines: string[] = [];
+
+  if (node.content) {
+    for (const child of node.content) {
+      quoteLines.push(extractTextFromNode(child));
+    }
+  }
+
+  const quoted = quoteLines.join("\n");
+  const escapedArtifactType = escapeXmlAttr(sourceType);
+  const escapedArtifactId = escapeXmlAttr(sourceId);
+  const escapedEpicId = escapeXmlAttr(sourceEpicId);
+  const escapedContent = escapeXmlContent(quoted);
+
+  return `<quoted_artifact artifact_type="${escapedArtifactType}" artifact_id="${escapedArtifactId}" epic_id="${escapedEpicId}">${escapedContent}</quoted_artifact>`;
+}
+
+/**
+ * A thematic break. Under a line of text it would be a setext heading
+ * underline, so a list item writes a blank line before it; at the top level
+ * blocks are already a blank line apart.
+ */
+const THEMATIC_BREAK = "---";
+
+function extractTextFromNode(node: JsonContent): string {
+  if (node.type === "horizontalRule") return THEMATIC_BREAK;
+  let text = "";
+  if (node.type === "text" && node.text) {
+    text += node.text;
+  } else if (node.content) {
+    for (const child of node.content) {
+      text += extractTextFromNode(child);
+    }
+  }
+  return text;
+}
+
+function serializeBulletList(
+  node: JsonContent,
+  ctx: SerializerContext,
+): string {
+  const items: string[] = [];
+  const childCtx: SerializerContext = {
+    ...ctx,
+    listDepth: ctx.listDepth + 1,
+    imageKept: ctx.imageKept && ctx.imageListKind !== "ordered",
+    imageListKind: "bullet",
+  };
+
+  if (node.content) {
+    for (const child of node.content) {
+      if (child.type === "listItem") {
+        items.push(serializeListItem(child, childCtx, false, 0));
+      }
+    }
+  }
+
+  return items.join("\n");
+}
+
+function serializeOrderedList(
+  node: JsonContent,
+  ctx: SerializerContext,
+): string {
+  const items: string[] = [];
+  const childCtx: SerializerContext = {
+    ...ctx,
+    listDepth: ctx.listDepth + 1,
+    imageKept: ctx.imageKept && ctx.imageListKind !== "bullet",
+    imageListKind: "ordered",
+  };
+
+  if (node.content) {
+    let index = readNumberAttr(node.attrs, "start", 1);
+    for (const child of node.content) {
+      if (child.type === "listItem") {
+        items.push(serializeListItem(child, childCtx, true, index));
+        index++;
+      }
+    }
+  }
+
+  return items.join("\n");
+}
+
+function serializeTaskList(node: JsonContent, ctx: SerializerContext): string {
+  const items: string[] = [];
+  const childCtx: SerializerContext = {
+    ...ctx,
+    listDepth: ctx.listDepth + 1,
+    imageKept: false,
+  };
+
+  if (node.content) {
+    for (const child of node.content) {
+      if (child.type === "taskItem") {
+        items.push(serializeTaskItem(child, childCtx));
+      }
+    }
+  }
+
+  return items.join("\n");
+}
+
+// `- [ ] ` / `- [x] `, the GFM task list item the artifact parser reads back
+// as `taskItem` with `checked`. Continuation lines indent to the bullet's
+// content column, not past the checkbox: four more columns would re-parse
+// them as an indented code block.
+function serializeTaskItem(node: JsonContent, ctx: SerializerContext): string {
+  const checked = node.attrs?.checked === true;
+  return serializeListItemWithMarker(
+    node,
+    ctx,
+    ctx.options.bulletMarker ?? "-",
+    checked ? "[x] " : "[ ] ",
+  );
+}
+
+function serializeListItem(
+  node: JsonContent,
+  ctx: SerializerContext,
+  ordered: boolean,
+  index: number,
+): string {
+  const marker = ordered ? `${index}.` : (ctx.options.bulletMarker ?? "-");
+  return serializeListItemWithMarker(node, ctx, marker, "");
+}
+
+const LIST_BLOCK_TYPES: ReadonlySet<string> = new Set([
+  "bulletList",
+  "orderedList",
+  "taskList",
+]);
+
+const BARE_BULLET_LINE = /^[ \t]*[-*+][ \t]*$/;
+
+/**
+ * The space after an empty task or ordered item's marker, as the list
+ * serializer writes it: `- [ ]` alone re-parses as a bullet item whose text is
+ * `[ ]`, losing the checkbox, and `1.` alone is not an ordered item to the
+ * artifact parser, which needs whitespace after the number. Trailing spaces are
+ * trimmed from every line, so this one is written as a placeholder that
+ * `normalizeMarkdown` turns back into a space afterwards, on exactly the lines
+ * the list serializer marked, never on text that merely looks like a marker.
+ *
+ * The placeholder is chosen against the document as rendered without it (see
+ * `renderMarkdown`), so it occurs nowhere else in the output, including where
+ * separate text nodes render side by side: the first noncharacter or
+ * private-use code point that rendering does not contain, else the first pair
+ * of them that never occurs side by side in it. A pair is always free: a string
+ * holds fewer adjacent pairs than the 71,966 squared there are. The placeholder
+ * sits only between a marker and a line end, ASCII on one side and a line
+ * break on the other, so no occurrence can straddle it either.
+ */
+function keptMarkerSpaceFor(rendered: string): string {
+  const codePoints = Array.from(rendered, (char) => char.codePointAt(0) ?? 0);
+  const present = new Set(codePoints);
+  for (const candidate of keptMarkerSpaceCandidates()) {
+    if (!present.has(candidate)) return String.fromCodePoint(candidate);
+  }
+  const pairs = new Set<number>();
+  for (let index = 1; index < codePoints.length; index++) {
+    pairs.add(codePoints[index - 1] * CODE_POINT_SPAN + codePoints[index]);
+  }
+  for (const first of keptMarkerSpaceCandidates()) {
+    for (const second of keptMarkerSpaceCandidates()) {
+      if (!pairs.has(first * CODE_POINT_SPAN + second)) {
+        return String.fromCodePoint(first, second);
+      }
+    }
+  }
+  throw new Error("jsonContentToMarkdown: a free placeholder pair must exist");
+}
+
+const CODE_POINT_SPAN = 0x110000;
+
+const KEPT_MARKER_SPACE_RANGES: ReadonlyArray<readonly [number, number]> = [
+  [0xfdd0, 0xfdef],
+  [0xe000, 0xf8ff],
+  [0xf0000, 0xffffd],
+];
+
+function* keptMarkerSpaceCandidates(): Generator<number> {
+  for (const [first, last] of KEPT_MARKER_SPACE_RANGES) {
+    for (let codePoint = first; codePoint <= last; codePoint++) {
+      yield codePoint;
+    }
+  }
+}
+
+// The marker may sit behind containers on its own line: an artifact quote
+// writes its lines behind `> ` (`serializeArtifactBlockquote`), and a quote or
+// list that is a list item's first block starts on the item's marker line
+// (`- > - [ ]`). The placeholder is absent from everything else the rendering
+// wrote, so a line ending in it is always one of these.
+function keptMarkerSpaceLine(keptMarkerSpace: string): RegExp {
+  return new RegExp(
+    `^((?:[ \\t]*(?:>|(?:[-*+]|\\d{1,9}[.)])(?: \\[[ xX]\\])? ))*[ \\t]*(?:[-*+] \\[[ xX]\\]|\\d{1,9}[.)]))${keptMarkerSpace}$`,
+    "gmu",
+  );
+}
+
+/** The number an ordered list item's line starts with, if it is one. */
+const ORDERED_MARKER_LINE = /^[ \t]*(\d{1,9})[.)]/;
+
+/**
+ * Whether a nested list's first line, directly under a line of text, would
+ * read back as that text: a bare `-` is a setext heading underline, and an
+ * ordered marker other than 1 cannot interrupt a paragraph.
+ */
+function readsAsTextUnderText(firstLine: string): boolean {
+  // Any bullet marker alone: `-` is also a setext underline, and an empty
+  // item of any marker cannot interrupt a paragraph.
+  if (BARE_BULLET_LINE.test(firstLine)) return true;
+  const ordered = ORDERED_MARKER_LINE.exec(firstLine);
+  return ordered !== null && Number(ordered[1]) !== 1;
+}
+
+const SELF_INDENTING_BLOCK_TYPES: ReadonlySet<string> = new Set([
+  "codeBlock",
+  "mermaidBlock",
+  "uiPreviewBlock",
+]);
+
+function serializeListItemWithMarker(
+  node: JsonContent,
+  ctx: SerializerContext,
+  marker: string,
+  checkbox: string,
+): string {
+  const baseIndent = " ".repeat(ctx.listColumn);
+
+  const lines: string[] = [];
+  let firstLine = true;
+  let markerOnly = false;
+
+  const itemCtx: SerializerContext = {
+    ...ctx,
+    inListItem: true,
+  };
+
+  const continuationIndent = " ".repeat(baseIndent.length + marker.length + 1);
+  // A nested list starts at this item's content column, never short of it:
+  // under `1. ` a list at two columns is not inside the item, and a parser
+  // that strips the content column from it moves it on every pass.
+  const nestedListCtx: SerializerContext = {
+    ...itemCtx,
+    listColumn:
+      baseIndent.length +
+      Math.max(ctx.options.listIndent ?? 2, marker.length + 1),
+  };
+
+  const markerLine = `${baseIndent}${marker} ${checkbox}`;
+  // An ordered or task marker line with nothing after it keeps its space
+  // (see `keptMarkerSpaceFor`); a bare bullet marker needs none.
+  const keepsMarkerSpace = checkbox !== "" || ORDERED_MARKER_LINE.test(marker);
+  const emptyMarkerLine = (): string => {
+    if (!keepsMarkerSpace) return markerLine.trimEnd();
+    ctx.keptMarkerSpaceUses.count += 1;
+    return `${markerLine.trimEnd()}${ctx.keptMarkerSpace}`;
+  };
+
+  if (node.content) {
+    for (const [childIndex, child] of node.content.entries()) {
+      // A fenced block indents itself by list depth; under an item it takes
+      // the continuation indent below instead, or every round trip would
+      // push it one level deeper.
+      const fenced = SELF_INDENTING_BLOCK_TYPES.has(child.type ?? "");
+      const isList = LIST_BLOCK_TYPES.has(child.type ?? "");
+      const rule = child.type === "horizontalRule";
+      const childCtx = fenced
+        ? { ...itemCtx, listDepth: 0 }
+        : isList
+          ? nestedListCtx
+          : itemCtx;
+      // The item's first block is read on its marker line, where the readers
+      // put an image inside the paragraph (see `imageKept`).
+      const serialized = serializeNode(
+        child,
+        childIndex === 0 ? { ...childCtx, imageKept: false } : childCtx,
+      );
+      const childLines = serialized.split("\n");
+
+      if (firstLine) {
+        if (fenced || isList || rule) {
+          // A fence or a list as the item's FIRST child starts on the line
+          // after an empty marker line: the ordered and task item parsers read
+          // an item's first line as a paragraph, so a fence opened on the
+          // marker line comes back as text, and a list there comes back as
+          // text, a code block or a list split in two. The empty marker line
+          // is also exactly what an item whose first paragraph is empty
+          // writes, so both shapes read back the same. A nested list already
+          // carries the content column. A rule behind the marker would read as
+          // one rule (`- ---`), not an item holding one.
+          lines.push(emptyMarkerLine());
+          for (const line of childLines) {
+            lines.push(isList ? line : `${continuationIndent}${line}`);
+          }
+        } else {
+          // Every line after the marker line sits at the content column. A
+          // hard break is a bare "\n", and the line after it at column zero
+          // is not inside the item: the task item parser reads only the
+          // marker line as the item's paragraph, so the rest of it leaves the
+          // item.
+          const [head, ...rest] = childLines;
+          lines.push(head === "" ? emptyMarkerLine() : `${markerLine}${head}`);
+          for (const line of rest) {
+            lines.push(`${continuationIndent}${line}`);
+          }
+          markerOnly = serialized === "";
+        }
+        firstLine = false;
+      } else {
+        // A later paragraph is its own paragraph only behind a blank line:
+        // directly under the line before, it reads back as that line's
+        // continuation, and on the next pass falls out of the item. Behind
+        // a marker line with nothing on it the blank line would end the item
+        // instead (an item opens with at most one blank line), so there the
+        // paragraph follows directly and reads back as the item's own. An
+        // artifact image needs the blank line too: it cannot interrupt a
+        // paragraph, so directly under a line of text, a quote or a nested
+        // item it reads back inside that block's paragraph, where the schema
+        // drops it and the list with it.
+        const ownBlock =
+          child.type === "paragraph" ||
+          (ctx.escapeText && child.type === "image");
+        if (ownBlock && !markerOnly) lines.push("");
+        const underMarkerOnly = markerOnly;
+        markerOnly = false;
+        // A nested list that opens with an empty bullet item starts with a
+        // bare `-` line, and directly under a line of text that reads as a
+        // setext heading underline: the item's paragraph would come back as
+        // a heading. One that starts at a number other than 1 reads as more
+        // of that text, since only a 1 interrupts a paragraph. A blank line
+        // before the list keeps it a list. Under a marker line with nothing on
+        // it there is no text, and a blank line there would end the item.
+        // A rule under a line of text would be that text's setext underline,
+        // so it takes a blank line too.
+        if (
+          (rule || (isList && readsAsTextUnderText(childLines[0] ?? ""))) &&
+          !underMarkerOnly &&
+          lines.length > 0 &&
+          lines[lines.length - 1] !== ""
+        ) {
+          lines.push("");
+        }
+        for (const line of childLines) {
+          lines.push(isList ? line : `${continuationIndent}${line}`);
+        }
+      }
+    }
+  }
+
+  // An item with no children still holds its place: the ordered item parser
+  // gives `2. ` with nothing after it no paragraph, and dropping the line
+  // would split the list around it.
+  if (lines.length === 0) lines.push(emptyMarkerLine());
+
+  return lines.join("\n");
+}
+
+/**
+ * A rendered cell as one line of its row. A hard break, or a list's or a later
+ * block's line break, would end the row there and spill the rest of the cell
+ * below the table, so every line break is written `<br>`, GFM's line break in
+ * a cell. A `<br>` the user typed is escaped as text (`escapeTableCellText`),
+ * so it cannot read back as one. An empty item's kept marker space is a plain
+ * space here.
+ */
+function tableCellLine(rendered: string, keptMarkerSpace: string): string {
+  const spaced =
+    keptMarkerSpace === ""
+      ? rendered
+      : rendered.split(keptMarkerSpace).join(" ");
+  return spaced.replace(/\n/g, "<br>");
+}
+
+function serializeTable(node: JsonContent, ctx: SerializerContext): string {
+  if (!node.content) return "";
+
+  const rows: string[][] = [];
+  let headerRow: string[] | null = null;
+
+  for (const row of node.content) {
+    if (row.type !== "tableRow") continue;
+
+    const cells: string[] = [];
+    let isHeader = false;
+
+    if (row.content) {
+      for (const cell of row.content) {
+        if (cell.type === "tableHeader") {
+          isHeader = true;
+        }
+        // Escaping happens per text node under `inTableCell` (mark-aware, see
+        // `escapeTableCellRun`) - never on the rendered cell string, which
+        // cannot tell code text from plain text.
+        cells.push(
+          tableCellLine(
+            serializeChildren(cell.content, { ...ctx, inTableCell: true }),
+            ctx.keptMarkerSpace,
+          ),
+        );
+      }
+    }
+
+    if (isHeader && !headerRow) {
+      headerRow = cells;
+    } else {
+      rows.push(cells);
+    }
+  }
+
+  const lines: string[] = [];
+
+  if (headerRow) {
+    lines.push(`| ${headerRow.join(" | ")} |`);
+    lines.push(`| ${headerRow.map(() => "---").join(" | ")} |`);
+  }
+
+  for (const row of rows) {
+    lines.push(`| ${row.join(" | ")} |`);
+  }
+
+  return lines.join("\n");
+}
+
+function serializeChildren(
+  content: JsonContent[] | undefined,
+  ctx: SerializerContext,
+): string {
+  if (!content) return "";
+
+  // Consecutive text nodes serialize as one run so mark delimiters land only
+  // where the mark set actually changes; non-text inline nodes (mention,
+  // hardBreak, …) end the run and close any open marks.
+  const parts: string[] = [];
+  let textRun: JsonContent[] = [];
+  const escaping = ctx.inTableCell
+    ? ctx.escapeText
+      ? artifactTableCellEscaping
+      : tableCellEscaping
+    : ctx.escapeText
+      ? artifactTextEscaping
+      : noEscaping;
+  const flushTextRun = (): void => {
+    if (textRun.length > 0) {
+      parts.push(serializeTextRunWith(textRun, escaping));
+      textRun = [];
+    }
+  };
+
+  for (const child of content) {
+    if (child.type === "text") {
+      textRun.push(ctx.escapeText ? asAutolink(child) : child);
+    } else {
+      flushTextRun();
+      const rendered = serializeNode(child, ctx);
+      const escapesItsOwnText =
+        child.type !== undefined && TABLE_CELL_CONTAINER_TYPES.has(child.type);
+      parts.push(
+        ctx.inTableCell && !escapesItsOwnText
+          ? escapeTableCellText(rendered)
+          : rendered,
+      );
+    }
+  }
+  flushTextRun();
+
+  return parts.join("");
+}
+
+const AUTOLINK_URI = /^[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*$/;
+
+// A link whose text is its own absolute URL (what an autolinked URL parses
+// to) is written back as `<url>`. Autolink content takes no escapes, so the
+// URL needs none - `https://x.dev/_a_` as link text would need `\_` to stay
+// out of emphasis - and the parser returns the same link. Not when the URL
+// holds an `&` or a `\`: the readers decode an entity in an autolink's text
+// (`&amp;` reads back as `&`) and may drop a backslash, while the href keeps
+// both, so that link is written as an ordinary one, whose text is escaped.
+function asAutolink(node: JsonContent): JsonContent {
+  if (node.text === undefined || node.marks === undefined) return node;
+  const text = node.text;
+  if (node.marks.some((mark) => mark.type === "code")) return node;
+  if (text.includes("&") || text.includes("\\")) return node;
+  const link = node.marks.find(
+    (mark) =>
+      mark.type === "link" &&
+      mark.attrs?.href === text &&
+      AUTOLINK_URI.test(text),
+  );
+  if (link === undefined) return node;
+  return {
+    ...node,
+    marks: node.marks.map((mark) =>
+      mark === link ? { type: "autolink", attrs: link.attrs } : mark,
+    ),
+  };
+}
+
+function serializeImage(node: JsonContent, ctx: SerializerContext): string {
+  const src = readStringAttr(node.attrs, "src");
+  const alt = readStringAttr(node.attrs, "alt");
+  if (src.length === 0) return "";
+  if (!ctx.escapeText) {
+    const destination = /[\s()<>]/.test(src)
+      ? `<${src.replace(/[<>\\]/g, "\\$&")}>`
+      : src;
+    return `![${alt.replace(/[\\[\]]/g, "\\$&")}](${destination})`;
+  }
+  return artifactImageMarkdown(alt, src);
+}
+
+/**
+ * An image node on the artifact path, written exactly as its fallback text
+ * (`unresolvedArtifactImageText`) wherever that reads back as the same image.
+ * An alt the readers cannot keep - a carriage return (rewritten as a line
+ * break), a label line a paragraph would not carry, a backslash before a
+ * bracket or at the end, an unmatched backtick - is written once in a form
+ * whose read-back image is written with the same bytes from then on: line
+ * breaks normalized, unsafe label lines joined, then every backslash,
+ * bracket and backtick escaped, which the readers keep as written apart from
+ * the brackets.
+ */
+// Each line break with the spaces and tabs on either side of it becomes one
+// space. A scan, not `/[ \t]*\n[ \t]*/g`, which retries a long space run from
+// each of its positions when no line break follows it.
+function joinLinesTrimmingSpaces(text: string): string {
+  const lines = text.split("\n");
+  const last = lines.length - 1;
+  return lines
+    .map((line, index) => {
+      let start = 0;
+      let end = line.length;
+      if (index > 0) while (start < end && isSpaceOrTab(line[start])) start++;
+      if (index < last)
+        while (end > start && isSpaceOrTab(line[end - 1])) end--;
+      return line.slice(start, end);
+    })
+    .join(" ");
+}
+
+function artifactImageMarkdown(alt: string, src: string): string {
+  const exact = unresolvedArtifactImageText(alt, src);
+  if (decodeUnresolvedArtifactImageText(exact) !== null) return exact;
+  let settled = alt.replace(/\r\n?/g, "\n").replace(/\x00/g, "");
+  if (!labelLinesStayInParagraph(settled.replace(/[[\]]/g, "\\$&"))) {
+    settled = joinLinesTrimmingSpaces(settled);
+  }
+  const plain = unresolvedArtifactImageText(settled, src);
+  if (decodeUnresolvedArtifactImageText(plain) !== null) return plain;
+  return `![${settled.replace(/[\\[\]`]/g, "\\$&")}](${markdownDestination(src)})`;
+}
+
+function serializeNode(node: JsonContent, ctx: SerializerContext): string {
+  switch (node.type) {
+    case "doc":
+      return serializeDocument(node, ctx);
+    case "paragraph":
+      return serializeParagraph(node, ctx);
+    case "text":
+      return serializeText(node);
+    case "hardBreak":
+      return serializeHardBreak(ctx);
+    case "image":
+      return serializeImage(node, ctx);
+    case "heading":
+      return serializeHeading(node, ctx);
+    case "bulletList":
+      return serializeBulletList(node, ctx);
+    case "orderedList":
+      return serializeOrderedList(node, ctx);
+    case "listItem":
+      return serializeListItem(node, ctx, false, 0);
+    case "taskList":
+      return serializeTaskList(node, ctx);
+    case "taskItem":
+      return serializeTaskItem(node, ctx);
+    case "codeBlock":
+      return serializeCodeBlock(node, ctx);
+    case "mermaidBlock":
+      return serializeMermaidBlock(node, ctx);
+    case "uiPreviewBlock":
+      return serializeUIPreviewBlock(node, ctx);
+    case "horizontalRule":
+      return THEMATIC_BREAK;
+    case "blockquote":
+      return ctx.escapeText
+        ? serializeArtifactBlockquote(node, ctx)
+        : serializeBlockquote(node);
+    case "sourcedQuote":
+      return serializeSourcedQuote(node);
+    case "table":
+      return serializeTable(node, ctx);
+    case "mention":
+      return serializeMention(node, ctx);
+    case "slashCommand":
+      return serializeSlashCommand(node, ctx);
+    default:
+      return extractTextFromNode(node);
+  }
+}
+
+function serializeDocument(node: JsonContent, ctx: SerializerContext): string {
+  if (!node.content) return "";
+
+  const blocks: string[] = [];
+
+  for (const child of node.content) {
+    const serialized = serializeNode(child, ctx);
+    if (serialized) {
+      blocks.push(serialized);
+    }
+  }
+
+  return blocks.join("\n\n");
+}
+
+// Only spaces, tabs and line breaks are trimmed: a no-break space or any other
+// whitespace the user wrote at the start or end of the document is text. An
+// artifact keeps the leading spaces too: the parser reads up to three of them
+// back as the first paragraph's own text (more never reach here, see
+// `escapeParagraphLineStarts`), and nothing else an artifact writes starts
+// with a space.
+// The trims below are scans: `/[ \t]+$/gm` and `/[ \t\n]+$/` retry a long
+// whitespace run from each of its positions when it is not at a line end.
+
+// Drops the spaces and tabs before every line terminator and at the end, as
+// `/[ \t]+$/gm` did (its `$` also matches before `\r`, U+2028 and U+2029).
+function trimLineEnds(md: string): string {
+  return md
+    .split(/(\r|\n|\u2028|\u2029)/)
+    .map((part, index) => {
+      if (index % 2 === 1) return part;
+      let end = part.length;
+      while (end > 0 && isSpaceOrTab(part[end - 1])) end--;
+      return part.slice(0, end);
+    })
+    .join("");
+}
+
+// Drops leading line breaks (and, off the artifact path, leading spaces and
+// tabs) and trailing spaces, tabs and line breaks.
+function trimDocumentEdges(md: string, keepLeadingSpaces: boolean): string {
+  const isEdge = (char: string | undefined, leading: boolean) =>
+    char === "\n" || (!(leading && keepLeadingSpaces) && isSpaceOrTab(char));
+  let start = 0;
+  while (start < md.length && isEdge(md[start], true)) start++;
+  let end = md.length;
+  while (end > start && isEdge(md[end - 1], false)) end--;
+  return md.slice(start, end);
+}
+
+function normalizeMarkdown(
+  md: string,
+  keptMarkerSpace: string,
+  escapeText: boolean,
+): string {
+  const trimmed = trimDocumentEdges(
+    trimLineEnds(md.replace(/\n{3,}/g, "\n\n")),
+    escapeText,
+  );
+  return keptMarkerSpace === ""
+    ? trimmed
+    : trimmed.replace(keptMarkerSpaceLine(keptMarkerSpace), "$1 ");
+}
+
+/**
+ * Renders a document with `render` and normalizes it. The document is rendered
+ * once without an empty item's marker-space placeholder; when that rendering
+ * wrote one, the placeholder is chosen against it (`keptMarkerSpaceFor`) and the
+ * document is rendered again with it. Rendering is otherwise the same both
+ * times, so the placeholder occurs in the second only where it was written.
+ */
+function renderMarkdown(
+  options: SerializerOptions,
+  escapeText: boolean,
+  render: (ctx: SerializerContext) => string,
+): string {
+  const draft = createContext(options, escapeText, "");
+  const drafted = render(draft);
+  if (draft.keptMarkerSpaceUses.count === 0) {
+    return normalizeMarkdown(drafted, "", escapeText);
+  }
+  const ctx = createContext(options, escapeText, keptMarkerSpaceFor(drafted));
+  return normalizeMarkdown(render(ctx), ctx.keptMarkerSpace, escapeText);
+}
+
+export function jsonContentToMarkdown(
+  content: JsonContent,
+  options: SerializerOptions,
+): string {
+  return renderMarkdown(options, false, (ctx) => serializeNode(content, ctx));
+}
+
+/**
+ * The artifact-body serialization: `jsonContentToMarkdown` plus the text
+ * escaping that makes md -> doc -> md a fixed point (see
+ * `escapeArtifactText` and `escapeParagraphLineStarts`). Use it wherever the
+ * markdown is parsed back into the same document - the disk mirror and its
+ * ingest normalization. Prompts, comments and the composer stay on
+ * `jsonContentToMarkdown`.
+ */
+export function jsonContentToArtifactMarkdown(
+  content: JsonContent,
+  options: SerializerOptions,
+): string {
+  return renderMarkdown(options, true, (ctx) => serializeNode(content, ctx));
+}

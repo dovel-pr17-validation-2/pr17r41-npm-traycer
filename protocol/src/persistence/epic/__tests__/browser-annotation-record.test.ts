@@ -1,0 +1,213 @@
+import { describe, expect, it } from "vitest";
+import {
+  browserAnnotationRecordSchema,
+  userAuthoredMessageSchema,
+} from "@traycer/protocol/persistence/epic/schemas";
+import { chatSubscribeClientFrameSchema } from "@traycer/protocol/host/agent/gui/subscribe";
+
+const FULL_ANNOTATION = {
+  kind: "browser-annotation" as const,
+  annotationId: "ann-7f3a",
+  tabId: "t-1",
+  sessionId: "s-1",
+  origin: "https://example.com",
+  pageUrl: "https://example.com/",
+  pageTitle: "Example Domain",
+  capturedAt: 1_700_000_000_000,
+  comment: "Make this hero section pop more, bigger heading",
+  counts: { elements: 2, regions: 0, strokes: 1 },
+  elements: [
+    {
+      selector: "main > h1",
+      tagName: "h1",
+      elementId: null,
+      classNames: ["hero"],
+      textPreview: "Example Domain",
+      ariaRole: "heading",
+      accessibleName: "Example Domain",
+      boundingBox: {
+        x: 60,
+        y: 90,
+        width: 420,
+        height: 40,
+        top: 90,
+        right: 480,
+        bottom: 130,
+        left: 60,
+      },
+      computedStyles: [{ property: "font-size", value: "26px" }],
+    },
+  ],
+  imageFileName: "browser-annotation-ann-7f3a.png",
+  imageHash: "abc123def456",
+  droppedElementCount: 0,
+};
+
+/**
+ * A legacy record states no `source`; the schema infers it from the top-level
+ * page fields, so every parsed record carries one.
+ */
+const PARSED_ANNOTATION = {
+  ...FULL_ANNOTATION,
+  source: {
+    kind: "browser" as const,
+    tabId: FULL_ANNOTATION.tabId,
+    sessionId: FULL_ANNOTATION.sessionId,
+    origin: FULL_ANNOTATION.origin,
+    pageUrl: FULL_ANNOTATION.pageUrl,
+    pageTitle: FULL_ANNOTATION.pageTitle,
+  },
+};
+
+function sendFrameWithoutAnnotations(): Record<string, unknown> {
+  return {
+    kind: "send",
+    hasBinaryPayload: false,
+    epicId: "epic-1",
+    chatId: "chat-1",
+    clientActionId: "action-1",
+    messageId: "message-1",
+    content: { type: "doc", content: [] },
+    sender: { type: "user", userId: "user-1" },
+    settings: {
+      harnessId: "codex",
+      model: "gpt-5.4",
+      permissionMode: "supervised",
+      reasoningEffort: "high",
+      agentMode: "epic",
+    },
+    accountContext: { type: "PERSONAL" },
+  };
+}
+
+describe("browserAnnotationRecordSchema", () => {
+  it("round-trips a browser-annotation record with every field", () => {
+    const parsed = browserAnnotationRecordSchema.parse(FULL_ANNOTATION);
+    expect(parsed).toEqual(PARSED_ANNOTATION);
+    expect(parsed.kind).toBe("browser-annotation");
+    expect(parsed.annotationId).toBe("ann-7f3a");
+    if (!("tabId" in parsed)) {
+      throw new Error("expected the browser arm");
+    }
+    expect(parsed.tabId).toBe("t-1");
+    expect(parsed.sessionId).toBe("s-1");
+    expect(parsed.origin).toBe("https://example.com");
+    expect(parsed.pageUrl).toBe("https://example.com/");
+    expect(parsed.pageTitle).toBe("Example Domain");
+    expect(parsed.capturedAt).toBe(1_700_000_000_000);
+    expect(parsed.comment).toBe(
+      "Make this hero section pop more, bigger heading",
+    );
+    expect(parsed.counts).toEqual({ elements: 2, regions: 0, strokes: 1 });
+    expect(parsed.elements).toHaveLength(1);
+    expect(parsed.elements[0]).toEqual(FULL_ANNOTATION.elements[0]);
+    expect(parsed.imageFileName).toBe("browser-annotation-ann-7f3a.png");
+    expect(parsed.imageHash).toBe("abc123def456");
+    expect(parsed.droppedElementCount).toBe(0);
+
+    const serialized: unknown = JSON.parse(JSON.stringify(parsed));
+    expect(browserAnnotationRecordSchema.parse(serialized)).toEqual(
+      PARSED_ANNOTATION,
+    );
+  });
+
+  it("defaults droppedElementCount to 0 on older persisted records", () => {
+    const { droppedElementCount: _dropped, ...legacy } = FULL_ANNOTATION;
+    expect(
+      browserAnnotationRecordSchema.parse(legacy).droppedElementCount,
+    ).toBe(0);
+  });
+});
+
+describe("live user message browserAnnotations default", () => {
+  it("accepts an omitted browserAnnotations field and defaults to []", () => {
+    const parsed = userAuthoredMessageSchema.parse({
+      kind: "user",
+      content: { type: "doc", content: [] },
+    });
+    expect(parsed.browserAnnotations).toEqual([]);
+  });
+
+  it("keeps a supplied browser-annotation record on the live user message", () => {
+    const parsed = userAuthoredMessageSchema.parse({
+      kind: "user",
+      content: { type: "doc", content: [] },
+      browserAnnotations: [FULL_ANNOTATION],
+    });
+    expect(parsed.browserAnnotations).toEqual([PARSED_ANNOTATION]);
+  });
+});
+
+describe("live send frame browserAnnotations default", () => {
+  it("accepts an omitted browserAnnotations field and defaults to []", () => {
+    const parsed = chatSubscribeClientFrameSchema.parse(
+      sendFrameWithoutAnnotations(),
+    );
+    expect(parsed.kind).toBe("send");
+    if (parsed.kind !== "send") {
+      throw new Error("expected send frame");
+    }
+    expect(parsed.browserAnnotations).toEqual([]);
+  });
+
+  it("keeps a supplied browser-annotation record on the live send frame", () => {
+    const parsed = chatSubscribeClientFrameSchema.parse({
+      ...sendFrameWithoutAnnotations(),
+      browserAnnotations: [FULL_ANNOTATION],
+    });
+    expect(parsed.kind).toBe("send");
+    if (parsed.kind !== "send") {
+      throw new Error("expected send frame");
+    }
+    expect(parsed.browserAnnotations).toEqual([PARSED_ANNOTATION]);
+  });
+});
+
+/**
+ * Root cause H: annotation records used to persist `outerHtml` and every raw
+ * attribute, which put page content - a filled-in form, a `value=` on an
+ * input, a token in a `data-` attribute - into collaborator-readable chat
+ * persistence and into the model prompt.
+ */
+describe("page markup never survives the capture schema", () => {
+  const legacyElement = {
+    ...FULL_ANNOTATION.elements[0],
+    attributes: [
+      { name: "class", value: "hero" },
+      { name: "data-session", value: "sessionid=abc123" },
+    ],
+    outerHtml: '<h1 class="hero" data-session="sessionid=abc123">Hi</h1>',
+    outerHtmlTruncated: false,
+  };
+
+  it("strips markup and raw attributes off a record written before the change", () => {
+    const parsed = browserAnnotationRecordSchema.parse({
+      ...FULL_ANNOTATION,
+      elements: [legacyElement],
+    });
+    const element = parsed.elements[0];
+    expect(element).not.toHaveProperty("outerHtml");
+    expect(element).not.toHaveProperty("outerHtmlTruncated");
+    expect(element).not.toHaveProperty("attributes");
+    expect(JSON.stringify(parsed)).not.toContain("sessionid=abc123");
+    // What the projection keeps: how to find it, what it says, where it sits.
+    expect(element?.selector).toBe(FULL_ANNOTATION.elements[0]?.selector);
+    expect(element?.textPreview).toBe(FULL_ANNOTATION.elements[0]?.textPreview);
+    expect(element?.boundingBox).toEqual(
+      FULL_ANNOTATION.elements[0]?.boundingBox,
+    );
+  });
+
+  it("strips them on the live send frame too, not only at rest", () => {
+    const parsed = chatSubscribeClientFrameSchema.parse({
+      ...sendFrameWithoutAnnotations(),
+      browserAnnotations: [{ ...FULL_ANNOTATION, elements: [legacyElement] }],
+    });
+    if (parsed.kind !== "send") {
+      throw new Error("expected send frame");
+    }
+    expect(JSON.stringify(parsed.browserAnnotations)).not.toContain(
+      "sessionid=abc123",
+    );
+  });
+});

@@ -1,0 +1,158 @@
+# Gitleaks configuration — Traycer open-source repo.
+#
+# Extends the upstream default ruleset and suppresses known-safe false
+# positives. Every entry here is a PUBLIC test fixture, never a real
+# credential. Keep this list tight and document why each item is safe.
+
+title = "Traycer gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Stable scrollStateKey identifiers in the original and split chat-messages unit suites. These exact strings are cache-key test IDs, not credentials; require both the precise source path and value."
+condition = "AND"
+regexTarget = "secret"
+paths = [
+  '''^clients/gui-app/src/components/chat/__tests__/chat-messages(?:-(?:anchor-engine|core|library-contract|navigation|persistence))?\.test\.tsx?$''',
+]
+regexes = [
+  '''^(?:h3-gesture-preempts-ownership|m3b-usable-hit-strip|s4b-reachability-key|t4-optimistic-anchor-key|t4-anchor-drift-key|t4-gated-follow-key|t11-e-strict-epsilon-2|t10-nav-abort-gesture|t12-anchor-drift|t12-follow-catchup|t18-pin-c-exhaust|t19-hydration-nav-key|t22-pin3-no-double-correction|t22-below-anchor-no-repair|t22-unmount-mid-repair|t22-shrink-above-anchor)$''',
+]
+
+[[allowlists]]
+description = "Historical message-list license unit-test fixture. Its payload identifies it as a public test key, not a production credential; require both the exact source path and value."
+condition = "AND"
+regexTarget = "secret"
+paths = [
+  '''^clients/gui-app/src/components/chat/__tests__/chat-messages\.test\.tsx$''',
+]
+regexes = [
+  '''^eff2c8c42294f62b09cebd99d82c8c93b25URVNUO2V4OTk5OTk5OTk5OTk5OQ==$''',
+]
+
+[[allowlists]]
+description = "Minisign PUBLIC verification key fixture in the desktop download-resilience tests (v1.1.7 update-flow work). Decodes to exactly 42 bytes: 'Ed' algorithm tag + key id 847ef539119a1961 (matching the adjacent HOST_SIGNING_KEY_ID constant) + 32-byte public key. A verification key is public by design, never a credential. Scoped to the exact string and source path."
+condition = "AND"
+regexTarget = "secret"
+paths = [
+  '''^clients/desktop/src/electron-main/cli/__tests__/cross-layer-download-resilience\.test\.ts$''',
+]
+regexes = ['''^RWSEfvU5EZoZYQTQUOVHeQFv3poThl1VM7FZLkNQr0Zu0FyL2x\+u2O2l$''']
+
+[[allowlists]]
+description = "Chat transcript scroll-state cache keys in the original and split gui-app chat tests - kebab-case UI state bucket names (e.g. a per-test anchor key) that the generic-api-key rule matches only because the field is literally named `scrollStateKey`. These are UI state keys, never credentials. Path-scoped to the monolith and its five split files; `fetch-depth: 0` means the PR scan sees them on in-flight branches before they merge, so this cannot wait for the introducing branch to land."
+condition = "AND"
+regexTarget = "line"
+paths = [
+  '''^clients/gui-app/src/components/chat/__tests__/chat-messages(?:-(?:anchor-engine|core|library-contract|navigation|persistence))?\.test\.tsx?$''',
+]
+regexes = ['''scrollStateKey: "[A-Za-z0-9_-]+"''']
+
+[[allowlists]]
+description = "Draft-scope cache keys in the auth-lifecycle cross-account handoff suite - kebab-case per-test bucket names (`r6f1-signout` and siblings) that the generic-api-key rule matches only because the field is literally named `scopeKey`, the same false positive as the chat-messages `scrollStateKey` entry above. UI state keys, never credentials. `fetch-depth: 0` makes every PR's scan read the in-flight branch that introduces the file (the draft-image upload work), so this cannot wait for that branch to land. Path-scoped to the one suite."
+condition = "AND"
+regexTarget = "line"
+paths = [
+  '''^clients/gui-app/src/providers/__tests__/auth-lifecycle-bridge-r6f1-cross-account-handoff\.test\.tsx$''',
+]
+regexes = ['''scopeKey: "[A-Za-z0-9_-]+"''']
+
+[[allowlists]]
+description = "RFC 6455's public sample client nonce in the historic loopback handshake probe. Require both the exact nonce and its source path so unrelated findings remain reportable."
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^clients/desktop/src/electron-main/host/host-lifecycle\.ts$''']
+regexes = ['''^dGhlIHNhbXBsZSBub25jZQ==$''']
+
+[[allowlists]]
+description = "JWT-shaped scrubber fixture. This exact dummy value verifies redaction of JWTs in user text and logs; require both its precise test path and full value."
+condition = "AND"
+regexTarget = "secret"
+paths = [
+  '''^clients/desktop/src/electron-main/app/__tests__/support-scrubber\.test\.ts$''',
+]
+regexes = [
+  '''^eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9[.]eyJzdWIiOiIxMjM0NTY3ODkwIn0[.]dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U$''',
+]
+
+[[allowlists]]
+description = "Base64 non-UTF-8 path fixtures in the split PR-diff find/body suites. Both values decode to literal filename BYTES - `YmFkLf8udHh0` is `bad-\\xff.txt` and `YmFkLf4udHh0` is `bad-\\xfe.txt` - fed to the `pathBytes` wire field to prove byte-exact round-tripping of paths that are not valid UTF-8. The generic-api-key rule matches them only on base64 shape and entropy; neither is a credential. Same situation as the chat-messages scrollStateKey entry above: `fetch-depth: 0` makes the PR scan see these on the in-flight branch that introduces them (`traycer/non-utf8-path-bytes`), so every unrelated PR fails until this lands - it cannot wait for that branch to merge. Scoped to both exact values and both source paths so unrelated findings stay reportable."
+condition = "AND"
+regexTarget = "secret"
+paths = [
+  '''^clients/gui-app/src/components/epic-canvas/renderers/__tests__/pr-diff-tile-find\.test\.tsx$''',
+  '''^clients/gui-app/src/components/epic-canvas/pr/__tests__/pr-local-diff-body\.test\.tsx$''',
+]
+regexes = ['''^YmFkLf(?:8|4)udHh0$''']
+
+[[allowlists]]
+description = "Self-describing base64 placeholders in the browser-session key-custody suite: `d3JhcHBlZEtleQ==` decodes to the ASCII string `wrappedKey` and `cmF3S2V5` to `rawKey`. They are the payloads of `storeKeyWrapRequest` / `storeKeyUnwrapRequest` frames, and the assertions alongside them match on the value verbatim (`user-1:host-1:cmF3S2V5`), which is what a placeholder can do and a credential cannot. The generic-api-key rule matches on base64 shape and entropy only. Third instance of the pattern the two entries above describe: `fetch-depth: 0` makes every PR's scan read the in-flight branch that introduces them (`feat/browser-security-hardening`), so this one fixture fails the gitleaks job on every open PR in the repo and cannot wait for that branch to merge. Scoped to the exact values and the one source path so unrelated findings stay reportable."
+condition = "AND"
+regexTarget = "secret"
+paths = [
+  '''^clients/desktop/src/electron-main/browser-sessions/__tests__/browser-sessions-owner\.test\.ts$''',
+]
+regexes = ['''^(?:d3JhcHBlZEtleQ==|cmF3S2V5)$''']
+
+[[allowlists]]
+description = "Chat-registry scope keys in the auth-lifecycle cross-account handoff suite: kebab-case test identifiers (e.g. `r6f1-signout`) passed as `scopeKey` to `chatRegistry.acquire`, which the generic-api-key rule matches only because the field is literally named `scopeKey`. UI state keys, never credentials - the same shape as the chat-messages `scrollStateKey` entry above. Fourth instance of the `fetch-depth: 0` pattern: the fixture lives on the in-flight branch `fix/draft-image-hash-rewrite`, so every open PR's scan fails on it until this lands and it cannot wait for that branch to merge. Scoped to the one source path and the `scopeKey: \"...\"` field shape so unrelated findings stay reportable."
+condition = "AND"
+regexTarget = "line"
+paths = [
+  '''^clients/gui-app/src/providers/__tests__/auth-lifecycle-bridge-r6f1-cross-account-handoff\.test\.tsx$''',
+]
+regexes = ['''scopeKey: "[A-Za-z0-9_-]+"''']
+
+[[allowlists]]
+description = "Vendored minified xterm canvas addon inside its bun dependency patch (`patches/@xterm%2Faddon-canvas@<version>.patch`). The addon's export prelude reads `t.FourKeyMap=t.TwoKeyMap=void 0`, and the generic-api-key rule takes `FourKeyMap=` as a key assignment and `t.TwoKeyMap=void` as its value. It is the published npm build of a public package, never a credential. Scoped to the exact matched text and the patch path so unrelated findings stay reportable."
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^patches/@xterm%2Faddon-canvas@[0-9.]+\.patch$''']
+regexes = ['''^t\.TwoKeyMap=void$''']
+
+# The two entries below are RULE-scoped (`[[rules]]` with a default rule's id
+# plus `[[rules.allowlists]]`) rather than global `[[allowlists]]`. Gitleaks
+# 8.30.1 treats a global allowlist whose `paths` match as "skip this file"
+# before any rule runs, whatever its `condition` and `regexes` say (its debug
+# log reads `skipping file: global allowlist`), so a global path entry
+# allowlists EVERY secret in that file. A rule-scoped allowlist is evaluated
+# per finding, so the regex really does narrow it to the one value: checked
+# with 8.30.1, another `sk_live_…` value in the same file still reports.
+
+[[rules]]
+id = "stripe-access-token"
+[[rules.allowlists]]
+description = "Stripe-shaped masking fixture in the env-override editor suite: `sk_live_9f3a7c1d2e4b5a60` is a made-up value whose only job is to be hidden by the masked row and asserted absent from the DOM. The rule matches it on prefix shape alone; it is not an issued key. Scoped to the exact value and the one source path so unrelated findings stay reportable."
+condition = "AND"
+regexTarget = "secret"
+paths = [
+  '''^clients/gui-app/src/components/settings/panels/__tests__/env-override-editor\.test\.tsx$''',
+]
+regexes = ['''^sk_live_9f3a7c1d2e4b5a60$''']
+
+[[rules]]
+id = "generic-api-key"
+[[rules.allowlists]]
+description = "The `EnvironmentSecretV12` TYPE NAME in the environment-secret test suites: a fixture declared as `const secret: EnvironmentSecretV12 = {` (or `secretSettingIt:` / `readonly secret:`) reads to the generic-api-key rule as a key named `secret` with the value `EnvironmentSecretV12`. A type annotation is never a credential. Scoped to the exact type name and the suites that declare such a fixture so unrelated findings stay reportable."
+condition = "AND"
+regexTarget = "secret"
+paths = [
+  '''^clients/gui-app/src/components/settings/panels/__tests__/provider-env-overrides-section\.test\.tsx$''',
+  '''^clients/gui-app/src/components/settings/secrets/__tests__/secret-remove-preview-computers\.test\.tsx$''',
+  '''^clients/gui-app/src/components/settings/secrets/__tests__/replace-dialog-and-versions-edges\.test\.tsx$''',
+  '''^clients/gui-app/src/providers/__tests__/support-environment-bridge\.test\.tsx$''',
+  '''^clients/gui-app/src/components/settings/personal/__tests__/shell-credential-question\.test\.tsx$''',
+]
+regexes = ['''^EnvironmentSecretV12$''']
+[[rules.allowlists]]
+description = "Android clone instance keys in the simulator unit fixtures (tile target, device split, tile schema, tile): `instanceKey` is a device identity (the AVD name an Android clone is keyed by, `Pixel_8_API_35_traycer_2` / `_3` for two clones of the fixture's Pixel 8), never a credential; the generic-api-key rule fires on the `instanceKey` identifier plus a 24-character value. Rule-scoped like the entry above, so the exact source path and the two exact values narrow it and any other value in that file still reports."
+condition = "AND"
+regexTarget = "secret"
+paths = [
+  '''^clients/gui-app/src/lib/simulator-view/__tests__/simulator-tile-target\.test\.ts$''',
+  '''^clients/gui-app/src/lib/simulator-view/__tests__/simulator-device-split\.test\.ts$''',
+  '''^clients/gui-app/src/stores/epics/canvas/__tests__/simulator-tile-schema\.test\.ts$''',
+  '''^clients/gui-app/src/components/simulator-tile/__tests__/simulator-tile\.test\.tsx$''',
+]
+regexes = ['''^Pixel_8_API_35_traycer_[23]$''']

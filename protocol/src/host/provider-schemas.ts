@@ -1,0 +1,5722 @@
+/**
+ * Schemas for the `providers.*` host RPC surface. Manages the CLI binary
+ * Traycer runs for each provider (Codex / Claude Code / OpenCode).
+ *
+ * Each provider exposes a set of candidates - the host-bundled binary, the
+ * binary auto-discovered on PATH (resolved to its real absolute path), and
+ * any custom paths the user added. The user selects one via a radio in
+ * Settings → Providers; the selection + custom paths + enabled flag persist
+ * per-device (== per-host) in
+ * `~/.traycer/host/config/provider-overrides.json`.
+ */
+import { z } from "zod";
+import {
+  guiHarnessIdSchema,
+  type TuiHarnessId,
+} from "@traycer/protocol/host/agent/shared";
+import { autoJudgeKindSchema } from "@traycer/protocol/host/auto-mode/contracts";
+import { projectOntoFrozenLine } from "./frozen-line-projection";
+import {
+  providerIdSchema,
+  providerIdSchemaV10,
+  providerIdSchemaV20,
+  type ProviderId,
+  type ProviderIdV10,
+  type ProviderIdV20,
+} from "./provider-ids";
+import {
+  DEFAULT_PROVIDER_NATIVE_CAPABILITIES,
+  DEFAULT_PROVIDER_NATIVE_CAPABILITIES_V70_PREIMAGE,
+  modelProviderAuthActionSchema,
+  modelProviderAuthCancelContextSchema,
+  modelProviderAuthPollContextSchema,
+  modelProviderAuthResultSchema,
+  modelProvidersListResultSchema,
+  nativeAuthActionSchema,
+  nativeAuthCancelContextSchema,
+  nativeAuthPollContextSchema,
+  nativeAuthResultSchema,
+  nativeListQuerySchema,
+  nativeListResultSchema,
+  nativeListResultSchemaBeforeMcpRemedies,
+  nativeListResultSchemaV101Preimage,
+  nativeListResultSchemaV70Preimage,
+  nativeMutationResultSchema,
+  nativeMutationResultSchemaV14,
+  nativeMutationResultSchemaV10Preimage,
+  nativeMutationResultSchemaV11Preimage,
+  nativeMutationSchema,
+  nativeMutationSchemaV12,
+  nativeMutationSchemaV10Preimage,
+  providerNativeCapabilitiesSchema,
+  providerNativeCapabilitiesSchemaBeforeOpenChatPlugins,
+  providerNativeCapabilitiesSchemaBeforeMcpRemedies,
+  providerNativeCapabilitiesSchemaV70,
+  providerNativeCapabilitiesSchemaV70Preimage,
+  type ModelProviderAuthAction,
+  type ModelProviderAuthCancelContext,
+  type ModelProviderAuthPollContext,
+  type ModelProviderAuthResult,
+  type ModelProvidersListResult,
+  type NativeAuthAction,
+  type NativeAuthCancelContext,
+  type NativeAuthPollContext,
+  type NativeAuthResult,
+  type NativeListQuery,
+  type NativeListResult,
+  type NativeMutation,
+  type NativeMutationResult,
+  type ProviderNativeCapabilities,
+  type ProviderNativeCapabilitiesBeforeOpenChatPlugins,
+  type ProviderNativeCapabilitiesV70Preimage,
+} from "./provider-native-schemas";
+import { lazySchema } from "@traycer/protocol/framework/lazy-schema";
+import { opencodeLineSchema } from "@traycer/protocol/common/opencode-line";
+import { executableWriteGrantSchema } from "@traycer/protocol/host/executable-write-grant";
+
+export {
+  providerIdSchema,
+  providerIdSchemaV10,
+  providerIdSchemaV20,
+  type ProviderId,
+  type ProviderIdV10,
+  type ProviderIdV20,
+};
+
+/**
+ * Frozen provider id set as shipped in protocol v3.0 (with Amp, before Devin/Pi).
+ * Used only by the frozen v3.0 `providers.list` response so an already-shipped
+ * v3.0 client never receives post-v3.0 providers. Do not add new providers
+ * here - extend the latest `providerIdSchema` and use the existing version
+ * bridges instead.
+ */
+export const providerIdSchemaV30 = lazySchema(() =>
+  z.enum([
+    "claude-code",
+    "codex",
+    "opencode",
+    "cursor",
+    "traycer",
+    "grok",
+    "qwen",
+    "kiro",
+    "droid",
+    "kimi",
+    "copilot",
+    "kilocode",
+    "openrouter",
+    "amp",
+  ]),
+);
+export type ProviderIdV30 = z.infer<typeof providerIdSchemaV30>;
+
+/**
+ * Frozen provider id set as shipped in protocol v4.0 (with Devin/Pi, before
+ * Hermes/omp). Used only by the frozen v4.0 `providers.list` response so an
+ * already-shipped v4.0 client never receives post-v4.0 providers; the v5.0
+ * line adds them with a v5→v4 (and v5→v3 / v5→v2 / v5→v1) downgrade bridge.
+ * Do not add new providers here - extend the latest `providerIdSchema` and
+ * use the existing bridges instead.
+ */
+export const providerIdSchemaV40 = lazySchema(() =>
+  z.enum([
+    "claude-code",
+    "codex",
+    "opencode",
+    "cursor",
+    "traycer",
+    "grok",
+    "qwen",
+    "kiro",
+    "droid",
+    "kimi",
+    "copilot",
+    "kilocode",
+    "openrouter",
+    "amp",
+    "devin",
+    "pi",
+  ]),
+);
+export type ProviderIdV40 = z.infer<typeof providerIdSchemaV40>;
+
+/**
+ * Frozen provider id set as shipped in protocol v5.0 (with Hermes, before omp).
+ *
+ * This line IS released - `cli-v1.1.8` (tagged 2026-07-25) shipped v5.0, so a
+ * client in the field strict-decodes exactly these ids and would reject `omp`
+ * on the full-catalog `providers.list` broadcast. omp opened v6.0 instead.
+ */
+export const providerIdSchemaV50 = lazySchema(() =>
+  z.enum([
+    "claude-code",
+    "codex",
+    "opencode",
+    "cursor",
+    "traycer",
+    "grok",
+    "qwen",
+    "kiro",
+    "droid",
+    "kimi",
+    "copilot",
+    "kilocode",
+    "openrouter",
+    "amp",
+    "devin",
+    "pi",
+    "hermes",
+  ]),
+);
+export type ProviderIdV50 = z.infer<typeof providerIdSchemaV50>;
+
+/**
+ * Frozen provider id set as shipped in protocol v6.0 (v5.0 plus omp).
+ *
+ * This line IS released - `cli-v1.1.9` (tagged 2026-07-29) shipped v6.0, so it
+ * is frozen for the same reason v5.0 is: a client in the field strict-decodes
+ * exactly these ids. A new provider opens v7.0 rather than growing this enum.
+ */
+export const providerIdSchemaV60 = lazySchema(() =>
+  z.enum([
+    "claude-code",
+    "codex",
+    "opencode",
+    "cursor",
+    "traycer",
+    "grok",
+    "qwen",
+    "kiro",
+    "droid",
+    "kimi",
+    "copilot",
+    "kilocode",
+    "openrouter",
+    "amp",
+    "devin",
+    "pi",
+    "hermes",
+    "omp",
+  ]),
+);
+export type ProviderIdV60 = z.infer<typeof providerIdSchemaV60>;
+
+/**
+ * Frozen provider id set as shipped in protocol v7.0 (v6.0 plus huggingface).
+ *
+ * Pinned before the line shipped, unlike every enum above it. v8.0 now owns
+ * live catalog growth without changing what a v7.0 peer can serialize.
+ */
+export const providerIdSchemaV70 = lazySchema(() =>
+  z.enum([
+    "claude-code",
+    "codex",
+    "opencode",
+    "cursor",
+    "traycer",
+    "grok",
+    "qwen",
+    "kiro",
+    "droid",
+    "kimi",
+    "copilot",
+    "kilocode",
+    "openrouter",
+    "amp",
+    "devin",
+    "pi",
+    "hermes",
+    "omp",
+    "huggingface",
+  ]),
+);
+export type ProviderIdV70 = z.infer<typeof providerIdSchemaV70>;
+
+/**
+ * Frozen provider id set as `cli-v1.3.0` / `host-v1.3.0` shipped v8.0 - i.e.
+ * everything before Antigravity.
+ *
+ * v8.0's docblock above says v8.0 "owns live catalog growth". That was true
+ * only while v8.0 was UNRELEASED: 1.3.0 was cut from a branch that predates
+ * Antigravity, so the tag froze v8.0 at these twenty ids while `main` had
+ * already widened the live enum underneath it. v9.0 now owns live growth, and
+ * a v9->v8 bridge drops post-v8.0 ids for the peers that shipped with them.
+ *
+ * Do NOT add new providers here - extend the latest `providerIdSchema` and use
+ * the existing version bridges instead.
+ */
+export const providerIdSchemaV80 = lazySchema(() =>
+  z.enum([
+    "claude-code",
+    "codex",
+    "opencode",
+    "cursor",
+    "traycer",
+    "grok",
+    "qwen",
+    "kiro",
+    "droid",
+    "kimi",
+    "copilot",
+    "kilocode",
+    "openrouter",
+    "amp",
+    "devin",
+    "pi",
+    "hermes",
+    "omp",
+    "huggingface",
+    "reasonix",
+  ]),
+);
+export type ProviderIdV80 = z.infer<typeof providerIdSchemaV80>;
+
+/**
+ * The id set `providers.list@9.0` and `@9.1` actually shipped: v8.0's twenty
+ * plus Antigravity.
+ *
+ * Hand-written, not `providerIdSchema` by reference, for the reason the whole
+ * freeze discipline exists - and here that is not theoretical. Both lines are
+ * RELEASED (the published host `host-v1.3.2-staging.39.g3a73077` advertises
+ * canonical 9.1), and until this pin they reached the LIVE enum, so the next
+ * `/add-harness` would have added a twenty-second id to two shipped lines
+ * without anything objecting. That is the same defect the login-capability
+ * markers caused, one leaf over.
+ */
+export const providerIdSchemaV91 = lazySchema(() =>
+  z.enum([
+    "claude-code",
+    "codex",
+    "opencode",
+    "cursor",
+    "traycer",
+    "grok",
+    "qwen",
+    "kiro",
+    "droid",
+    "kimi",
+    "copilot",
+    "kilocode",
+    "openrouter",
+    "amp",
+    "devin",
+    "pi",
+    "hermes",
+    "omp",
+    "huggingface",
+    "reasonix",
+    "antigravity",
+  ]),
+);
+export type ProviderIdV91 = z.infer<typeof providerIdSchemaV91>;
+
+/** Human-readable provider names, shared by the host and the GUI. */
+export const PROVIDER_DISPLAY_NAMES: Record<ProviderId, string> = {
+  "claude-code": "Claude Code",
+  codex: "Codex",
+  opencode: "OpenCode",
+  cursor: "Cursor",
+  traycer: "Traycer",
+  grok: "Grok",
+  qwen: "Qwen Code",
+  kiro: "Kiro",
+  droid: "Droid",
+  kimi: "Kimi",
+  copilot: "Copilot",
+  kilocode: "Kilo Code",
+  openrouter: "OpenRouter",
+  amp: "Amp",
+  devin: "Devin",
+  pi: "Pi",
+  hermes: "Hermes Agent",
+  omp: "Oh My Pi",
+  huggingface: "Hugging Face",
+  reasonix: "Reasonix",
+  antigravity: "Antigravity",
+  commandcode: "Command Code",
+};
+
+/**
+ * Canonical TUI-harness-id → provider-overrides-id map. The harness layer uses
+ * `claude`; the provider-CLI config (Settings, `provider-overrides.json`) uses
+ * `claude-code`. Single source of truth shared by the host's
+ * `harnessIdToProviderId` and the GUI launch picker's args pre-fill, so the
+ * two can't drift.
+ */
+export const TUI_HARNESS_ID_TO_PROVIDER_ID: Record<TuiHarnessId, ProviderId> = {
+  claude: "claude-code",
+  codex: "codex",
+  opencode: "opencode",
+  cursor: "cursor",
+};
+
+/**
+ * `line` on the bundled arm names which Managed row the user picked, and only
+ * OpenCode offers more than one. Absent means "Managed, Traycer's default":
+ * that is every selection stored before the line existed, and every pick from
+ * a client that shows a single Managed row. It is an optional KEY rather than
+ * a second `bundled` arm, so a released host's within-major re-parse strips it
+ * instead of refusing the request. First published by
+ * `providers.setSelection@2.2` and `providers.list@10.6`; every released line
+ * binds {@link providerSelectionSchemaV10} instead.
+ */
+export const providerSelectionSchema = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("bundled"),
+      line: opencodeLineSchema.optional(),
+    }),
+    z.object({ kind: z.literal("path") }),
+    z.object({ kind: z.literal("custom"), path: z.string() }),
+  ]),
+);
+export type ProviderSelection = z.infer<typeof providerSelectionSchema>;
+
+/**
+ * The selection every released line shipped, before the bundled arm carried
+ * `line`. A hand copy rather than an `.omit()` of the live arm, so the next
+ * key added there cannot reach a frozen line. Its arms are plain objects, so a
+ * reparse through it strips `line`.
+ */
+export const providerSelectionSchemaV10 = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("bundled") }),
+    z.object({ kind: z.literal("path") }),
+    z.object({ kind: z.literal("custom"), path: z.string() }),
+  ]),
+);
+
+export const providerCliCandidateSchema = lazySchema(() =>
+  z.object({
+    kind: z.enum(["bundled", "path", "custom"]),
+    // bundled: resolved bundled path or "" when not installed.
+    // path/custom: absolute path to the binary.
+    path: z.string(),
+    version: z.string().nullable(),
+    available: z.boolean(),
+    // True while the version is still being probed in the background; the
+    // client re-fetches until it flips false.
+    versionPending: z.boolean(),
+  }),
+);
+export type ProviderCliCandidate = z.infer<typeof providerCliCandidateSchema>;
+
+/**
+ * Why an `error` arm's install is stuck, as a closed vocabulary the renderer
+ * can write copy against. Derived host-side from the typed verification code
+ * (never sniffed from a message), so UI copy and the internal classification
+ * cannot drift: `disk-full` is the ENOSPC/EDQUOT class, `verification` is a
+ * `definitively-invalid` verdict, `network` is a registry/transport failure,
+ * and `unknown` is the honest catch-all for a failure the host could not
+ * classify any further.
+ *
+ * `unrepairable` is the one member that is not a failure to retry, and it is
+ * the only reason that changes what the surface may OFFER rather than only
+ * what it says. It means the local copy was digest-verified against a signed
+ * artifact and only then found defective - a schema-invalid `pack.json`, or an
+ * envelope whose manifest does not cover the tree. Re-downloading fetches the
+ * byte-identical blob and fails in exactly the same place, fleet-wide, so the
+ * host records the cell as terminal and refuses further installs for it. It
+ * always travels with `retryAtMs: null`, and a renderer must not draw a retry
+ * affordance for it: the click cannot do anything, now or later. Every other
+ * reason is a genuine "try again"; this one is "this build is broken, and a
+ * new one has to be published".
+ *
+ * `live-owner-stalled` is the opposite pole and belongs to the same story: a
+ * SIBLING PROCESS on this machine holds the pack's download lease and its
+ * progress token stopped advancing, so this host gave up waiting behind it
+ * (bounded on the owner's lack of progress, not on elapsed time - a sibling
+ * legitimately pulling a multi-gigabyte pack outlasts any fixed cap). Fully
+ * retryable, with a real `retryAtMs`. It is deliberately NOT `network`, because
+ * nothing about the registry failed and telling the user to check their
+ * connection would send them after the wrong thing; and it is deliberately not
+ * `unknown`, because `unknown` means the host could not classify the failure at
+ * all, and this one is classified precisely - the host detected it on purpose
+ * and has a typed error for it.
+ *
+ * `trust-unavailable` is the third pole, and the only reason that is not about
+ * a PACK at all - it is about the host. The registry keyring could not be
+ * verified this process (fetch failed, no cached copy), so there is no install
+ * machinery to schedule anything with. It exists because `null` was carrying
+ * three different facts at once: "this host has no managed packs by design",
+ * "this build has no trust root baked yet" and "this host expected to serve
+ * managed packs and currently cannot". The first two are intended states the
+ * renderer must keep falling back on; the third is an outage, and reporting it
+ * as `null` made a host that could not serve a provider look identical to one
+ * that was never asked to - the provider silently vanished from the picker and
+ * a reached turn fell through to generic "install it yourself" copy.
+ *
+ * It is RETRYABLE in the sense that the condition clears on its own (the host
+ * re-attempts the keyring on the next kick), but a user-facing retry button is
+ * the wrong affordance: the click cannot move it and `providers.ensurePack`
+ * refuses on a host in this state. Its copy names reconnecting or restarting,
+ * never "retry". It always travels with `retryAtMs: null`.
+ *
+ * `local-storage-mismatch` is the third non-retryable member, and the only one
+ * that is a claim about the USER'S MACHINE. The host stored an archive that
+ * passed its declared size and signed digest, read it back, and got different
+ * bytes - twice for the same digest, the second time against an independently
+ * re-fetched copy. It is deliberately separate from `verification`, which says
+ * the registry's signed material failed its cryptography and sends the user to
+ * complain about Traycer's publishing, and from `unrepairable`, which says a
+ * published build is defective for everyone. Reported as either of those, the
+ * one machine with failing storage looks like a fleet incident and the user is
+ * pointed at something they cannot fix.
+ *
+ * Automatic refetch STOPS at this reason, which is what it is for: the failure
+ * is deterministic on this device and the loop it replaces was an unbounded
+ * multi-gigabyte download every backoff interval, forever. `retryAtMs` is null
+ * because no attempt is scheduled, and a retry button would be
+ * offered-then-failed.
+ */
+export const providerManagedInstallErrorReasonSchema = lazySchema(() =>
+  z.enum([
+    "disk-full",
+    "network",
+    "verification",
+    "unknown",
+    "unrepairable",
+    "live-owner-stalled",
+    "trust-unavailable",
+    "local-storage-mismatch",
+  ]),
+);
+export type ProviderManagedInstallErrorReason = z.infer<
+  typeof providerManagedInstallErrorReasonSchema
+>;
+
+/**
+ * Install lifecycle of a provider's managed (registry-backed) binary pack.
+ * `absent` - never downloaded, or GC'd; `downloading` - fetch in progress,
+ * `percent` a best-effort progress estimate; `installed` - present and
+ * spawnable; `error` - the install failed and is not being retried until
+ * `retryAtMs`. Carried at the provider level (there is exactly one managed
+ * candidate per provider) rather than nested on `providerCliCandidateSchema`,
+ * which is shared byte-for-byte with the frozen v1.0/v2.0/v3.0 wire shapes -
+ * nesting it there would leak a new key into already-released responses (the
+ * providers.list #258 class). `null` (see `managedInstallState` below) means
+ * the host predates the provider pack registry, or - during the staged
+ * bundled -> managed rollout - this provider hasn't been cut over yet; the
+ * renderer falls back to today's `available`-flag rendering on the bundled
+ * candidate in both cases, never inferring one lifecycle from the other.
+ *
+ * `downloading.percent` is NULLABLE, and that is a real state rather than
+ * defensive typing: when a *live sibling host* sharing the same pack store
+ * owns the download (per-cell lease, N13), this host can see that a transfer
+ * is in progress but has no access to the owner's in-memory byte counter.
+ * Reporting `absent` there would be a lie - the pack is being fetched - so the
+ * observer reports `downloading` with no percent and the renderer shows an
+ * indeterminate indicator. Every percent consumer must handle null.
+ *
+ * The `error` arm and the nullable percent were ADDITIVE ON THE THEN-UNRELEASED
+ * 6.0 LINE. No released tag through 1.1.8 shipped `providers.list@6.0`, which
+ * is what made growing this union legal AT THE TIME. It no longer is:
+ * `released-baseline-surface.json` carries `providers.list` at canonical 8.0
+ * with every major from 1 through 8 installed, so 6.0 is frozen like the rest
+ * and a further arm opens a new major.
+ * the released 5.0 and earlier lines are frozen and their downgrade bridges
+ * strip the field wholesale. Accepted, stated plainly: a client old enough to
+ * negotiate 6.0 but predating the `error` arm normalizes it to `null` through
+ * `managedInstallState`'s `.catch(null)` and renders the plain `available`
+ * fallback - post-T7 that is a silently-unavailable row with no message.
+ */
+export const providerManagedInstallStateSchema = lazySchema(() =>
+  z.discriminatedUnion("status", [
+    // `absent` deliberately carries NO `version`. The other three arms gained
+    // one on the v7.0 line (the main table labels the row "Installing v1.18.11
+    // · 42%", which needs the version the slot refers to), but `absent` means
+    // no managed copy exists, so a version there could only ever be null - a
+    // field with one legal value forever informs nothing. "Which version WOULD
+    // be installed" is a different question and it is answered properly by
+    // `managedVersions.available[]`, whose rows carry `recommended` / `current`
+    // per version. Do not add a fourth copy of that answer here.
+    z.object({ status: z.literal("absent") }),
+    z.object({
+      status: z.literal("downloading"),
+      // NULL IS A REAL STATE, NOT DEFENSIVE TYPING, and it is specifically NOT
+      // an error: when a live SIBLING HOST sharing this machine's pack store
+      // owns the transfer, this host can see a fetch is in progress but has no
+      // access to the owner's byte counter. The honest report is "downloading,
+      // percent unknown" and the honest render is an indeterminate bar. A
+      // renderer that treats a null percent - or the sibling-owned case
+      // generally - as a failure tells the user a download broke while it is
+      // actively progressing on the same machine. The failure mode for a
+      // sibling that STOPS progressing is a different thing entirely and has
+      // its own reason (`live-owner-stalled` on the error arm).
+      percent: z.number().min(0).max(100).nullable(),
+      // Ships with v7.0; the v7->v6 bridge strips it. Nullable because a host
+      // can be waiting behind a sibling's lease before it has resolved which
+      // version that sibling is fetching.
+      //
+      // `.catch(null).optional()` for the same reason the base shape's
+      // `managedInstallState` itself is optional, stated in its comment: the
+      // key stays omittable in a TS object literal so host construction sites
+      // that predate the population work do not have to be touched to satisfy
+      // the type, while a PRESENT-but-unrecognized value still normalizes
+      // instead of throwing. The wire-assembly ticket populates it; until then
+      // these arms read `undefined`, which consumers treat as "version not
+      // reported" exactly like `null`.
+      version: z.string().nullable().catch(null).optional(),
+    }),
+    z.object({
+      status: z.literal("installed"),
+      // Ships with v7.0; the v7->v6 bridge strips it. Nullable so a host that
+      // can see a usable managed copy but cannot cheaply name its version
+      // (the poll lane runs no per-dir verification) reports the truth rather
+      // than guessing. Optional for the reason given on the arm above.
+      version: z.string().nullable().catch(null).optional(),
+    }),
+    z.object({
+      status: z.literal("error"),
+      reason: providerManagedInstallErrorReasonSchema,
+      // The version the failed attempt was for. Ships with v7.0; the v7->v6
+      // bridge strips it. Nullable: a failure early enough to precede target
+      // resolution (a keyring that would not verify - `trust-unavailable`) has
+      // no version to name, and inventing one would misattribute a host-wide
+      // outage to a specific build. Optional for the reason given on the
+      // `downloading` arm.
+      version: z.string().nullable().catch(null).optional(),
+      // Operator-facing detail behind the reason (the underlying error text).
+      // Never the primary copy - the renderer writes its own from `reason`.
+      message: z.string(),
+      // Epoch ms the host will accept an automatic retry again, or null when
+      // the failure carries no backoff. Null is NOT one condition: read it
+      // together with `reason`. For every reason but `unrepairable` it means
+      // nothing is scheduled and a user-initiated `providers.ensurePack` is
+      // the way forward; for `unrepairable` it means there is no way forward
+      // at all and `ensurePack` is a guaranteed no-op.
+      //
+      // Constrained like `percent` above rather than left a bare `z.number()`:
+      // an epoch-ms instant is a non-negative integer, and a fractional or
+      // negative one is a producer bug, not a countdown. Because the FIELD
+      // carries `.catch(null)`, a violation degrades to "no retry scheduled"
+      // instead of throwing the whole `providers.list` away.
+      retryAtMs: z.number().int().nonnegative().nullable(),
+    }),
+  ]),
+);
+export type ProviderManagedInstallState = z.infer<
+  typeof providerManagedInstallStateSchema
+>;
+
+/**
+ * Frozen `providers.list@7.0` snapshot of
+ * `providerManagedInstallErrorReasonSchema` - a hand-copy, NOT derived from the
+ * live enum via `.extract()`/`.exclude()`, exactly like the frozen provider id
+ * enums above. See the live enum's doc block for what each member means; this
+ * copy exists to pin the MEMBER SET, not to restate the semantics.
+ *
+ * A reason added to the live enum must not appear here. It would reach a v7.0
+ * peer whose released client has no copy for it, and because the field carries
+ * `.catch(null)` that client normalizes the whole `managedInstallState` to
+ * `null` - a stuck install renders as a silently-unavailable row with no
+ * message, which is worse than the generic copy it would have shown for a
+ * reason it did know.
+ */
+export const providerManagedInstallErrorReasonSchemaV70 = lazySchema(() =>
+  z.enum([
+    "disk-full",
+    "network",
+    "verification",
+    "unknown",
+    "unrepairable",
+    "live-owner-stalled",
+    "trust-unavailable",
+    "local-storage-mismatch",
+  ]),
+);
+export type ProviderManagedInstallErrorReasonV70 = z.infer<
+  typeof providerManagedInstallErrorReasonSchemaV70
+>;
+
+/**
+ * PRE-IMAGE snapshot of `providerManagedInstallStateSchema` - a hand-copy of
+ * the four arms as they stood before the version-manager work, for the same
+ * reason `providerLoginCapabilitySchemaV40` is a hand-copy of the capability:
+ * pinning a wire shape's KEYS while leaving one of them wired to a live
+ * sub-schema leaves that sub-schema free to grow on the line it backs.
+ *
+ * That growth is no longer hypothetical - it happened. The managed-versions
+ * work added the version a slot refers to onto the live `downloading` /
+ * `installed` arms, and the collapse put those arms on v7.0 itself; this copy
+ * is what stayed behind. Because the arms are plain (non-strict) `z.object`s
+ * inside a discriminated union, a decode through this pre-image simply DROPS
+ * the key it does not model - the same strip mechanism every downgrade bridge
+ * in this file relies on.
+ *
+ * Do not add arms or fields here. Extend the live schema and let the next
+ * `providers.list` major publish it.
+ */
+export const providerManagedInstallStateSchemaV70Preimage = lazySchema(() =>
+  z.discriminatedUnion("status", [
+    z.object({ status: z.literal("absent") }),
+    z.object({
+      status: z.literal("downloading"),
+      percent: z.number().min(0).max(100).nullable(),
+    }),
+    z.object({ status: z.literal("installed") }),
+    z.object({
+      status: z.literal("error"),
+      reason: providerManagedInstallErrorReasonSchemaV70,
+      message: z.string(),
+      retryAtMs: z.number().int().nonnegative().nullable(),
+    }),
+  ]),
+);
+export type ProviderManagedInstallStateV70Preimage = z.infer<
+  typeof providerManagedInstallStateSchemaV70Preimage
+>;
+
+// ── v7.0: per-pack managed version manager ─────────────────────────────────
+//
+// The single-slot `managedInstallState` above answers "what is the managed
+// copy doing"; everything below answers "which managed versions exist on this
+// machine, and what may the user do with them". Both ride v7.0 together; the
+// v7->v6 bridge strips the whole group.
+//
+// Keyed by PACK, not by provider: one pack serves several providers (the
+// opencode pack backs opencode/traycer/openrouter/huggingface), so every
+// provider row on that pack carries the same `packId` and the same
+// `managedVersions`, and clients render one shared panel from whichever row
+// they have. Per-provider policy on a machine-shared cell would be
+// self-contradictory - see the design's D5.
+
+/**
+ * Whether the registry channel still vouches for a version, and how.
+ *
+ * Four of the five are channel-head facts; `uncertified` is the odd one and
+ * the easiest to erase, so it is spelled out here. It means the version is
+ * INSTALLED ON DISK but the head no longer carries it - a build the user
+ * already runs that has simply aged out of publication. It stays usable and
+ * deletable and is NOT re-downloadable, which is exactly why it cannot be
+ * folded into either neighbour: calling it `eligible` promises a fresh copy
+ * the registry can no longer serve, and calling it `yanked` accuses the
+ * publisher of a withdrawal that never happened (a yank is typically a
+ * security pull and the UI says so). "No longer published" is a third thing.
+ *
+ * `yanked` rows can legitimately arrive with `sizeBytes: null` - a yank
+ * tombstone outlives the assets it describes, so the head knows the version
+ * was withdrawn without knowing how big it was.
+ *
+ * `below-security-floor` and `host-ineligible` are both hard blocks rather
+ * than advice: the execute-time gate positively refuses those versions, so
+ * offering a download would be offered-then-failed by construction (D2).
+ */
+export const providerPackVersionCertificationSchema = lazySchema(() =>
+  z.enum([
+    "eligible",
+    "yanked",
+    "below-security-floor",
+    "host-ineligible",
+    "uncertified",
+  ]),
+);
+export type ProviderPackVersionCertification = z.infer<
+  typeof providerPackVersionCertificationSchema
+>;
+
+/**
+ * Why an on-disk version dir cannot be served, derived from the host's
+ * verification verdict layer (N5).
+ *
+ * `corrupt` and `unverified` are NOT synonyms and must not be merged. `corrupt`
+ * is a DEFINITIVE verdict - the bytes were read and are known bad. `unverified`
+ * is an INDETERMINATE one - the host could not reach a verdict at all (a
+ * keyring blip, an `EACCES` on the dir), so the copy may be perfectly fine.
+ * The host keeps the four-way verdict split deliberately; collapsing the
+ * indeterminate case into the known-bad one tells a user their download is
+ * damaged when the real fault is a transient permission or trust problem, and
+ * points them at re-downloading 40 MB instead of at the actual cause.
+ *
+ * `condemned` is the terminal one: a persisted verdict that this build is
+ * defective on this machine for good. It renders as a permanent failure row
+ * with NO retry affordance - `providers.installPackVersion` refuses it.
+ */
+export const providerPackVersionUnusableReasonSchema = lazySchema(() =>
+  z.enum(["condemned", "quarantined", "corrupt", "unverified"]),
+);
+export type ProviderPackVersionUnusableReason = z.infer<
+  typeof providerPackVersionUnusableReasonSchema
+>;
+
+/**
+ * Per-version install state inside the version manager. Distinct from the
+ * single-slot `providerManagedInstallStateSchema`: this one adds the
+ * `unusable` arm, because a version dir can be present-but-unservable, which
+ * the single slot has no way to say (it reports the CURRENT target, and a
+ * target that cannot be served is simply not current).
+ *
+ * The `downloading` arm's nullable `percent` carries the same meaning as it
+ * does on the single slot, and the same warning applies: a sibling host owning
+ * the transfer reports `downloading` with `percent: null`, which is a
+ * transient, self-resolving state and NOT a failure.
+ */
+export const providerPackVersionInstallStateSchema = lazySchema(() =>
+  z.discriminatedUnion("status", [
+    z.object({ status: z.literal("absent") }),
+    z.object({
+      status: z.literal("downloading"),
+      percent: z.number().min(0).max(100).nullable(),
+    }),
+    z.object({ status: z.literal("installed") }),
+    z.object({
+      status: z.literal("unusable"),
+      reason: providerPackVersionUnusableReasonSchema,
+    }),
+    z.object({
+      status: z.literal("error"),
+      reason: providerManagedInstallErrorReasonSchema,
+      message: z.string(),
+      retryAtMs: z.number().int().nonnegative().nullable(),
+    }),
+  ]),
+);
+export type ProviderPackVersionInstallState = z.infer<
+  typeof providerPackVersionInstallStateSchema
+>;
+
+/** One row in the version manager: a version the user can act on. */
+export const providerPackVersionSchema = lazySchema(() =>
+  z.object({
+    version: z.string(),
+    // Null for a yank tombstone whose assets the registry has already pruned -
+    // the head remembers the withdrawal, not the size. Renderers must not print
+    // "0 MB" for it.
+    sizeBytes: z.number().int().nonnegative().nullable(),
+    certification: providerPackVersionCertificationSchema,
+    // True for the baked pin - the build this Traycer release is paired with.
+    // Rendered "Recommended".
+    recommended: z.boolean(),
+    current: z.boolean(),
+    installState: providerPackVersionInstallStateSchema,
+  }),
+);
+export type ProviderPackVersion = z.infer<typeof providerPackVersionSchema>;
+
+/**
+ * The per-pack version manager's state. Null on a provider with no managed
+ * pack (see `packId`).
+ */
+export const providerManagedVersionsSchema = lazySchema(() =>
+  z.object({
+    autoDownload: z.boolean(),
+    // Null = auto (follow the newest eligible). A pin may sit below the baked
+    // pin (D1 as revised 2026-08-12): the RPC refuses only versions the signed
+    // head positively rules out (`below-security-floor` / `host-ineligible`).
+    // No ping-pong follows - target derivation consults the user pin before the
+    // baked pin, and the forward-only current-walk governs only unpinned cells.
+    pinnedVersion: z.string().nullable(),
+    // Only ever non-null while auto-download is paused or a pin is set: with
+    // auto-download on there is nothing to announce, since a newer eligible
+    // version installs itself. Computed from the LAST DURABLY-SEEN channel head
+    // rather than live knowledge, so it does not flap when head knowledge
+    // expires or the host boots offline (D7).
+    updateAvailable: z.object({ version: z.string() }).nullable(),
+    // Other provider ids served by this same pack, so the panel can name the
+    // sharing ("Shared by OpenCode, Traycer, OpenRouter, Hugging Face"). Excludes
+    // the provider whose row carries it.
+    //
+    // `.catch([])` is load-bearing, not decoration: without it a single id this
+    // client's enum does not know (a newer host, mid-rollout) throws, and because
+    // the throw happens inside `managedVersions` the FIELD-level `.catch(null)`
+    // swallows the entire version manager - panel gone, not one label missing.
+    // Degrading to "shared with nobody" costs a sentence of copy instead.
+    sharedWithProviders: z.array(providerIdSchema).catch([]),
+    // Total on-disk footprint of this pack across every retained version. Packs
+    // run 100-500 MB, and a panel that invites the user to keep versions without
+    // showing the cost invites disk surprises. Null when the host cannot cheaply
+    // size the cell.
+    totalSizeBytes: z.number().int().nonnegative().nullable(),
+    // Union of channel-head versions (>= the baked pin) and versions installed
+    // on disk - see `certification` for how the two sources are distinguished.
+    available: z.array(providerPackVersionSchema),
+  }),
+);
+export type ProviderManagedVersions = z.infer<
+  typeof providerManagedVersionsSchema
+>;
+
+/**
+ * Frozen `providers.list@7.x` version-manager state: identical to the live
+ * schema except `sharedWithProviders` is pinned to `providerIdSchemaV70`.
+ *
+ * This is the sub-schema freeze the `frozen-catalog-lines` fixture's own
+ * instructions call for, and it is the second half of the v7.0 response
+ * freeze. `providerCliStateBaseShapeV70` pins v7.0's KEY SET but deliberately
+ * keeps live references for its leaf schemas, so the id enum reached the
+ * already-released v7.0 wire THROUGH this one array - a host→client enum
+ * addition at a released version, which the compat gate scores `breaking`.
+ * Adding `reasonix` is what surfaced it: the deep dump went red on
+ * `managedVersions.anyOf`, exactly as that fixture's comment predicted, and
+ * the answer it prescribes is this freeze rather than a regenerate-to-green.
+ *
+ * The blast radius was real but narrow, which is worth stating so the next
+ * reader does not conclude the freeze was ceremonial: `sharedWithProviders`
+ * carries `.catch([])`, so a v7.0 client handed an unknown id degrades the
+ * label to "shared with nobody" rather than throwing. Reasonix also ships its
+ * own binary and joins no shared pack, so it can never actually appear here.
+ * Neither fact is a reason to leave a released line tracking a growing enum -
+ * the next id added may well be pack-sharing, and `.catch()` tolerance is
+ * parse-time hardening, not a versioning mechanism.
+ *
+ * Do NOT widen this schema; extend the live one and let the next major
+ * publish it.
+ */
+export const providerManagedVersionsSchemaV70 = lazySchema(() =>
+  z.object({
+    autoDownload: z.boolean(),
+    pinnedVersion: z.string().nullable(),
+    updateAvailable: z.object({ version: z.string() }).nullable(),
+    sharedWithProviders: z.array(providerIdSchemaV70).catch([]),
+    totalSizeBytes: z.number().int().nonnegative().nullable(),
+    available: z.array(providerPackVersionSchema),
+  }),
+);
+export type ProviderManagedVersionsV70 = z.infer<
+  typeof providerManagedVersionsSchemaV70
+>;
+
+/**
+ * Why the version manager cannot be offered for a pack that HAS one.
+ *
+ * A null `managedVersions` used to be the whole story, and the panel simply
+ * disappeared. That is indistinguishable from "this build has no version
+ * manager" and left a user staring at a settings tab with nothing to act on
+ * and nothing to read - the reported bug.
+ *
+ * The members are the host's real outcomes, taken from `RegistryKeyringState`
+ * (`loaded | unconfigured | unavailable | unattempted`) plus the one gate that
+ * is not a trust state, NOT from a guessed error table. Note that only
+ * `unavailable` ever produced any user-visible signal before this; the other
+ * two silent states are what a dev build actually hits.
+ *
+ * `packId === null` is deliberately NOT a member: a provider with no baked pin
+ * has no managed pack at all, so there is nothing to explain and both this and
+ * `managedVersions` stay null.
+ */
+export const providerManagedVersionsUnavailableSchema = lazySchema(() =>
+  z.object({
+    reason: z.enum([
+      // Trust roots are not configured in this build, so no managed registry is
+      // reachable by design. Terminal for this install - not a retry.
+      "registry-unconfigured",
+      // Trust roots exist and a load was attempted and failed (offline,
+      // unreachable registry, verification failure). Retried with backoff.
+      "registry-unreachable",
+      // No load attempted yet this process. Transient by construction: the
+      // keyring loader retries, and a later poll answers differently.
+      "registry-not-yet-checked",
+      // The keyring verified but no install manager is attached, so nothing can
+      // enumerate or fetch versions. The wedge-recovery seam.
+      "install-manager-unavailable",
+    ]),
+  }),
+);
+export type ProviderManagedVersionsUnavailable = z.infer<
+  typeof providerManagedVersionsUnavailableSchema
+>;
+
+/**
+ * What the NEXT execute for this provider would resolve to - not what is
+ * "currently running", which the host cannot truthfully report for a provider
+ * at all: live sessions pin their binary for life, so several different
+ * binaries are legitimately in use at once (`versionVisibility` carries that
+ * divergence separately).
+ *
+ * Computed host-side as a side-effect-free simulation of the execute chain
+ * under observe-intent guarantees - no install kick, no holder-pin acquire, no
+ * blocking version probes. It exists so the client stops INFERRING the answer:
+ * the old client-side guess ("Running from PATH · installing managed copy")
+ * was wrong for closure-coupled packs, which refuse a mismatched PATH copy at
+ * execute time and silently serve the bundled inline build instead.
+ *
+ * `path`/`version` are nullable because the resolved candidate may have
+ * neither a stable path (the bundled inline build) nor a cheaply-known version
+ * - the simulation is explicitly forbidden from probing to find out.
+ */
+export const providerNextRunBinarySchema = lazySchema(() =>
+  z.object({
+    kind: z.enum(["managed", "bundled", "path", "custom"]),
+    path: z.string().nullable(),
+    version: z.string().nullable(),
+  }),
+);
+export type ProviderNextRunBinary = z.infer<typeof providerNextRunBinarySchema>;
+
+/**
+ * Host-aggregated, direction-free signal that other active sessions for this
+ * provider are bound to a binary other than the one `nextRunBinary` names.
+ *
+ * Measured against `nextRunBinary`, NOT against `current`: the two coincide
+ * whenever the managed copy is what the next run would use, and they diverge
+ * exactly when it is not - an explicit PATH selection, or the bundled build
+ * serving behind a refused closure-coupled PATH copy. In those cases `current`
+ * is not what a new session will get, so counting against it would report
+ * divergence from a binary nothing is about to run.
+ *
+ * Deliberately NOT a bare `pin !== current` boolean: holders legitimately
+ * differ (each pins its candidate for its whole life), and a version rollback
+ * can make `current` OLDER than a surviving pin - there is no "ahead/behind"
+ * to report, only a count. Rollback-specific messaging belongs solely to the
+ * `advisory` field below. `differingSessionCount: 0` and `null` both mean
+ * "nothing to show" - the renderer never shows a toast for this, only a
+ * quiet, self-correcting row indicator.
+ *
+ * The count is a FLOOR, not a census: the host's holder registry is
+ * per-process while the pack store is shared by every host process on the
+ * machine, so sessions on a sibling host are not counted. Nothing may decide a
+ * destructive action from it.
+ */
+export const providerVersionVisibilitySchema = lazySchema(() =>
+  z.object({
+    differingSessionCount: z.number().int().nonnegative(),
+  }),
+);
+export type ProviderVersionVisibility = z.infer<
+  typeof providerVersionVisibilitySchema
+>;
+
+/**
+ * Phase-2 (live update lane) advisory vocabulary. Ships now as a DORMANT
+ * field only - no Phase-1 host ever populates it, always `null` until the
+ * Phase-2 live reader lands. Structurally present so that later work can
+ * start populating it without another protocol bump. `stale-channel` /
+ * `cannot-confirm-eligibility` describe a live-channel read that couldn't be
+ * trusted; `yank-keep-running` / `yank-rollback` distinguish an informational
+ * "still fine" notice from an actionable "session may need reset" one;
+ * `row-incompatibility` covers an explicitly selected PATH/custom candidate
+ * that fails the closure-coupled version gate.
+ */
+export const providerAdvisoryKindSchema = lazySchema(() =>
+  z.enum([
+    "stale-channel",
+    "cannot-confirm-eligibility",
+    "yank-keep-running",
+    "yank-rollback",
+    "row-incompatibility",
+  ]),
+);
+export type ProviderAdvisoryKind = z.infer<typeof providerAdvisoryKindSchema>;
+
+export const providerAdvisorySchema = lazySchema(() =>
+  z.object({
+    kind: providerAdvisoryKindSchema,
+    detail: z.string().nullable(),
+  }),
+);
+export type ProviderAdvisory = z.infer<typeof providerAdvisorySchema>;
+
+export const PROVIDER_AUTH_STATUS_SCHEMA_V10 = lazySchema(() =>
+  z.enum(["authenticated", "unauthenticated", "unknown"]),
+);
+export type ProviderAuthStatusV10 = z.infer<
+  typeof PROVIDER_AUTH_STATUS_SCHEMA_V10
+>;
+
+export const PROVIDER_AUTH_SCHEMA_V10 = lazySchema(() =>
+  z.object({
+    status: PROVIDER_AUTH_STATUS_SCHEMA_V10,
+    badgeText: z.string().nullable(),
+    label: z.string().nullable(),
+    detail: z.string().nullable(),
+  }),
+);
+export type ProviderAuthV10 = z.infer<typeof PROVIDER_AUTH_SCHEMA_V10>;
+
+export const PROVIDER_AUTH_STATUS_SCHEMA_V20 = lazySchema(() =>
+  z.enum([
+    "authenticated",
+    "unauthenticated",
+    "configured",
+    "unavailable",
+    "unknown",
+  ]),
+);
+export const PROVIDER_AUTH_STATUS_SCHEMA = PROVIDER_AUTH_STATUS_SCHEMA_V20;
+export type ProviderAuthStatusV20 = z.infer<
+  typeof PROVIDER_AUTH_STATUS_SCHEMA_V20
+>;
+export type ProviderAuthStatus = ProviderAuthStatusV20;
+
+export const PROVIDER_AUTH_SCHEMA_V20 = lazySchema(() =>
+  z.object({
+    status: PROVIDER_AUTH_STATUS_SCHEMA_V20,
+    badgeText: z.string().nullable(),
+    label: z.string().nullable(),
+    detail: z.string().nullable(),
+  }),
+);
+export const PROVIDER_AUTH_SCHEMA = PROVIDER_AUTH_SCHEMA_V20;
+export type ProviderAuthV20 = z.infer<typeof PROVIDER_AUTH_SCHEMA_V20>;
+export type ProviderAuth = ProviderAuthV20;
+
+export const UNKNOWN_PROVIDER_AUTH: ProviderAuth = {
+  status: "unknown",
+  badgeText: null,
+  label: null,
+  detail: null,
+};
+
+/**
+ * Definitive signed-out verdict. Written by the host's auth poison and the
+ * probe-less `providers.list` path the instant a credential failure is detected,
+ * so the re-auth gate flips without waiting out the cache TTL.
+ */
+export const UNAUTHENTICATED_PROVIDER_AUTH: ProviderAuth = {
+  status: "unauthenticated",
+  badgeText: null,
+  label: null,
+  detail: null,
+};
+
+/**
+ * Who turned a provider off, and when. Recorded on disable, cleared (null) on
+ * enable. The host is single-user today, so this is currently always the
+ * local user - captured now for the future cross-user host.
+ */
+export const providerDisabledBySchema = lazySchema(() =>
+  z.object({
+    userId: z.string(),
+    handle: z.string().nullable(),
+    at: z.number(),
+  }),
+);
+export type ProviderDisabledBy = z.infer<typeof providerDisabledBySchema>;
+
+/**
+ * API-key state for a provider. Only providers authenticated by an API key
+ * (Cursor, whose `@cursor/sdk` runtime needs `CURSOR_API_KEY`) set
+ * `supported: true`; the CLI-login providers leave it false and the GUI hides
+ * the key field. The raw key is NEVER returned over RPC - only whether one is
+ * resolvable and where it came from (`stored` = saved in Settings, `env` =
+ * the user's login-shell `CURSOR_API_KEY`).
+ */
+export const providerApiKeyStateSchema = lazySchema(() =>
+  z.object({
+    supported: z.boolean(),
+    configured: z.boolean(),
+    source: z.enum(["stored", "env"]).nullable(),
+  }),
+);
+export type ProviderApiKeyState = z.infer<typeof providerApiKeyStateSchema>;
+
+/**
+ * A single environment-variable override applied when the host spawns this
+ * provider's harness. `value: null` is an explicit *unset* (drop a variable the
+ * spawned process would otherwise inherit from the user's shell); a string sets
+ * it. Persisted per-provider (== per-host) in `provider-overrides.json`.
+ */
+export const providerEnvOverrideSchema = lazySchema(() =>
+  z.object({
+    key: z.string(),
+    value: z.string().nullable(),
+  }),
+);
+export type ProviderEnvOverride = z.infer<typeof providerEnvOverrideSchema>;
+
+/**
+ * Describes how a user can re-authenticate a provider CLI from the in-chat
+ * re-auth banner. The banner only appears for providers that have a web login
+ * (so a sign-out is genuinely recoverable in-app); for those it offers a
+ * browser-OAuth login (`oauthArgs`) AND/OR pasting a fresh credential into one
+ * of `token.vars` (an API key / OAuth token, written as a per-provider env
+ * override). API-key-only providers with no web login (Cursor) have no banner at
+ * all - their capability is null and a bad key surfaces as a generic error row.
+ *
+ * Note this is distinct from how a *rejected* credential surfaces: a key/token
+ * the host can't verify renders a generic error row (see the harness
+ * adapters), not this reconnect affordance.
+ */
+export const providerLoginCapabilitySchema = lazySchema(() =>
+  z.object({
+    /** Args to pass to the provider binary for browser-OAuth login, or null if unsupported. */
+    oauthArgs: z.array(z.string()).nullable(),
+    /**
+     * Credential env vars the user can paste a key/token into (e.g.
+     * `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`), written via
+     * `providers.setEnvOverride`. Null when paste-to-reconnect is unsupported.
+     */
+    token: z.object({ vars: z.array(z.string()) }).nullable(),
+    /**
+     * Non-null when the provider's `providers.startLogin` child accepts a
+     * pasted authorization code on stdin (e.g. Claude's manual-code redirect
+     * page - see the code-paste decision log). The GUI shows the paste-code
+     * waiting step only for providers with this slot set; the code itself
+     * goes over `providers.submitLoginCode`, kept alive via
+     * `providers.touchLogin`. Shape carries no fields today - existence alone
+     * is the capability signal - but stays an object rather than a boolean so
+     * a future paste-flow variant can grow it without a shape change.
+     * `.catch(null)` tolerates old host builds that predate this field; old
+     * peers degrade to no paste UI.
+     */
+    codePaste: z.object({}).nullable().catch(null),
+    /**
+     * Non-null when this provider must be signed in from a real terminal rather
+     * than the headless `providers.startLogin` child - the host opens a
+     * host-owned PTY over `providers.startTerminalLogin` and delivers the
+     * provider's login command into it, and the user reads the device code and
+     * URL the CLI prints. Copilot is the case: its `copilot login` prints a
+     * device code that a headless child discards while the browser opens the
+     * bare `github.com/login/device` page, dead-ending the sign-in. No CLI or
+     * SDK exposes that code natively, so Traycer never parses it out - the user
+     * reads it from the terminal Traycer opened.
+     *
+     * Set here, the GUI must NOT offer headless browser OAuth, whatever
+     * `oauthArgs` says; the host refuses `providers.startLogin` for the same
+     * reason, so a released client that predates this field cannot start a
+     * concurrent broken flow. The command the terminal runs is host-owned and is
+     * NOT `oauthArgs` - that is the headless command. A provider with no
+     * headless command at all (Qwen, Droid, OMP, OpenCode: the sign-in lives
+     * inside their own TUI, so the host launches the CLI itself) declares this
+     * with `oauthArgs: null`, which is exactly what keeps the headless button
+     * hidden on older clients - so a GUI gate reads this field alone and never
+     * requires `oauthArgs` beside it. Shape carries no fields today - existence
+     * alone is the signal - but stays an object for the same reason `codePaste`
+     * does.
+     *
+     * `.catch(null)` hardens a present-but-unrecognized value. A genuinely
+     * ABSENT key (an old host that predates the field, decoded through the
+     * client's negotiated frozen schema) reads `undefined`, not `null` - the
+     * v6->v7 upgrade bridge fills it, and GUI gates must test
+     * `!== null && !== undefined`.
+     */
+    terminalLogin: z.object({}).nullable().catch(null),
+    /**
+     * Non-null when the headless `providers.startLogin` flow completes WITHOUT a
+     * loopback callback on the host - a device-code flow the user finishes in
+     * their own browser, or a paste-code page. That is what makes the sign-in
+     * drivable from a REMOTE host, where nothing on the user's machine can answer
+     * a `http://localhost:<port>` redirect the host opened.
+     *
+     * A declarative marker rather than something the client derives, and that is
+     * the whole point of putting it on the wire. The GUI's
+     * `providerLoginIsRemoteSafe` read `oauthArgs.includes("--device-auth")` -
+     * a fact about Codex's COMMAND LINE that happened to coincide with a fact
+     * about its flow. Kimi runs a device-code flow and has no such flag, so the
+     * sniff refused a provider that was always remote-safe, and inventing the
+     * flag to satisfy the sniff would break the spawn. The host owns the
+     * per-provider fact; the gate runs in the CLIENT and cannot see a host-side
+     * table, so the fact has to travel here.
+     *
+     * Deliberately NOT folded into `codePaste`, which `providerLoginIsRemoteSafe`
+     * already treats as sufficient - declaring that instead would need no schema
+     * change at all and is the wrong field: `codePaste` also flips
+     * `usesPipedStdin` in the login runner, swaps the flat deadline for the
+     * rolling code-paste one, and renders a paste form a polling device-code flow
+     * can never consume. The cheap-looking reuse buys a broken form.
+     *
+     * Shape carries no fields today - existence alone is the signal - but stays
+     * an object for the same reason `codePaste` and `terminalLogin` do.
+     *
+     * `.catch(null)` hardens a present-but-unrecognized value. Absence is a
+     * different question and is answered by the VERSION: this key rides
+     * `providers.list@9.2`, so any peer below that is parsed through its own
+     * frozen schema and filled by `providersListUpgradeV91ToV92`.
+     *
+     * So absence is ruled out by CONSTRUCTION rather than by validation, and the
+     * difference matters: a same-version pairing takes the transport fast path
+     * and returns the payload by cast, so `.catch(null)` never runs at all on
+     * the 9.2-to-9.2 leg. A reader is therefore right to fail CLOSED on an
+     * absent marker instead of assuming it cannot arrive; what it must not do is
+     * read absence as a meaningful value. `Boolean(...)` in
+     * `providerLoginIsRemoteSafe` is the sanctioned spelling for exactly that,
+     * and `!== null` is the one to avoid - it reports an absent key as
+     * remote-safe, which is the fail-OPEN direction and is how these markers
+     * went unnoticed when they were briefly added to the already-released 9.1
+     * in place.
+     */
+    remoteSafe: z.object({}).nullable().catch(null),
+    /**
+     * Non-null when the provider's OWN headless login child opens a browser on
+     * the machine it runs on. A fact about the PROVIDER's flow - not about the
+     * host, and not about the caller.
+     *
+     * The GUI reads it to decide whether to open `startLogin`'s URL itself
+     * (`shouldAutoOpenLoginUrl`). Opening a URL a child already opened
+     * double-opens a consent page on one `state`, which is a visible bug; not
+     * opening one nothing opened leaves the user staring at a waiting step.
+     *
+     * It replaces `userCode !== null` as the proxy for this, and that proxy was
+     * measured wrong. Its premise was "device-auth children do not open a
+     * browser, so the GUI must" - true of Codex and Grok, whose printed URL the
+     * GUI is expected to open (see `provider-login-runner.ts`'s module
+     * docblock), and FALSE of Kimi, which runs a device-code flow AND opens the
+     * browser itself. So the moment `DEVICE_AUTH_LOGIN_MODE` gave Kimi a
+     * non-null `userCode`, every local Kimi sign-in opened a second consent tab.
+     * Three independent facts hid behind that one proxy - the flow yields a
+     * scrapable code, the flow needs no loopback (`remoteSafe`), and the child
+     * opens its own browser - and this is the third.
+     *
+     * POLARITY IS DELIBERATE, and it is the fail-safe direction. `null` means
+     * "not known to open its own browser", NOT "known not to". An unsourced
+     * `null` costs a second tab at worst; a key spelled the other way round
+     * ("the GUI must open") would strand a user with no tab at all whenever a
+     * row was left unfilled. Read `null` as the absence of a claim.
+     *
+     * Two classes of row therefore carry `null` for reasons that are NOT a
+     * statement about the CLI, and a reader must not invert them into one:
+     *
+     *   - a provider whose `terminalLogin` is non-null, or whose `oauthArgs` is
+     *     null: `startProviderLogin` refuses or never starts it, so no waiting
+     *     step ever renders and nothing can observe the value. Declaring a
+     *     marker no product path can read would be unfalsifiable - the same
+     *     reason `claude-code` carries no `remoteSafe` behind `codePaste`'s
+     *     short-circuit. Where such a row has a MEASURED value anyway (Amp opens
+     *     its own browser, shim-caught), the fact is recorded in a comment on
+     *     that row rather than declared here.
+     *   - a provider whose child genuinely prints a URL for the GUI to open.
+     *     That is the honest `null` and the one the key exists to serve.
+     *
+     * Independent of `remoteSafe`, and the overlap is the informative part:
+     * Kimi is the only provider that is both, which is exactly why one marker
+     * could never have carried both facts.
+     *
+     * Shape and `.catch(null)` follow `remoteSafe` above, as does the version
+     * that carries it: 9.2, filled for every older peer by the 9.1 -> 9.2 bridge.
+     */
+    selfOpensBrowser: z.object({}).nullable().catch(null),
+  }),
+);
+export type ProviderLoginCapability = z.infer<
+  typeof providerLoginCapabilitySchema
+>;
+
+/**
+ * Frozen pre-code-paste snapshot of `providerLoginCapabilitySchema`, as it
+ * shipped in host-v1.0.0 (`oauthArgs` + `token` only) - a hand-copy, NOT
+ * derived via `.omit()` from the live schema, same invariant as
+ * `providerCliStateBaseShapeV20`'s own comment below. Referenced by the
+ * frozen `providerCliStateBaseShapeV10` / `V20` / `V30` base shapes in place
+ * of the live schema, so those already-released wire shapes don't silently
+ * inherit `codePaste` (or any future capability field) the moment the live
+ * schema grows one - `loginCapability` predates per-field freezing
+ * discipline (it was part of the original v1.0 base shape, not added and
+ * frozen alongside a version bump like `profiles` was), so this snapshot
+ * retrofits that guarantee.
+ */
+export const providerLoginCapabilitySchemaV10 = lazySchema(() =>
+  z.object({
+    oauthArgs: z.array(z.string()).nullable(),
+    token: z.object({ vars: z.array(z.string()) }).nullable(),
+  }),
+);
+export type ProviderLoginCapabilityV10 = z.infer<
+  typeof providerLoginCapabilitySchemaV10
+>;
+
+/**
+ * Frozen post-code-paste snapshot of `providerLoginCapabilitySchema`, as it
+ * shipped on the v4.0 line (host-v1.1.7): `oauthArgs` + `token` + `codePaste`.
+ * Same hand-copy discipline as `providerLoginCapabilitySchemaV10` above - NOT
+ * derived from the live schema.
+ *
+ * `providerCliStateBaseShapeV40` points here rather than at the live
+ * capability, which pins four already-released wire shapes at once: the v4.0,
+ * v5.0 and v6.0 `providers.list` lines and the @2.1 mutation state echo. Before
+ * this pin, the base shape spread the LIVE capability, so a field added to the
+ * capability leaked onto all four - the same defect the `V10` snapshot fixed
+ * for the older lines and the same one that pinning the base shape itself
+ * fixed for `profiles`/registry fields. `terminalLogin` is the concrete case
+ * this guards against: it is a v7.0 field, and a v6.0 client that negotiated
+ * before it existed must not decode it.
+ *
+ * Do not add fields here. Extend the live `providerLoginCapabilitySchema` and
+ * let the v6->v7 upgrade bridge fill the new field for old hosts.
+ */
+export const providerLoginCapabilitySchemaV40 = lazySchema(() =>
+  z.object({
+    oauthArgs: z.array(z.string()).nullable(),
+    token: z.object({ vars: z.array(z.string()) }).nullable(),
+    codePaste: z.object({}).nullable().catch(null),
+  }),
+);
+export type ProviderLoginCapabilityV40 = z.infer<
+  typeof providerLoginCapabilitySchemaV40
+>;
+
+/**
+ * Frozen `providers.list@7.0` snapshot of `providerLoginCapabilitySchema`:
+ * `oauthArgs` + `token` + `codePaste` + `terminalLogin`. Same hand-copy
+ * discipline as the `V10`/`V40` snapshots above - NOT derived from the live
+ * capability.
+ *
+ * The V40 snapshot exists because the base shape it backs kept pointing at the
+ * LIVE capability while its own keys were pinned, so `terminalLogin` reached
+ * four already-frozen shapes. `providerCliStateBaseShapeV70Preimage` points here for
+ * exactly that reason, one line later: the fifth capability field must not
+ * appear on v7.0 just because it appears on the live schema.
+ *
+ * That fifth field arrived - `remoteSafe` - and it is why this snapshot now
+ * backs `providerCliStateBaseShapeV70` and `providerCliStateBaseShapeV80` as
+ * well as the pre-image. Both of those kept pointing at the LIVE
+ * capability, so both released lines would have grown the marker; re-pointing
+ * them here was the whole fix, because this shape ALREADY held the four keys
+ * they shipped. Nothing new had to be snapshotted.
+ *
+ * Do not add fields here. Extend the live `providerLoginCapabilitySchema`,
+ * OPEN A NEW MINOR for it, and let the first bridge whose target models the new
+ * field fill it for old hosts, the way the v6->v7 bridge fills `terminalLogin`.
+ * That bridge is `providersListUpgradeV91ToV92` today: 7.0, 8.0, 9.0 and 9.1
+ * are all pinned to this four-key shape, so 9.2 is the first line that models a
+ * fifth key.
+ *
+ * This paragraph has now named three different hops (v7->v8, then v8->v9, then
+ * this), and the last correction was needed because the shapes were re-pointed
+ * and this text was not. The bridge MOVES; re-derive which target models your
+ * field rather than copying the answer from here. Filling on a hop whose target
+ * does not model the key is silently dropped, because `upgradeResponseToVersion`
+ * chains the callbacks by cast with no re-parse.
+ */
+export const providerLoginCapabilitySchemaV70 = lazySchema(() =>
+  z.object({
+    oauthArgs: z.array(z.string()).nullable(),
+    token: z.object({ vars: z.array(z.string()) }).nullable(),
+    codePaste: z.object({}).nullable().catch(null),
+    terminalLogin: z.object({}).nullable().catch(null),
+  }),
+);
+export type ProviderLoginCapabilityV70 = z.infer<
+  typeof providerLoginCapabilitySchemaV70
+>;
+
+/**
+ * A single logged-in profile (subscription) for a provider. See the
+ * multi-profile decision log's "Profile model". `ambient` is the read-only,
+ * host-adopted `~/.claude` / `~/.codex` login Traycer never writes to;
+ * `managed` is a Traycer-owned, isolated config dir under
+ * `~/.traycer/harness-accounts/<provider>/<profileId>/`.
+ */
+export const providerProfileKindSchema = lazySchema(() =>
+  z.enum(["ambient", "managed"]),
+);
+export type ProviderProfileKind = z.infer<typeof providerProfileKindSchema>;
+
+/**
+ * Auth-mechanism discriminator. Only subscription OAuth logins ship in v1;
+ * kept as a discriminator (not a bare boolean/omitted field) so a future
+ * API-key profile type can be added as a new union variant without schema
+ * surgery on `profiles[]` itself - see the decision log's "Auth types" row.
+ */
+export const providerProfileAuthTypeSchema = lazySchema(() =>
+  z.enum(["oauth"]),
+);
+export type ProviderProfileAuthType = z.infer<
+  typeof providerProfileAuthTypeSchema
+>;
+
+/**
+ * Live provider identity resolved for display. Deliberately distinct from the
+ * profile snapshot persisted on chat session anchors
+ * (`persistence/epic/senders.ts`): `providers.list` is a host-local RPC
+ * response (never cross-host/cross-collaborator replicated), so it is safe to
+ * carry `email` here for display - the PII restriction only applies to
+ * synced Y.Doc artifacts. See the decision log's PII scope.
+ */
+export const providerProfileIdentitySchema = lazySchema(() =>
+  z.object({
+    email: z.string().nullable(),
+    tier: z.string().nullable(),
+    accountUuid: z.string().nullable(),
+  }),
+);
+export type ProviderProfileIdentity = z.infer<
+  typeof providerProfileIdentitySchema
+>;
+
+/**
+ * Derived from the same rate-limit gauge cache `usageUpdatedAt` reads from
+ * (`rate-limit-gauge-cache.ts`'s `readProfileRateLimitStatus`) - a pure,
+ * already-captured snapshot, never a fresh probe. `"unknown"` means no gauge
+ * has been captured for this profile yet (never ran a turn, no active probe).
+ * The GUI's rate-limit switch-prompt banner reads this to offer "Continue on
+ * <profile>" among the provider's other non-limited profiles.
+ */
+export const providerProfileRateLimitStatusSchema = lazySchema(() =>
+  z.enum(["ok", "near_limit", "hard_limit", "unknown"]),
+);
+export type ProviderProfileRateLimitStatus = z.infer<
+  typeof providerProfileRateLimitStatusSchema
+>;
+
+export const PROVIDER_PROFILE_ACCENT_COLORS = [
+  "#ef4444",
+  "#f97316",
+  "#f59e0b",
+  "#84cc16",
+  "#10b981",
+  "#14b8a6",
+  "#06b6d4",
+  "#3b82f6",
+  "#8b5cf6",
+  "#a855f7",
+  "#d946ef",
+  "#ec4899",
+] as const;
+
+export const providerProfileAccentColorSchema = lazySchema(() =>
+  z.enum(PROVIDER_PROFILE_ACCENT_COLORS),
+);
+export type ProviderProfileAccentColor = z.infer<
+  typeof providerProfileAccentColorSchema
+>;
+
+// One near/at-limit rate-limit window on a profile, annotated with the model
+// family it gates. `family` is a provider-reported token - "opus", "sonnet",
+// a model-scoped bucket's display name ("Fable"), or an Antigravity group's
+// name and description - matched by the GUI against the selected model's
+// slug/label; `null` means a shared window that gates every model.
+export const providerProfileRateLimitScopeSchema = lazySchema(() =>
+  z.object({
+    family: z.string().nullable(),
+    severity: z.enum(["near_limit", "hard_limit"]),
+  }),
+);
+export type ProviderProfileRateLimitScope = z.infer<
+  typeof providerProfileRateLimitScopeSchema
+>;
+
+// Frozen `providers.list@7.0` profile row. Keep new profile fields off this
+// shape; v8.0 is the first line that can represent eligibility.
+const providerProfileShapeV70 = {
+  profileId: lazySchema(() => z.string()),
+  kind: providerProfileKindSchema,
+  authType: providerProfileAuthTypeSchema,
+  label: lazySchema(() => z.string()),
+  auth: PROVIDER_AUTH_SCHEMA_V20,
+  // Null until a login probe resolves it (e.g. a freshly created, not-yet-
+  // authenticated profile).
+  identity: lazySchema(() => providerProfileIdentitySchema.nullable()),
+  // Epoch-ms the last passive (live-turn) or active (on-demand probe) usage
+  // read landed for this profile; null before any read. Lets the usage
+  // popover badge a gauge as stale without a background poll - see the
+  // decision log's "Usage data". Describes the age of the READING the host
+  // holds, so a probe that failed transiently (timeout, connection, usage
+  // fetch) does NOT advance it - it is not evidence that anything was read.
+  usageUpdatedAt: lazySchema(() => z.number().nullable()),
+  // `.catch("unknown")` tolerates old host builds that predate this field.
+  rateLimitStatus: lazySchema(() =>
+    providerProfileRateLimitStatusSchema.catch("unknown"),
+  ),
+  // The windows behind `rateLimitStatus`, per model family (see the scope
+  // schema above), so the composer can scope its switch prompt to the selected
+  // model instead of warning profile-wide. `null` = no per-scope data: an old
+  // host build that predates this field (via `.catch(null)`, same guard as
+  // `accentColor`) or a profile whose gauge has never been read / has gone
+  // stale - consumers fall back to the profile-level `rateLimitStatus`. An
+  // empty array means "read fine, nothing limited".
+  rateLimitLimitedScopes: lazySchema(() =>
+    z.array(providerProfileRateLimitScopeSchema).nullable().catch(null),
+  ),
+  // Set when this profile's resolved identity (accountUuid, or email
+  // fallback) matches another active profile of the same provider (including
+  // ambient) - the id of that other profile. Duplicates are warned, never
+  // blocked (see the decision log's "Identity key" row); the GUI renders
+  // "same account as <label>".
+  duplicateOfProfileId: lazySchema(() => z.string().nullable().catch(null)),
+  // Only ever non-null on the ambient profile entry historically. Current
+  // hosts always project `null`: the GUI no longer renders ambient identity
+  // drift. The field stays on the wire so older peers still parse. Dismissal
+  // via `acknowledgeAmbientDrift` remains a no-op-capable host action for
+  // those older clients.
+  ambientDriftNotice: lazySchema(() =>
+    z
+      .object({
+        previousEmail: z.string().nullable(),
+        changedAt: z.number(),
+      })
+      .nullable()
+      .catch(null),
+  ),
+  // Deterministic per-profile accent color (hex), assigned by the host from a
+  // fixed palette and optionally overridden by the user. `.catch(null)`
+  // tolerates old host builds that predate this field; the GUI falls back to
+  // its own deterministic palette hash of `profileId`.
+  accentColor: lazySchema(() =>
+    providerProfileAccentColorSchema.nullable().catch(null),
+  ),
+  // Present when this active profile's accountUuid matches a removed profile.
+  // The add-profile naming step uses it to explain the preselected color
+  // suggestion without exposing tombstone rows in normal selection surfaces.
+  reusedTombstone: lazySchema(() =>
+    z
+      .object({
+        label: z.string(),
+        // Same forward-compat guard as the profile-level `accentColor` above:
+        // a single out-of-palette color here must degrade to null, not throw -
+        // otherwise the array-level `.catch([])` on `profiles` below would wipe
+        // every profile for this provider on an older client.
+        accentColor: providerProfileAccentColorSchema.nullable().catch(null),
+      })
+      .nullable()
+      .optional(),
+  ),
+} as const;
+
+export const providerProfileSchemaV70 = lazySchema(() =>
+  z.object(providerProfileShapeV70),
+);
+
+/**
+ * Whether this profile authenticates with a pasted API key, and whether one is
+ * stored - never the key itself, which has no wire representation in either
+ * direction (`providers.setProfileApiKey` carries it inbound and nothing
+ * carries it back).
+ *
+ * `supported` is a property of the PROVIDER-and-kind pair, not of the account:
+ * a provider whose key method exists only for Traycer-owned profile
+ * directories reports `false` on its ambient row, because writing the method
+ * selection there would reconfigure a directory shared with the user's other
+ * clients. So a client must gate its paste form on this flag and not on the
+ * provider id.
+ */
+export const providerProfileApiKeyStateSchema = lazySchema(() =>
+  z.object({
+    supported: z.boolean(),
+    configured: z.boolean(),
+  }),
+);
+export type ProviderProfileApiKeyState = z.infer<
+  typeof providerProfileApiKeyStateSchema
+>;
+
+export const providerProfileSchema = lazySchema(() =>
+  z.object({
+    ...providerProfileShapeV70,
+    // Host-wide eligibility. Old supporting decoders treat an omitted legacy
+    // field as enabled; older protocol lines omit disabled rows entirely.
+    enabled: z.boolean().default(true).catch(true),
+    // Per-profile API-key state (see the schema above). Same forward-compat
+    // shape as `launchCommand` below - `.catch(null).optional()`, so a host that
+    // predates the field degrades to "no key method here" rather than throwing
+    // and tripping the array-level `.catch([])` on `profiles`, which would wipe
+    // every profile for this provider. Null and absent both mean unknown, and a
+    // client renders no paste form for either.
+    apiKey: providerProfileApiKeyStateSchema.nullable().catch(null).optional(),
+    // Copyable command for opening this managed account directly in its CLI.
+    // The host owns the absolute config path and shell quoting; ambient rows and
+    // hosts that predate this field omit it. Landed inside v8.0 while that line
+    // was the unreleased live head opened by profile eligibility; the baseline
+    // now carries `providers.list` at canonical 8.0, so it is the released head
+    // and the next field here opens v9.0 rather than widening this one.
+    launchCommand: z
+      .object({
+        command: z.string(),
+        shell: z.enum(["posix", "powershell"]),
+      })
+      .nullable()
+      .catch(null)
+      .optional(),
+  }),
+);
+export type ProviderProfile = z.infer<typeof providerProfileSchema>;
+
+export function isProfileEnabled(profile: {
+  readonly enabled?: boolean;
+}): boolean {
+  return profile.enabled !== false;
+}
+
+export const providersSetProfileEnabledRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    profileId: z.string(),
+    enabled: z.boolean(),
+  }),
+);
+export type ProvidersSetProfileEnabledRequest = z.infer<
+  typeof providersSetProfileEnabledRequestSchema
+>;
+
+export const providersSetProfileEnabledResponseSchema = lazySchema(() =>
+  z.object({
+    profileId: z.string(),
+    enabled: z.boolean(),
+  }),
+);
+export type ProvidersSetProfileEnabledResponse = z.infer<
+  typeof providersSetProfileEnabledResponseSchema
+>;
+
+/**
+ * Store an API key against ONE profile.
+ *
+ * Deliberately a new method rather than a `profileId` on the released
+ * `providers.setApiKey`: that method is in `RELEASED_FLOOR_METHOD_NAMES`, so a
+ * request field is projected AWAY when the peer is on the floor line, and a
+ * key meant for one managed account would land in the provider-wide store and
+ * authenticate every other profile with it. A scope that must not be lost in
+ * translation cannot ride as a field on a released request - it has to be the
+ * thing being called. (Same reasoning as `providers.setEnabled@2.1`'s
+ * `profileAction` in reverse: folding on is right when losing the field
+ * degrades to today's behavior, and wrong when it silently widens.)
+ *
+ * The key is write-only across the wire: no response, state field or list
+ * response ever returns it, and `providerProfileApiKeyStateSchema` carries
+ * only whether one is stored.
+ */
+export const providersSetProfileApiKeyRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    profileId: z.string(),
+    // `min(1)` rather than an empty-string clear: an empty paste is a slip, and
+    // an accidental credential deletion is not a recoverable one. Clearing is
+    // `providers.clearProfileApiKey`, which the caller has to mean.
+    apiKey: z.string().min(1),
+  }),
+);
+export type ProvidersSetProfileApiKeyRequest = z.infer<
+  typeof providersSetProfileApiKeyRequestSchema
+>;
+
+export const providersSetProfileApiKeyResponseSchema = lazySchema(() =>
+  z.object({
+    profileId: z.string(),
+    apiKey: providerProfileApiKeyStateSchema,
+  }),
+);
+export type ProvidersSetProfileApiKeyResponse = z.infer<
+  typeof providersSetProfileApiKeyResponseSchema
+>;
+
+export const providersClearProfileApiKeyRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    profileId: z.string(),
+  }),
+);
+export type ProvidersClearProfileApiKeyRequest = z.infer<
+  typeof providersClearProfileApiKeyRequestSchema
+>;
+
+export const providersClearProfileApiKeyResponseSchema = lazySchema(() =>
+  z.object({
+    profileId: z.string(),
+    apiKey: providerProfileApiKeyStateSchema,
+  }),
+);
+export type ProvidersClearProfileApiKeyResponse = z.infer<
+  typeof providersClearProfileApiKeyResponseSchema
+>;
+
+/**
+ * Fold-in for profile rename/remove/recolor/acknowledgeAmbientDrift, carried
+ * on `providers.setEnabled`'s request (see that method's `@2.1` contract in
+ * `registry.ts` for why these live here instead of standalone
+ * `providers.renameProfile` / `removeProfile` / `recolorProfile` /
+ * `acknowledgeAmbientDrift` methods - a new top-level method name is
+ * handshake-fatal against an already-released peer, see
+ * `released-surface-compat.test.ts`).
+ *
+ * Rename/recolor apply to managed profiles and the ambient profile sentinel;
+ * remove remains managed-only. `acknowledgeAmbientDrift` durably clears the
+ * ambient profile's pending
+ * `ambientDriftNotice`. Current GUI never sends it (no drift UI); the
+ * variant stays so older clients can still ack. No `profileId`:
+ * there is exactly one ambient identity per provider. It rides the same
+ * `@2.1` minor as the other actions because
+ * `@2.1` was still unreleased WHEN THIS LANDED (the released surface was then
+ * `@2.0`) - versions exist to protect released peers, so an unreleased minor
+ * widens in place instead of minting `@2.2`. That window has since closed:
+ * `released-baseline-surface.json` now carries this family at canonical
+ * `@2.1`, so the line is frozen and the next field here costs `@2.2`.
+ */
+export const providerProfileActionSchema = lazySchema(() =>
+  z.discriminatedUnion("type", [
+    z.object({
+      type: z.literal("rename"),
+      profileId: z.string(),
+      // Capped so an arbitrarily long/hostile label (durability audit B6)
+      // can't bloat the registry file or break layout downstream.
+      label: z.string().min(1).max(64),
+    }),
+    z.object({
+      type: z.literal("remove"),
+      profileId: z.string(),
+    }),
+    z.object({
+      type: z.literal("recolor"),
+      profileId: z.string(),
+      accentColor: providerProfileAccentColorSchema,
+    }),
+    z.object({
+      type: z.literal("acknowledgeAmbientDrift"),
+    }),
+  ]),
+);
+export type ProviderProfileAction = z.infer<typeof providerProfileActionSchema>;
+
+/** macOS versions are display-only facts supplied by the executing host. */
+export const providerMacosVersionSchema = lazySchema(() =>
+  z
+    .string()
+    .max(32)
+    .regex(/^\d+\.\d+(?:\.\d+)?$/),
+);
+
+/** Managed, settled launch and per-version floors are independent verdicts. */
+export const providerMacosRequirementSchema = lazySchema(() =>
+  z.object({
+    runningMacos: providerMacosVersionSchema,
+    managed: z.object({ requiredMacos: providerMacosVersionSchema }).nullable(),
+    launch: z.object({ requiredMacos: providerMacosVersionSchema }).nullable(),
+    refusedVersions: z
+      .array(
+        z.object({
+          version: z.string(),
+          requiredMacos: providerMacosVersionSchema,
+        }),
+      )
+      .catch([]),
+  }),
+);
+export type ProviderMacosRequirement = z.infer<
+  typeof providerMacosRequirementSchema
+>;
+
+/**
+ * One Managed row of a provider that ships more than one managed line. Each
+ * line is its own pack, so the install state and the version panel are the
+ * line's own, with the same meanings (and the same tolerant decoding) as the
+ * provider-level fields of those names.
+ */
+export const providerManagedLineSchema = lazySchema(() =>
+  z.object({
+    line: opencodeLineSchema,
+    candidate: providerCliCandidateSchema.extend({
+      kind: z.literal("bundled"),
+    }),
+    packId: z.string().nullable().catch(null),
+    managedInstallState: providerManagedInstallStateSchema
+      .nullable()
+      .catch(null),
+    managedVersions: providerManagedVersionsSchema.nullable().catch(null),
+    managedVersionsUnavailable: providerManagedVersionsUnavailableSchema
+      .nullable()
+      .catch(null),
+  }),
+);
+export type ProviderManagedLine = z.infer<typeof providerManagedLineSchema>;
+
+/**
+ * Enablement is a plain STICKY BOOLEAN on every wire: `enabled` below is the
+ * whole story, and the only thing that changes it is the user's toggle
+ * (`providers.setEnabled`). An earlier revision of this line carried a
+ * tri-state `enablementMode` ("auto" derived enablement from passive
+ * detection) plus an `enablementSource` explanation; both were removed before
+ * either shipped, because a provider that silently flips itself on or off
+ * mid-session is the behaviour we are deliberately not shipping. The host
+ * still probes passively, but only to SEED a boolean once and to answer
+ * "is this account signed out" (`authStatus` on the GUI harness row) - never
+ * to re-derive `enabled`.
+ */
+
+const providerCliStateBaseShape = {
+  // List-only, first published by providers.list@10.2. Older hosts omit it;
+  // malformed future values degrade quietly without dropping the provider.
+  macosRequirement: lazySchema(() =>
+    providerMacosRequirementSchema.nullable().catch(null).optional(),
+  ),
+  enabled: lazySchema(() => z.boolean()),
+  disabledBy: lazySchema(() => providerDisabledBySchema.nullable()),
+  selected: providerSelectionSchema,
+  candidates: lazySchema(() => z.array(providerCliCandidateSchema)),
+  authPending: lazySchema(() => z.boolean()),
+  checkedAt: lazySchema(() => z.number().nullable()),
+  apiKey: providerApiKeyStateSchema,
+  // Extra CLI arguments the user wants appended when launching this provider
+  // as a terminal agent (the host tokenizes and appends them to the spawned
+  // argv). Only meaningful for terminal-agent-capable providers; "" when unset.
+  terminalAgentArgs: lazySchema(() => z.string().catch("")),
+  // Which classifier decides this provider's `auto`-mode approvals. Persisted
+  // beside `terminalAgentArgs` in `provider-overrides.json` and written by
+  // `providers.setAutoJudge`; this is the READ half, without which the
+  // Providers > General switch could not show its own stored value after a
+  // reload.
+  //
+  // `.optional()`, NOT `.default("traycer")` / `.catch(...)` - and the choice
+  // is load-bearing in two directions. On the wire it is the `authStatus`
+  // shape: a host too old to know about auto mode omits the key, and absent
+  // stays distinguishable from a real verdict. In the TYPE it is what keeps
+  // this field off every construction site: a defaulted field is required on
+  // OUTPUT, so it would have forced a fill into every `ProviderCliState`
+  // fixture in the renderer, which is the churn `nativeAutoJudge` caused on
+  // the harness row. Readers spell the fallback themselves
+  // (`state.autoJudge ?? "traycer"`), matching the documented default.
+  autoJudge: lazySchema(() => autoJudgeKindSchema.optional()),
+  // Whether this provider's agents may spawn the provider's OWN built-in
+  // subagents (Claude's `Agent` tool, Codex's multi-agent feature, OpenCode's
+  // `task`, ...). `false` turns that tool off for the session where the
+  // provider has a switch for it, and steers the model to Traycer agents
+  // everywhere; written by `providers.setNativeSubagents`, first published by
+  // `providers.list@10.5`. `.optional()` for the reasons `autoJudge` gives:
+  // absent is "host too old to say", and readers spell the `true` default
+  // themselves (`nativeSubagents ?? true`).
+  nativeSubagents: lazySchema(() => z.boolean().optional()),
+  // Per-provider environment overrides applied when the host spawns this
+  // provider's harness. Sorted by key for stable rendering; `[]` when unset.
+  envOverrides: lazySchema(() => z.array(providerEnvOverrideSchema).catch([])),
+  // Login/re-auth options for this provider. Null for providers that have no
+  // supported login flow (cursor, traycer) or where login capability is not
+  // yet modelled. `.catch(null)` tolerates old host builds that omit the field.
+  loginCapability: lazySchema(() =>
+    providerLoginCapabilitySchema.nullable().catch(null),
+  ),
+  // True while the host's shell-env probe for this provider is still running
+  // in the background (e.g. PATH binary discovery or env-sourced API key
+  // lookup). The client re-fetches until it flips false. A pending row always
+  // carries `available: false` semantically (don't trust candidates/auth yet).
+  // `.catch(false)` tolerates old host builds that omit the field — old
+  // behavior treats every verdict as final, which is correct for old hosts.
+  availabilityPending: lazySchema(() => z.boolean().catch(false)),
+  // Per-profile rows for this provider: the ambient login plus any
+  // Traycer-managed subscriptions. `[]` for providers that don't support the
+  // multi-profile capability (gated per-adapter, see the decision log's
+  // rollout row). The field ships with the v4.0 line: hosts on older lines
+  // never send it and the v3→v4 upgrade bridge fills `profiles: []` ("old
+  // host never had this feature"), with `.catch([])` kept as parse-time
+  // hardening. UI affordances only appear once a provider has 2+ rows
+  // (progressive disclosure).
+  profiles: lazySchema(() => z.array(providerProfileSchema).catch([])),
+  // Install lifecycle of this provider's managed (registry-backed) binary
+  // pack - see `providerManagedInstallStateSchema`. Null/undefined for a host
+  // that predates the provider pack registry, or (during the staged bundled
+  // -> managed rollout) for a provider T7 has not yet cut over; the renderer
+  // falls back to the existing `available` flag on the bundled candidate in
+  // both cases. `.optional()` keeps the key itself omittable in a TS object
+  // literal - host-side construction sites that predate this ticket (and
+  // T4's population work) don't need to be touched just to satisfy the type -
+  // while `.catch(null)` still normalizes a PRESENT-but-unrecognized value
+  // (an older client reading a newer host's shape) to null rather than
+  // throwing. Total decoder: every input either parses, defaults to null, or
+  // is simply absent - never a hard failure.
+  managedInstallState: lazySchema(() =>
+    providerManagedInstallStateSchema.nullable().catch(null).optional(),
+  ),
+  // Aggregated, direction-free "other sessions differ" signal - see
+  // `providerVersionVisibilitySchema`. Null/undefined/zero all mean nothing to
+  // show; see `managedInstallState` above for why the field is `.optional()`
+  // on top of `.catch(null)`.
+  versionVisibility: lazySchema(() =>
+    providerVersionVisibilitySchema.nullable().catch(null).optional(),
+  ),
+  // Phase-2 (live update lane) advisory - see `providerAdvisorySchema`. Lands
+  // now as a dormant field: no Phase-1 host ever populates it, always
+  // null/undefined. See `managedInstallState` above for why it's `.optional()`.
+  advisory: lazySchema(() =>
+    providerAdvisorySchema.nullable().catch(null).optional(),
+  ),
+  // Whether the host resolved a runnable CLI binary for this provider - the
+  // SAME `resolveEffectiveCliIdentity(...).path !== null` that decides whether
+  // `applyBinaryAbsentGate` strips this provider's CLI-routed write verbs from
+  // `nativeCapabilities`. False means those verbs were subtracted, and the UI
+  // owes the user a reason: without it a binary-less amp shows an MCP tab with
+  // no Add button, no Delete and no auth actions, and nothing anywhere saying
+  // why.
+  //
+  // Deliberately NOT derived client-side from `candidates`. The resolver's
+  // fallback order (selected custom -> bundled -> PATH, each only if
+  // `available`) is not the same question as "is any candidate available" - an
+  // available-but-unselected custom path satisfies the second and not the
+  // first - and re-deriving host resolution rules in the renderer is precisely
+  // the drift this field exists to stop.
+  //
+  // `.catch(true).optional()` for the reason `managedInstallState` is optional,
+  // with `true` as the quiet default: an old host omits the key, and assuming
+  // "resolved" reproduces today's exact behavior (no notice) rather than
+  // accusing every provider on an old host of a missing binary.
+  cliBinaryResolved: lazySchema(() => z.boolean().catch(true).optional()),
+  // ── v7.0 fields ────────────────────────────────────────────────────────
+  // These three ride `providers.list@7.0` and up. They arrived on an unreleased
+  // v8.0 that the release collapsed into v7.0. They are ABSENT from v6.0 and
+  // below because `providerCliStateSchemaV60` is a plain `z.object` whose key
+  // set does not model them, so the v7->v6 reparse drops them the way every
+  // older bridge drops the keys its target never modelled.
+  //
+  // v7.0 and v7.1 no longer bind this shape: their hand-frozen pins sit below.
+  // Growing THIS shape grows the v8.0 wire. The deep
+  // `z.toJSONSchema` snapshot in `__tests__/__fixtures__/frozen-catalog-lines.ts`
+  // pins both lines and turns red in a plain `bun run test` either way - when
+  // it does, freeze the line that stopped being head, do not regenerate over
+  // it.
+  //
+  // Which pack (if any) serves this provider's managed binary. Null means the
+  // provider has no managed pack on this host - the store is unmanaged, or the
+  // staged bundled -> managed rollout has not cut this provider over. It is
+  // the join key for everything per-pack: providers sharing a pack report the
+  // SAME `packId` and the same `managedVersions`, and the client renders one
+  // shared panel rather than N panels that would each mutate the same cell.
+  packId: lazySchema(() => z.string().nullable().catch(null).optional()),
+  // The per-pack version manager - see `providerManagedVersionsSchema`. Null
+  // whenever `packId` is null, and also when the host has a pack but no
+  // channel knowledge to describe it with.
+  managedVersions: lazySchema(() =>
+    providerManagedVersionsSchema.nullable().catch(null).optional(),
+  ),
+  // Why `managedVersions` is null, when the reason is worth showing. Carried
+  // as a SIBLING rather than folded into `managedVersions` as a union member
+  // on purpose: that field's `.catch(null)` exists to collapse the whole panel
+  // on a parse error, and a union would let the same catch swallow the reason
+  // too - reintroducing exactly the silence this field exists to remove.
+  //
+  // Both null is a real and correct combination: this provider has no managed
+  // pack. When both are somehow non-null the panel wins, since a renderable
+  // panel is strictly more useful than an explanation of its absence.
+  managedVersionsUnavailable: lazySchema(() =>
+    providerManagedVersionsUnavailableSchema.nullable().catch(null).optional(),
+  ),
+  // What the next execute would resolve to - see `providerNextRunBinarySchema`.
+  // Null when the host could not resolve any runnable binary, which is the
+  // same condition `cliBinaryResolved: false` reports.
+  nextRunBinary: lazySchema(() =>
+    providerNextRunBinarySchema.nullable().catch(null).optional(),
+  ),
+  // One entry per managed line this provider offers, for a provider with more
+  // than one (OpenCode); absent or `[]` otherwise. When present, the client
+  // renders these as its Managed rows and ignores the `bundled` candidate,
+  // which stays in `candidates` for clients below `providers.list@10.6`. It is
+  // a new KEY rather than a second `bundled` candidate because a within-major
+  // re-parse strips a key but cannot drop an array element: a second candidate
+  // would reach every older client as a second, indistinguishable Managed row.
+  managedLines: lazySchema(() =>
+    z.array(providerManagedLineSchema).catch([]).optional(),
+  ),
+  // Whether existing chats follow the stored selection's line: true when a
+  // caller on `providers.setSelection@2.3` saved the selection as it is now.
+  // A Settings Managed row is checked only when this is true. Absent reads as
+  // false, which is every host below `providers.list@10.7`.
+  chatsFollow: lazySchema(() => z.boolean().optional()),
+  // Whether this provider's own memory feature is left as the provider ships
+  // it for sessions Traycer launches. `false` is the user's choice that
+  // Traycer turns the provider's memory off at launch - both the recall of
+  // existing memories and the writing of new ones - for the sessions it
+  // starts; written by `providers.setNativeMemory`, first published by
+  // `providers.list@10.8`. `.optional()` for the reasons `autoJudge` gives:
+  // absent is "host too old to say", and readers spell the `true` default
+  // themselves (`nativeMemory ?? true`).
+  //
+  // `true` means Traycer applies NO memory override, not that the provider
+  // has memories switched on: a provider whose own default is off stays off.
+  // Nothing here is a statement about saved memory files, which both values
+  // leave alone.
+  nativeMemory: lazySchema(() => z.boolean().optional()),
+  // Whether this host can actually enforce the switch above for this
+  // provider. The client renders the control only when this is true, so a
+  // provider with no memory contract Traycer can drive shows no switch at all
+  // rather than one that would silently do nothing.
+  //
+  // A separate key rather than a `null` arm on `nativeMemory`, because the two
+  // facts fail in opposite directions and a reader must not have to guess
+  // which an absent value meant: absent `nativeMemory` is "host too old to
+  // say what the user chose", absent `nativeMemorySupported` is "host too old
+  // to say whether it can be enforced" - and the second is the one that must
+  // hide the control.
+  nativeMemorySupported: lazySchema(() => z.boolean().optional()),
+};
+
+const providerCliStateBaseShapeV10 = {
+  enabled: lazySchema(() => z.boolean()),
+  disabledBy: lazySchema(() => providerDisabledBySchema.nullable()),
+  selected: providerSelectionSchemaV10,
+  candidates: lazySchema(() => z.array(providerCliCandidateSchema)),
+  authPending: lazySchema(() => z.boolean()),
+  checkedAt: lazySchema(() => z.number().nullable()),
+  apiKey: providerApiKeyStateSchema,
+  terminalAgentArgs: lazySchema(() => z.string().catch("")),
+  envOverrides: lazySchema(() => z.array(providerEnvOverrideSchema).catch([])),
+  loginCapability: lazySchema(() =>
+    providerLoginCapabilitySchemaV10.nullable().catch(null),
+  ),
+};
+
+// Frozen protocol-v2.0 base shape (before `profiles`) - a hand-copy of
+// `providerCliStateBaseShape` as it stood before profiles[] was added, NOT
+// derived via `.extend()`/`.omit()` from the live shape. That distinction
+// matters: a plain (non-strict) `z.object` built from this frozen shape
+// silently DROPS an unmodeled `profiles` key during parsing, so the v3.0->v2.0
+// downgrade (`downgradeProviderCliStateListToV20` below) actually strips
+// profile identity (email, label) from the wire for v2.0 callers instead of
+// passively inheriting whatever the live shape grows next. Do not add
+// `profiles` (or any future field) here - extend the live
+// `providerCliStateBaseShape` instead and let the v3 bridge decide whether it
+// needs stripping too.
+const providerCliStateBaseShapeV20 = {
+  enabled: lazySchema(() => z.boolean()),
+  disabledBy: lazySchema(() => providerDisabledBySchema.nullable()),
+  selected: providerSelectionSchemaV10,
+  candidates: lazySchema(() => z.array(providerCliCandidateSchema)),
+  authPending: lazySchema(() => z.boolean()),
+  checkedAt: lazySchema(() => z.number().nullable()),
+  apiKey: providerApiKeyStateSchema,
+  terminalAgentArgs: lazySchema(() => z.string().catch("")),
+  envOverrides: lazySchema(() => z.array(providerEnvOverrideSchema).catch([])),
+  loginCapability: lazySchema(() =>
+    providerLoginCapabilitySchemaV10.nullable().catch(null),
+  ),
+  availabilityPending: lazySchema(() => z.boolean().catch(false)),
+};
+
+/**
+ * Latest provider CLI state (providers.list@10.8). Mutation echoes use their
+ * own frozen shape. Includes `nativeCapabilities` — per-capability facts the UI
+ * renders MCP/plugins/skills tabs from. `.catch(DEFAULT)` tolerates old host
+ * builds that omit the field when an old-host response is parsed on a new
+ * client.
+ */
+export const providerCliStateSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    ...providerCliStateBaseShape,
+    auth: PROVIDER_AUTH_SCHEMA_V20,
+    nativeCapabilities: providerNativeCapabilitiesSchema.catch(
+      DEFAULT_PROVIDER_NATIVE_CAPABILITIES,
+    ),
+  }),
+);
+export type ProviderCliState = z.infer<typeof providerCliStateSchema>;
+
+/**
+ * The provider row `providers.list@10.7` published: without the native-memory
+ * pair, which 10.8 added. Every older row derives from this one, so neither
+ * key reaches an older reader.
+ */
+const providerCliStateSchemaV107 = lazySchema(() =>
+  providerCliStateSchema.omit({
+    nativeMemory: true,
+    nativeMemorySupported: true,
+  }),
+);
+
+/**
+ * The provider row `providers.list@10.6` published: without `chatsFollow`,
+ * which 10.7 added. Every older row derives from this one, so the key reaches
+ * no older reader.
+ *
+ * Derived from the 10.7 row rather than the live one: a field added to the
+ * live shape must reach this line only through an explicit freeze above, or
+ * every older line silently widens with it.
+ */
+const providerCliStateSchemaV106 = lazySchema(() =>
+  providerCliStateSchemaV107.omit({ chatsFollow: true }),
+);
+
+/**
+ * The provider row `providers.list@10.5` published: without `managedLines`,
+ * and with the selection before its bundled arm carried `line`, which 10.6
+ * added. Every older row derives from this one, so neither reaches a released
+ * reader.
+ */
+const providerCliStateSchemaV105 = lazySchema(() =>
+  providerCliStateSchemaV106
+    .omit({ managedLines: true })
+    .extend({ selected: providerSelectionSchemaV10 }),
+);
+
+/**
+ * The provider row as every `providers.list` line below 10.5 published it:
+ * without `nativeSubagents`, which 10.5 added to the row. The 9.1 row and every
+ * 10.0-10.4 preimage derive from this row, so a released reader of those lines
+ * never sees the key, and `frozen-catalog-lines.test.ts` pins each line's serialized shape,
+ * so the NEXT row key reddens there rather than widening these lines unseen.
+ */
+const providerCliStateSchemaBeforeNativeSubagents = lazySchema(() =>
+  providerCliStateSchemaV105.omit({ nativeSubagents: true }),
+);
+
+/**
+ * The profile row `providers.list@9.0` / `@9.1` shipped: v8.0's plus `apiKey`,
+ * which landed while 9.x was still the unreleased head. Same hand-written
+ * discipline and same reason as `providerIdSchemaV91` above.
+ */
+export const providerProfileSchemaV91 = lazySchema(() =>
+  z.object({
+    ...providerProfileShapeV70,
+    enabled: z.boolean().default(true).catch(true),
+    apiKey: providerProfileApiKeyStateSchema.nullable().catch(null).optional(),
+    launchCommand: z
+      .object({
+        command: z.string(),
+        shell: z.enum(["posix", "powershell"]),
+      })
+      .nullable()
+      .catch(null)
+      .optional(),
+  }),
+);
+export type ProviderProfileV91 = z.infer<typeof providerProfileSchemaV91>;
+
+// ── Frozen leaves shared by every RELEASED providers.list line ─────────────
+//
+// `advisory`, `managedInstallState` and (on 9.1 only) `autoJudge` rode the live
+// schema on all four released rows until now. Each pin below is byte-identical
+// to its live original TODAY - deliberately, and it is the proof the pin is
+// right: `frozen-catalog-lines.test.ts` dumps every row, so a pin that captured
+// the wrong shape would redden it. They change nothing now and stop the next
+// member from landing on four shipped wires at once.
+//
+// Why these three and not the other fifty-odd leaves these rows can still
+// reach: see `__tests__/frozen-lines-reach-no-unreviewed-live-enum.test.ts`, which enumerates the
+// remainder as a reviewed list rather than leaving it to a reader to rediscover.
+
+/**
+ * Frozen advisory row. Reuses nothing from the live schema on purpose - a
+ * `z.object` spread of the live shape is what let the provider-pack fields grow
+ * v5.0 and v6.0 after they shipped (see `providerCliStateSchemaV50`).
+ */
+export const providerAdvisorySchemaV70 = lazySchema(() =>
+  z.object({
+    kind: z.enum([
+      "stale-channel",
+      "cannot-confirm-eligibility",
+      "yank-keep-running",
+      "yank-rollback",
+      "row-incompatibility",
+    ]),
+    detail: z.string().nullable(),
+  }),
+);
+export type ProviderAdvisoryV70 = z.infer<typeof providerAdvisorySchemaV70>;
+
+/**
+ * Frozen managed-install state. Hand-listed arms, because a discriminated union
+ * cannot be pinned with `.extend()` and a new `status` arm is exactly the growth
+ * this has to refuse.
+ *
+ * The error arm reuses `providerManagedInstallErrorReasonSchemaV70`, which was
+ * already frozen for the pre-image and is still byte-identical to the live enum,
+ * so there is no second copy of that list to keep in step. Field-level reasoning
+ * (why `percent` is nullable, why every `version` is `.catch(null).optional()`,
+ * what a null `retryAtMs` means per reason) is NOT duplicated here - it lives on
+ * `providerManagedInstallStateSchema` above and is one definition, not two.
+ */
+export const providerManagedInstallStateSchemaV70 = lazySchema(() =>
+  z.discriminatedUnion("status", [
+    z.object({ status: z.literal("absent") }),
+    z.object({
+      status: z.literal("downloading"),
+      percent: z.number().min(0).max(100).nullable(),
+      version: z.string().nullable().catch(null).optional(),
+    }),
+    z.object({
+      status: z.literal("installed"),
+      version: z.string().nullable().catch(null).optional(),
+    }),
+    z.object({
+      status: z.literal("error"),
+      reason: providerManagedInstallErrorReasonSchemaV70,
+      version: z.string().nullable().catch(null).optional(),
+      message: z.string(),
+      retryAtMs: z.number().int().nonnegative().nullable(),
+    }),
+  ]),
+);
+export type ProviderManagedInstallStateV70 = z.infer<
+  typeof providerManagedInstallStateSchemaV70
+>;
+
+/**
+ * Frozen auto-judge kind for `providers.list@9.1`.
+ *
+ * Declared here rather than beside the live enum in `auto-mode/contracts.ts`
+ * because this line is its only binder, and a freeze belongs with the contract
+ * it freezes. 9.1 is the ONLY released line that carries the key at all - 9.0
+ * omits it and 8.0 never had it - so unlike the two pins above there is no
+ * shared declaration to make.
+ */
+const autoJudgeKindSchemaV91 = lazySchema(() =>
+  z.enum(["provider", "traycer"]),
+);
+
+/**
+ * Frozen `providers.list@9.0` / `@9.1` managed-versions row. V80's shape with
+ * this line's id enum swapped in; the key set has not moved since V70.
+ *
+ * It exists for one leaf. `sharedWithProviders` is a host→client `providerId`
+ * array, and `providerManagedVersionsSchemaV80`'s comment records what leaving
+ * it live cost last time: "leaving it live let Antigravity reach a released
+ * wire". A `.extend()` on the live row does not reach a nested schema, so
+ * pinning `providerId` at the top level and stopping there leaves this one
+ * reading the live enum - the same hole, one level down.
+ */
+const providerManagedVersionsSchemaV91 = lazySchema(() =>
+  z.object({
+    autoDownload: z.boolean(),
+    pinnedVersion: z.string().nullable(),
+    updateAvailable: z.object({ version: z.string() }).nullable(),
+    sharedWithProviders: z.array(providerIdSchemaV91).catch([]),
+    totalSizeBytes: z.number().int().nonnegative().nullable(),
+    available: z.array(providerPackVersionSchema),
+  }),
+);
+
+/**
+ * Frozen `providers.list@9.1` provider state: the live shape as it stood
+ * before the login-capability markers.
+ *
+ * 9.1 stopped being the head line when 9.2 opened to publish `remoteSafe` and
+ * `selfOpensBrowser`. It is frozen HERE, against the four-key login capability
+ * it actually shipped, and that pin is the whole point of this declaration.
+ *
+ * `.omit()` states a delta against the live shape, which is the right tool
+ * when the delta is a TOP-LEVEL key - but it is blind to a key added INSIDE a
+ * nested schema the frozen alias still points at. That is exactly how these
+ * two markers silently grew 9.0 and 9.1 after they had shipped: both lines
+ * reached `providerLoginCapabilitySchema` by reference, so widening the live
+ * capability widened two released lines with it, and the released host
+ * `host-v1.3.2-staging.39.g3a73077` publishes a `protocol-surface.json`
+ * advertising canonical 9.1 with only `oauthArgs` / `token` / `codePaste` /
+ * `terminalLogin`. Pinning `loginCapability` to the four-key
+ * `providerLoginCapabilitySchemaV70` is what makes this snapshot match the
+ * bytes those hosts actually send.
+ *
+ * Do NOT add fields here, and do not let a field reach this shape through a
+ * live nested schema either. Add them to `providerCliStateBaseShape` above,
+ * which only 9.2 (the head line) publishes.
+ *
+ * WHAT THE FOUR PINS COVER, AND WHAT THEY DO NOT. `loginCapability` is the
+ * leaf this freeze was written for; the other three are the leaves whose
+ * growth has already moved a released line once. `providerId` and
+ * `managedVersions.sharedWithProviders` are the two `providerId` enums - V70
+ * froze the second for Reasonix and V80 again for Antigravity - and `profiles`
+ * is the row `apiKey` and `launchCommand` were added to.
+ *
+ * Four more pins joined them afterwards, in the change that added
+ * `frozen-line-projection.ts`: `nativeCapabilities` (for its `supportedTabs`
+ * enum), `managedInstallState`, `advisory` and `autoJudge`. `autoJudge` is the
+ * odd one - it exists only on 9.1 and 9.2, so V90 omits it and V80 has no such
+ * key, and it has no precedent in either direction.
+ *
+ * WHY `nativeCapabilities` WAS THE ONE TO TAKE FIRST. Not because it carries a
+ * `providerId` - it does not. Because of the GRANULARITY of the `.catch()`
+ * standing between the leaf and the rest of the row: `nativeCapabilities` is
+ * read through a WHOLE-OBJECT `.catch(DEFAULT)`, so a single unknown
+ * `supportedTabs` member costs a peer its MCP, Plugins and Skills tabs at once,
+ * where `sharedWithProviders`'s `.catch([])` degrades to one missing label.
+ * `providerSettingsTabSchema` had also already grown once (`modelProviders`).
+ * That is the question to ask of any future leaf, in place of "does it carry an
+ * id".
+ *
+ * A PIN ALONE WOULD NOT HAVE HELPED. Freezing an enum that sits in an array
+ * under a catch does not protect the peer - it moves where the collapse
+ * happens. Unpinned, the host forwards the unknown member and the peer's own
+ * copy of this schema discards the object; pinned, the host's own downgrade
+ * discards it first. Same loss. What changes the outcome is
+ * {@link projectOntoFrozenLine}, which drops the member and keeps its siblings,
+ * and it can only do that for a leaf that is pinned - the two halves are one
+ * mechanism and neither is worth much alone.
+ *
+ * THESE ARE STILL NOT EVERY LIVE SCHEMA THIS ROW REACHES, and that is no longer
+ * a caveat a reader has to take on trust:
+ * `__tests__/frozen-lines-reach-no-unreviewed-live-enum.test.ts` walks this row
+ * and names every live enum still reachable from it, with the field path, and
+ * fails if the set changes. Note what that test does that the frozen-catalog
+ * snapshot cannot - a frozen hand-copy and a live alias dump IDENTICALLY, so
+ * the snapshot stays green while a leaf silently tracks the head. Ablate any
+ * pin below and the snapshot passes 38/38 while that test reddens on the exact
+ * path.
+ *
+ * If you grow any of these, pin it here in the same change - the frozen-catalog
+ * row will go red, and regenerating it instead of pinning is the mistake this
+ * whole comment exists to prevent.
+ */
+export const providerCliStateSchemaV91 = lazySchema(() =>
+  providerCliStateSchemaBeforeNativeSubagents
+    .omit({ macosRequirement: true })
+    .extend({
+      providerId: providerIdSchemaV91,
+      profiles: z.array(providerProfileSchemaV91).catch([]),
+      managedVersions: providerManagedVersionsSchemaV91
+        .nullable()
+        .catch(null)
+        .optional(),
+      loginCapability: providerLoginCapabilitySchemaV70.nullable().catch(null),
+      managedInstallState: providerManagedInstallStateSchemaV70
+        .nullable()
+        .catch(null)
+        .optional(),
+      advisory: providerAdvisorySchemaV70.nullable().catch(null).optional(),
+      autoJudge: autoJudgeKindSchemaV91.optional(),
+      nativeCapabilities: providerNativeCapabilitiesSchemaV70.catch(
+        DEFAULT_PROVIDER_NATIVE_CAPABILITIES,
+      ),
+    }),
+);
+export type ProviderCliStateV91 = z.infer<typeof providerCliStateSchemaV91>;
+
+export const providersListResponseSchemaV91 = lazySchema(() =>
+  z.object({
+    providers: z.array(providerCliStateSchemaV91),
+    native: nativeListResultSchemaBeforeMcpRemedies.nullable().default(null),
+  }),
+);
+export type ProvidersListResponseV91 = z.infer<
+  typeof providersListResponseSchemaV91
+>;
+
+/**
+ * Frozen `providers.list@9.0` provider state: 9.1's shape without `autoJudge`.
+ *
+ * Derived from the 9.1 snapshot rather than from the live shape, so the
+ * capability pin above covers this line too - 9.0 shipped the same four-key
+ * capability and the same released host advertises it that way.
+ */
+export const providerCliStateSchemaV90 = lazySchema(() =>
+  providerCliStateSchemaV91.omit({
+    autoJudge: true,
+  }),
+);
+export type ProviderCliStateV90 = z.infer<typeof providerCliStateSchemaV90>;
+
+/**
+ * Frozen `providers.list@9.2` provider state: 9.1's shape with the five-key
+ * login capability 9.2 was opened to publish.
+ *
+ * 9.2 bound the live state while it was the head line. `1.5.0` shipped it, so
+ * the next provider id would have widened it in place, which is what happened
+ * to 8.0 with Antigravity. It is frozen here and major 10 carries the ids added
+ * since.
+ *
+ * Derived from the 9.1 snapshot, so every pin that one took covers this line
+ * too: both `providerId` enums (`providerIdSchemaV91`, twenty-one ids), the
+ * profile row, `managedInstallState`, `advisory`, `autoJudge` and
+ * `nativeCapabilities`. Only `loginCapability` differs, and it reads the live
+ * capability by reference: 9.2 is the line that shipped `remoteSafe` and
+ * `selfOpensBrowser`, and `frozen-catalog-lines.test.ts` pins this row's whole
+ * serialized shape, so a key added to that capability reddens it rather than
+ * widening this line unseen. When that happens, hand-freeze the capability
+ * here; do not regenerate the fixture.
+ *
+ * Do NOT add fields or ids here. Add them to `providerCliStateBaseShape`
+ * above, which only the head line (10.1 today) publishes.
+ */
+export const providerCliStateSchemaV92 = lazySchema(() =>
+  providerCliStateSchemaV91.extend({
+    loginCapability: providerLoginCapabilitySchema.nullable().catch(null),
+  }),
+);
+export type ProviderCliStateV92 = z.infer<typeof providerCliStateSchemaV92>;
+
+export const providersListResponseSchemaV92 = lazySchema(() =>
+  z.object({
+    providers: z.array(providerCliStateSchemaV92),
+    native: nativeListResultSchemaBeforeMcpRemedies.nullable().default(null),
+  }),
+);
+export type ProvidersListResponseV92 = z.infer<
+  typeof providersListResponseSchemaV92
+>;
+
+/**
+ * Canonical (live) `providers.list` request. Optional `native` list/discover
+ * query folds the mcp/plugins/skills list verbs onto this carrier. Callers on
+ * any earlier line predate it, so the v6.0 -> v7.0 upgrade fills `native: null`
+ * ("classic caller, no native query").
+ *
+ * `native` rides v7.0. It was authored against the live request object
+ * while v6.0 was still unreleased, which silently grew the already-shipped
+ * v4.0/v5.0/v6.0 request lines too; `host-v1.1.10` then froze those three
+ * lines without it, because the commit that added it was not in the release
+ * cherry-pick. Every line below v7.0 is pinned to
+ * `providersListRequestSchemaBeforeV70` for that reason. v7.0 itself BINDS this
+ * live schema (the release collapsed the unreleased v8.0 into it), so a request
+ * field added here reaches the v7.0 wire immediately - it does not wait for a
+ * new line. `providersListRequestSchemaV70` is the hand-frozen copy of that same
+ * wire, and it keeps its `V70` name because it still earns it: the collapse
+ * moved only the response, so the frozen request and this live one are the same
+ * shape. It is not a contract pin - the contract binds this schema - but it is
+ * a real freeze rather than a fixture.
+ *
+ * Nothing enforces that equality, which is the part to watch. Add a request
+ * field here and v7.0's wire grows with it while the copy below does not,
+ * turning `providersListRequestSchemaV70` into a name for a shape no line
+ * serializes - exactly what the response side had to be renamed out of. See the
+ * equality pin in `__tests__/provider-schemas-v70-pins.test.ts`.
+ */
+export const providersListRequestSchema = lazySchema(() =>
+  z.object({
+    forceAuthRefresh: z.boolean().optional(),
+    native: nativeListQuerySchema.nullable().default(null),
+  }),
+);
+export type ProvidersListRequest = z.infer<typeof providersListRequestSchema>;
+
+/**
+ * Frozen request shape for every released `providers.list` line before v7.0
+ * (v1.0 through v6.0 all shipped exactly this). Hand-pinned rather than
+ * derived from the live schema via `.omit()` so a future request field cannot
+ * leak into a shipped line the way `native` did.
+ */
+export const providersListRequestSchemaBeforeV70 = lazySchema(() =>
+  z.object({
+    forceAuthRefresh: z.boolean().optional(),
+  }),
+);
+export type ProvidersListRequestBeforeV70 = z.infer<
+  typeof providersListRequestSchemaBeforeV70
+>;
+
+/**
+ * Frozen `providers.list@7.0` request: the pre-v7.0 shape plus `native`, which
+ * is the only field this line added. A hand-copy of the live request as it
+ * stands on v7.0, not `.extend()`ed from
+ * `providersListRequestSchemaBeforeV70` and not aliased to
+ * `providersListRequestSchema` - the alias is precisely the arrangement that
+ * grew v4.0/v5.0/v6.0 with `native`, and an `.extend()` inherits whatever the
+ * base grows next.
+ *
+ * `nativeListQuerySchema` is still the LIVE query schema, and that is a
+ * deliberate stop rather than an oversight: this pin freezes v7.0's own key
+ * set, and growth INSIDE the native query is caught by the deep JSON-Schema
+ * snapshot in `__tests__/__fixtures__/frozen-catalog-lines.ts` rather than
+ * silently. Same for the live sub-schemas the response shape below keeps.
+ */
+export const providersListRequestSchemaV70 = lazySchema(() =>
+  z.object({
+    forceAuthRefresh: z.boolean().optional(),
+    native: nativeListQuerySchema.nullable().default(null),
+  }),
+);
+export type ProvidersListRequestV70 = z.infer<
+  typeof providersListRequestSchemaV70
+>;
+
+/**
+ * Canonical (live) `providers.list` response. Always returns the classic
+ * provider catalog; when the request carried a `native` query, `native` holds
+ * the list/discover result (or a typed native error). Classic callers receive
+ * `native: null`.
+ *
+ * Earlier lines each bind a frozen response; only the head binds this
+ * live schema, so new fields do not widen a released line.
+ */
+export const providersListResponseSchema = lazySchema(() =>
+  z.object({
+    providers: z.array(providerCliStateSchema),
+    native: nativeListResultSchema.nullable().default(null),
+    // True on a sandbox host: it stores no provider credential
+    // (`SANDBOX_HOST_REFUSES_CREDENTIALS`), so API keys, logins and profiles
+    // are managed in the user's account and reach the sandbox through the
+    // egress broker. The Providers panel then replaces its credential controls
+    // with one line pointing there. Absent means false, which is every host
+    // that is not a sandbox and every host that predates the flag.
+    //
+    // A new KEY on `providers.list@10.5`. The frozen 10.0-10.4 responses strip
+    // it on the within-major re-parse, so no emission gate is needed.
+    // `.optional()` rather than defaulted, so it is not required on OUTPUT at
+    // the response's construction sites.
+    credentialsManagedInAccount: z.boolean().optional(),
+    // `"personal"` when this host serves its provider configuration from the
+    // person's Personal environment; `null` or absent on a host without
+    // environments. Another 10.5 KEY, stripped for an older peer the same way;
+    // `.optional()` for the same construction-site reason.
+    scope: z.literal("personal").nullable().optional(),
+    // The profiles that live on this host only, one entry each: "On <host>
+    // only, link to use everywhere". On the envelope rather than on the
+    // profile row because `providerProfileSchema` is shared by reference with
+    // every provider-state response, released lines included, so a row key
+    // would widen all of them. Open strings, so no id enum grows here.
+    onHostOnly: z
+      .array(
+        z.object({
+          providerId: z.string().min(1),
+          profileId: z.string().min(1),
+        }),
+      )
+      .optional(),
+  }),
+);
+export type ProvidersListResponse = z.infer<typeof providersListResponseSchema>;
+
+/**
+ * Frozen `providers.list@10.7` response: the live envelope over the 10.7 row
+ * (`providerCliStateSchemaV107`), before 10.8 added the native-memory pair.
+ * 10.8 grew the ROW only, so the envelope here is the live one key for key - a
+ * hand copy all the same, for the reason the 10.4 one gives: an `.omit()` of
+ * the live envelope would let the next envelope key reach this line unseen.
+ */
+export const providersListResponseSchemaV107Preimage = lazySchema(() =>
+  z.object({
+    providers: z.array(providerCliStateSchemaV107),
+    native: nativeListResultSchema.nullable().default(null),
+    credentialsManagedInAccount: z.boolean().optional(),
+    scope: z.literal("personal").nullable().optional(),
+    onHostOnly: z
+      .array(
+        z.object({
+          providerId: z.string().min(1),
+          profileId: z.string().min(1),
+        }),
+      )
+      .optional(),
+  }),
+);
+
+/**
+ * Frozen `providers.list@10.6` response: the live envelope over the 10.6 row
+ * (`providerCliStateSchemaV106`), before 10.7 added `chatsFollow`. A hand copy
+ * of the envelope for the reason the 10.4 one is.
+ */
+export const providersListResponseSchemaV106Preimage = lazySchema(() =>
+  z.object({
+    providers: z.array(providerCliStateSchemaV106),
+    native: nativeListResultSchema.nullable().default(null),
+    credentialsManagedInAccount: z.boolean().optional(),
+    scope: z.literal("personal").nullable().optional(),
+    onHostOnly: z
+      .array(
+        z.object({
+          providerId: z.string().min(1),
+          profileId: z.string().min(1),
+        }),
+      )
+      .optional(),
+  }),
+);
+
+/** The list@10.0 response before MCP remedies and notices were introduced. */
+export const providersListResponseSchemaV100Preimage = lazySchema(() =>
+  z.object({
+    providers: z.array(
+      providerCliStateSchemaBeforeNativeSubagents
+        .omit({ macosRequirement: true })
+        .extend({
+          nativeCapabilities:
+            providerNativeCapabilitiesSchemaBeforeMcpRemedies.catch(
+              DEFAULT_PROVIDER_NATIVE_CAPABILITIES,
+            ),
+        }),
+    ),
+    native: nativeListResultSchemaBeforeMcpRemedies.nullable().default(null),
+  }),
+);
+
+/** The released list@10.1 shape before the list-only macOS verdict. */
+export const providersListResponseSchemaV101Preimage = lazySchema(() =>
+  z.object({
+    providers: z.array(
+      providerCliStateSchemaBeforeNativeSubagents
+        .omit({ macosRequirement: true })
+        .extend({
+          nativeCapabilities:
+            providerNativeCapabilitiesSchemaBeforeOpenChatPlugins.catch(
+              DEFAULT_PROVIDER_NATIVE_CAPABILITIES,
+            ),
+        }),
+    ),
+    native: nativeListResultSchemaV101Preimage.nullable().default(null),
+  }),
+);
+
+/** The published list@10.2 shape, before MCP origin and coverage. */
+export const providersListResponseSchemaV102Preimage = lazySchema(() =>
+  z.object({
+    providers: z.array(
+      providerCliStateSchemaBeforeNativeSubagents.extend({
+        nativeCapabilities:
+          providerNativeCapabilitiesSchemaBeforeOpenChatPlugins.catch(
+            DEFAULT_PROVIDER_NATIVE_CAPABILITIES,
+          ),
+      }),
+    ),
+    native: nativeListResultSchemaV101Preimage.nullable().default(null),
+  }),
+);
+
+/** Kilo's published list@10.3 before the open-chat plugin capability. */
+export const providersListResponseSchemaV103Preimage = lazySchema(() =>
+  z.object({
+    providers: z.array(
+      providerCliStateSchemaBeforeNativeSubagents.extend({
+        nativeCapabilities:
+          providerNativeCapabilitiesSchemaBeforeOpenChatPlugins.catch(
+            DEFAULT_PROVIDER_NATIVE_CAPABILITIES,
+          ),
+      }),
+    ),
+    native: nativeListResultSchema.nullable().default(null),
+  }),
+);
+
+/**
+ * Frozen `providers.list@10.4` response: the envelope before
+ * `credentialsManagedInAccount`, `scope` and `onHostOnly` opened 10.5 above
+ * it.
+ *
+ * A hand copy of the envelope rather than an `.omit()` of the live one, so the
+ * next envelope key cannot reach it. The provider row is the pre-10.5 row
+ * (`providerCliStateSchemaBeforeNativeSubagents`): 10.5 added `nativeSubagents`
+ * to it, the two minors must share its id enums (no minor of a major may grow
+ * a response enum over its predecessor), and `frozen-catalog-lines.test.ts`
+ * pins this line's whole serialized shape, so the next key added to the row
+ * reddens it rather than widening this line unseen. When that happens, freeze
+ * the row again; do not regenerate the fixture.
+ */
+export const providersListResponseSchemaV104Preimage = lazySchema(() =>
+  z.object({
+    providers: z.array(providerCliStateSchemaBeforeNativeSubagents),
+    native: nativeListResultSchema.nullable().default(null),
+  }),
+);
+
+/**
+ * Frozen `providers.list@10.5` response: the 10.5 envelope over the 10.5 row
+ * (`providerCliStateSchemaV105`), before 10.6 added `managedLines` and the
+ * selection's `line`. A hand copy of the envelope for the reason the 10.4 one
+ * is.
+ */
+export const providersListResponseSchemaV105Preimage = lazySchema(() =>
+  z.object({
+    providers: z.array(providerCliStateSchemaV105),
+    native: nativeListResultSchema.nullable().default(null),
+    credentialsManagedInAccount: z.boolean().optional(),
+    scope: z.literal("personal").nullable().optional(),
+    onHostOnly: z
+      .array(
+        z.object({
+          providerId: z.string().min(1),
+          profileId: z.string().min(1),
+        }),
+      )
+      .optional(),
+  }),
+);
+
+/**
+ * Frozen `providers.list@9.0` response - the pre-`autoJudge` provider state.
+ *
+ * A 9.0 peer needs no bridge to reach it: `autoJudge` is a new KEY, and a
+ * within-major re-parse through this shape strips an unknown key rather than
+ * rejecting it (unlike a new ENUM MEMBER, which is what forced
+ * `responseGrowthProjectionGated` on `agent.gui.listHarnesses@9.1`). The
+ * cross-major bridges get it free for the same reason: every one of them
+ * re-parses through a frozen `providerCliStateSchemaV*`.
+ */
+export const providersListResponseSchemaV90 = lazySchema(() =>
+  z.object({
+    providers: z.array(providerCliStateSchemaV90),
+    native: nativeListResultSchemaBeforeMcpRemedies.nullable().default(null),
+  }),
+);
+export type ProvidersListResponseV90 = z.infer<
+  typeof providersListResponseSchemaV90
+>;
+
+// ── Frozen protocol-v2.0 provider state + list response (before Amp) ───────
+// `providers.list` always returns every provider; v2.0 shipped without Amp, so
+// it is frozen here as actually shipped. The v3.0 line adds Amp and a v3→v2
+// (and v3→v1) downgrade bridge filters it for older callers. Do not add new
+// providers here - use the existing v3 bridge. Frozen WITHOUT
+// nativeCapabilities (that rides @3.1 / @2.1). `providerIdSchemaV20` is ONLY
+// for this list@2.0 response shape — mutation @2.0 responses are amp-inclusive
+// (tag-exact host-v1.1.5); see providerMutationCliStateSchemaV20 below.
+//
+// Built from the hand-frozen `providerCliStateBaseShapeV20` - NOT
+// `.extend()` on the live `providerCliStateSchema` - so this type never
+// silently absorbs a future field the live shape grows (see that shape's
+// comment; `profiles[]` is the concrete case this guards against).
+export const providerCliStateSchemaV20 = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchemaV20,
+    ...providerCliStateBaseShapeV20,
+    auth: PROVIDER_AUTH_SCHEMA_V20,
+  }),
+);
+export type ProviderCliStateV20 = z.infer<typeof providerCliStateSchemaV20>;
+export const providersListResponseSchemaV20 = lazySchema(() =>
+  z.object({
+    providers: z.array(providerCliStateSchemaV20),
+  }),
+);
+export type ProvidersListResponseV20 = z.infer<
+  typeof providersListResponseSchemaV20
+>;
+
+/**
+ * Tag-exact host-v1.1.5 shape for state-returning mutation @2.0 responses.
+ * Amp-inclusive (the released @2.0 mutation surface accepted amp); no
+ * `nativeCapabilities` (@2.1-only). Distinct from list@2.0's pre-amp freeze.
+ * Oracle: `git show host-v1.1.5:protocol/src/host/provider-schemas.ts` —
+ * mutation responses reused the then-latest amp-inclusive state schema.
+ */
+export const providerMutationCliStateSchemaV20 = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    ...providerCliStateBaseShapeV20,
+    auth: PROVIDER_AUTH_SCHEMA_V20,
+  }),
+);
+export type ProviderMutationCliStateV20 = z.infer<
+  typeof providerMutationCliStateSchemaV20
+>;
+
+// ── Frozen protocol-v3.0 provider state + list response (with Amp, before ──
+// Devin/Pi). `providers.list` always returns every provider; v3.0 shipped with
+// Amp and WITHOUT `profiles` - multi-profile landed mid-line but never reached
+// a released host on this line, so `profiles` belongs to the v4.0 cut and the
+// v3→v4 upgrade fills `profiles: []` for v3.0 hosts. The v4.0 line also adds
+// Devin/Pi, and the v4→v3 (and v4→v2 / v4→v1) downgrade bridges filter them
+// for older callers. Do not add new providers or fields here - use the
+// existing version bridges.
+//
+// Built as a hand-frozen snapshot of the base shape as actually released on
+// the v3.0 line, with the frozen v3.0 provider-id enum - NOT derived via
+// `.extend()` from the live schema, so future live-only fields do not leak
+// into the v3.0 wire for already-shipped clients. The plain (non-strict)
+// `z.object` built from this shape also silently DROPS an unmodeled
+// `profiles` key, so the v4.0->v3.0 downgrade strips profile identity
+// (email, label) off the wire for v3.0 callers that never negotiated profile
+// support - same mechanism as `providerCliStateBaseShapeV20`.
+const providerCliStateBaseShapeV30 = {
+  enabled: lazySchema(() => z.boolean()),
+  disabledBy: lazySchema(() => providerDisabledBySchema.nullable()),
+  selected: providerSelectionSchemaV10,
+  candidates: lazySchema(() => z.array(providerCliCandidateSchema)),
+  authPending: lazySchema(() => z.boolean()),
+  checkedAt: lazySchema(() => z.number().nullable()),
+  apiKey: providerApiKeyStateSchema,
+  terminalAgentArgs: lazySchema(() => z.string().catch("")),
+  envOverrides: lazySchema(() => z.array(providerEnvOverrideSchema).catch([])),
+  loginCapability: lazySchema(() =>
+    providerLoginCapabilitySchemaV10.nullable().catch(null),
+  ),
+  availabilityPending: lazySchema(() => z.boolean().catch(false)),
+};
+
+export const providerCliStateSchemaV30 = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchemaV30,
+    ...providerCliStateBaseShapeV30,
+    auth: PROVIDER_AUTH_SCHEMA_V20,
+  }),
+);
+export type ProviderCliStateV30 = z.infer<typeof providerCliStateSchemaV30>;
+export const providersListResponseSchemaV30 = lazySchema(() =>
+  z.object({
+    providers: z.array(providerCliStateSchemaV30),
+  }),
+);
+export type ProvidersListResponseV30 = z.infer<
+  typeof providersListResponseSchemaV30
+>;
+
+// ── Frozen protocol-v4.0 provider state + list response (with Devin/Pi, ────
+// before Hermes/omp). `providers.list` always returns every provider; v4.0
+// shipped (host-v1.1.7) with Devin/Pi, `profiles[]`, and the code-paste-
+// capable login capability. The v5.0 line adds Hermes and omp, and the v5→v4
+// (and v5→v3 / v5→v2 / v5→v1) downgrade bridges filter them for older
+// callers. Do not add new providers or fields here - use the existing v5
+// bridge.
+//
+// Built as a hand-frozen snapshot of the base shape as actually released on
+// the v4.0 line, with the frozen v4.0 provider-id enum - NOT derived via
+// `.extend()` from the live schema, so future live-only fields do not leak
+// into the v4.0 wire for already-shipped clients.
+//
+// `loginCapability` points at the hand-frozen `providerLoginCapabilitySchemaV40`
+// for the same reason the shape itself is hand-frozen: pinning the shape's KEYS
+// while leaving one of them wired to a live sub-schema leaves that sub-schema
+// free to grow on every line this shape backs (v4.0, v5.0, v6.0 list responses
+// and the @2.1 mutation echo). See that schema's comment.
+const providerCliStateBaseShapeV40 = {
+  enabled: lazySchema(() => z.boolean()),
+  disabledBy: lazySchema(() => providerDisabledBySchema.nullable()),
+  selected: providerSelectionSchemaV10,
+  candidates: lazySchema(() => z.array(providerCliCandidateSchema)),
+  authPending: lazySchema(() => z.boolean()),
+  checkedAt: lazySchema(() => z.number().nullable()),
+  apiKey: providerApiKeyStateSchema,
+  terminalAgentArgs: lazySchema(() => z.string().catch("")),
+  envOverrides: lazySchema(() => z.array(providerEnvOverrideSchema).catch([])),
+  loginCapability: lazySchema(() =>
+    providerLoginCapabilitySchemaV40.nullable().catch(null),
+  ),
+  availabilityPending: lazySchema(() => z.boolean().catch(false)),
+  profiles: lazySchema(() => z.array(providerProfileSchemaV70).catch([])),
+};
+
+export const providerCliStateSchemaV40 = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchemaV40,
+    ...providerCliStateBaseShapeV40,
+    auth: PROVIDER_AUTH_SCHEMA_V20,
+  }),
+);
+export type ProviderCliStateV40 = z.infer<typeof providerCliStateSchemaV40>;
+export const providersListResponseSchemaV40 = lazySchema(() =>
+  z.object({
+    providers: z.array(providerCliStateSchemaV40),
+  }),
+);
+
+/**
+ * Frozen `providers.list` response as shipped in protocol v5.0.
+ *
+ * Both halves are pinned - the id enum AND the base shape. Pinning only the
+ * enum is not enough: this schema originally spread the LIVE base shape, whose
+ * comment ("so a future `.extend()` cannot silently leak back") described the
+ * intent but not the effect. A field ADDED to the live base shape leaks in the
+ * same way an `.extend()` would, and the provider-pack-registry fields did
+ * exactly that - `managedInstallState`, `versionVisibility` and `advisory`
+ * appeared on this already-shipped line and grew it.
+ *
+ * `providerCliStateBaseShapeV40` is the right pin: v4.0 and v5.0 differ only by
+ * the id enum, so the twelve keys below are precisely what `cli-v1.1.8` shipped
+ * on v5.0. The registry fields live on the live shape and therefore reach
+ * clients only through v7.0 (they briefly rode v6.0 - see
+ * `providerCliStateSchemaV60` for why that line is now pinned too).
+ */
+export const providerCliStateSchemaV50 = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchemaV50,
+    ...providerCliStateBaseShapeV40,
+    auth: PROVIDER_AUTH_SCHEMA_V20,
+  }),
+);
+export type ProviderCliStateV50 = z.infer<typeof providerCliStateSchemaV50>;
+
+export const providersListResponseSchemaV50 = lazySchema(() =>
+  z.object({
+    providers: z.array(providerCliStateSchemaV50),
+  }),
+);
+
+/**
+ * Frozen `providers.list` response as shipped in protocol v6.0.
+ *
+ * `cli-v1.1.9` (tagged 2026-07-29) shipped v6.0, which froze it - and the
+ * provider-pack-registry fields were still growing it, exactly as they grew
+ * v5.0 before `cli-v1.1.8` froze that line. Same defect, one version later:
+ * v6.0 pointed at the LIVE response schema, so every field added to the live
+ * base shape landed on an already-released line.
+ *
+ * Pinned the same way v5.0 is: `providerCliStateBaseShapeV40` is the twelve
+ * keys v6.0 actually shipped, since v6.0 differs from v5.0 only by the omp id.
+ * The registry fields live on the live shape and now reach clients only
+ * through v7.0; the v7->v6 downgrade drops them by reparsing through this
+ * schema, which strips keys it does not model.
+ */
+export const providerCliStateSchemaV60 = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchemaV60,
+    ...providerCliStateBaseShapeV40,
+    auth: PROVIDER_AUTH_SCHEMA_V20,
+  }),
+);
+export type ProviderCliStateV60 = z.infer<typeof providerCliStateSchemaV60>;
+
+export const providersListResponseSchemaV60 = lazySchema(() =>
+  z.object({
+    providers: z.array(providerCliStateSchemaV60),
+  }),
+);
+export type ProvidersListResponseV60 = z.infer<
+  typeof providersListResponseSchemaV60
+>;
+export type ProvidersListResponseV40 = z.infer<
+  typeof providersListResponseSchemaV40
+>;
+
+// ── Historical v7.0 pre-image ─────────────────────────────────────────────
+// This shape backs no wire contract. The v6 -> v7 upgrade uses it as a first
+// normalization pass before filling the version-manager fields that shipped in
+// v7.0. Its hand-copied key set and deep compatibility snapshot keep that
+// historical upgrade stable while the live v8.0 shape grows.
+const providerCliStateBaseShapeV70Preimage = {
+  enabled: lazySchema(() => z.boolean()),
+  disabledBy: lazySchema(() => providerDisabledBySchema.nullable()),
+  selected: providerSelectionSchemaV10,
+  candidates: lazySchema(() => z.array(providerCliCandidateSchema)),
+  authPending: lazySchema(() => z.boolean()),
+  checkedAt: lazySchema(() => z.number().nullable()),
+  apiKey: providerApiKeyStateSchema,
+  terminalAgentArgs: lazySchema(() => z.string().catch("")),
+  envOverrides: lazySchema(() => z.array(providerEnvOverrideSchema).catch([])),
+  loginCapability: lazySchema(() =>
+    providerLoginCapabilitySchemaV70.nullable().catch(null),
+  ),
+  availabilityPending: lazySchema(() => z.boolean().catch(false)),
+  profiles: lazySchema(() => z.array(providerProfileSchemaV70).catch([])),
+  // `.optional()` on top of `.catch(null)` is copied deliberately, not
+  // tidied away: it is what lets a host-side construction site omit the key
+  // entirely, and dropping it here would turn "an old host omitted this" from
+  // `undefined` into a parse failure. See the live shape's comments.
+  managedInstallState: lazySchema(() =>
+    providerManagedInstallStateSchemaV70Preimage
+      .nullable()
+      .catch(null)
+      .optional(),
+  ),
+  versionVisibility: lazySchema(() =>
+    providerVersionVisibilitySchema.nullable().catch(null).optional(),
+  ),
+  advisory: lazySchema(() =>
+    providerAdvisorySchema.nullable().catch(null).optional(),
+  ),
+  cliBinaryResolved: lazySchema(() => z.boolean().catch(true).optional()),
+};
+
+export const providerCliStateSchemaV70Preimage = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchemaV70,
+    ...providerCliStateBaseShapeV70Preimage,
+    auth: PROVIDER_AUTH_SCHEMA_V20,
+    // Hand-frozen since the live descriptor grew `modelProviders` (and its
+    // `supportedTabs` member) past this line - the "hand-freeze the sub-schema
+    // that grew" step the deep snapshot demands. The `.catch()` keeps the
+    // pre-image default so this shape decodes byte-for-byte the way it did at
+    // the freeze cut.
+    nativeCapabilities: providerNativeCapabilitiesSchemaV70Preimage.catch(
+      DEFAULT_PROVIDER_NATIVE_CAPABILITIES_V70_PREIMAGE,
+    ),
+  }),
+);
+export type ProviderCliStateV70Preimage = z.infer<
+  typeof providerCliStateSchemaV70Preimage
+>;
+
+export const providersListResponseSchemaV70Preimage = lazySchema(() =>
+  z.object({
+    providers: z.array(providerCliStateSchemaV70Preimage),
+    native: nativeListResultSchemaV70Preimage.nullable().default(null),
+  }),
+);
+export type ProvidersListResponseV70Preimage = z.infer<
+  typeof providersListResponseSchemaV70Preimage
+>;
+
+// ── Frozen protocol-v7.0 provider state + list response ────────────────────
+//
+// THE REAL v7.0 FREEZE, taken under the `V70` names `registry.ts` reserved for
+// it, standing beside (not replacing) the `*V70Preimage` shapes above - those
+// remain the v6 -> v7 bridge's first-pass target and the compat suites' v7-era
+// shape. Do not collapse the two: they model different things. The pre-image
+// is v7.0 BEFORE the version-manager group; this is v7.0 as it actually
+// serializes, version-manager group included.
+//
+// Why it was taken now, and why the new enablement fields ride v7.1 rather
+// than widening v7.0 in place: `registry.ts`'s head-line note licenses an
+// UNRELEASED line to widen in place, and by `scripts/compat/support-floor.json`
+// (`includeReleaseCandidates: false`) v7.0 is formally unreleased. That is a
+// compat-FLOOR policy, not evidence that no peer speaks 7.0 -
+// `cli-v1.2.0-rc.1` / `host-v1.2.0-rc.1` (2026-08-19) ship it. Widening in
+// place would put two different shapes under one version number, which
+// negotiation cannot detect and these strict-parsing schemas cannot tolerate:
+// an rc peer that negotiated 7.0 and receives 7.1 keys can reject the whole
+// response. Freezing here lets the v7.1 -> v7.0 contract parse strip the new
+// keys honestly instead. Do not "simplify" this back to a widen-in-place.
+//
+// Like `providersListRequestSchemaV70`, this pin freezes v7.0's own KEY SET.
+// Several leaves are frozen beneath it as well, each because a later line grew
+// it or was going to: the profile leaf, because v8.0 adds profile eligibility
+// there; the login capability, because major 9 adds `remoteSafe`; and
+// `nativeCapabilities` / `managedInstallState` / `advisory`, taken with
+// `frozen-line-projection.ts` - see `providerCliStateSchemaV91`'s docblock for
+// why a pin on one of those is only half a fix without the projection.
+//
+// Growth inside any of them is caught by the deep `z.toJSONSchema` snapshot in
+// `__tests__/__fixtures__/frozen-catalog-lines.ts`, which pins this shape - and
+// when it goes red, hand-freeze the sub-schema that grew rather than
+// regenerating the fixture. What the snapshot canNOT catch is a leaf that is
+// still LIVE while dumping identically to a frozen copy; that is
+// `__tests__/frozen-lines-reach-no-unreviewed-live-enum.test.ts`, which lists
+// every live enum this row still reaches, by path.
+const providerCliStateBaseShapeV70 = {
+  enabled: lazySchema(() => z.boolean()),
+  disabledBy: lazySchema(() => providerDisabledBySchema.nullable()),
+  selected: providerSelectionSchemaV10,
+  candidates: lazySchema(() => z.array(providerCliCandidateSchema)),
+  authPending: lazySchema(() => z.boolean()),
+  checkedAt: lazySchema(() => z.number().nullable()),
+  apiKey: providerApiKeyStateSchema,
+  terminalAgentArgs: lazySchema(() => z.string().catch("")),
+  envOverrides: lazySchema(() => z.array(providerEnvOverrideSchema).catch([])),
+  // Pinned to `providerLoginCapabilitySchemaV70` - the four keys v7.0 actually
+  // shipped - rather than to the live capability. It pointed live until
+  // `remoteSafe` landed, which is the same defect the `V40` snapshot fixed for
+  // the v4.0/v5.0/v6.0 lines: a released wire must not grow a capability field
+  // the moment the live schema does. No new snapshot was needed; the v7.0 one
+  // was already sitting one screen up, referenced only by the pre-image.
+  loginCapability: lazySchema(() =>
+    providerLoginCapabilitySchemaV70.nullable().catch(null),
+  ),
+  availabilityPending: lazySchema(() => z.boolean().catch(false)),
+  profiles: lazySchema(() => z.array(providerProfileSchemaV70).catch([])),
+  // `.optional()` on top of `.catch(null)` is copied deliberately, not tidied
+  // away - see the live shape's comments for what each half does.
+  managedInstallState: lazySchema(() =>
+    providerManagedInstallStateSchemaV70.nullable().catch(null).optional(),
+  ),
+  versionVisibility: lazySchema(() =>
+    providerVersionVisibilitySchema.nullable().catch(null).optional(),
+  ),
+  advisory: lazySchema(() =>
+    providerAdvisorySchemaV70.nullable().catch(null).optional(),
+  ),
+  cliBinaryResolved: lazySchema(() => z.boolean().catch(true).optional()),
+  packId: lazySchema(() => z.string().nullable().catch(null).optional()),
+  // The ONE leaf this shape does not keep live - see
+  // `providerManagedVersionsSchemaV70`. Its `sharedWithProviders` array is a
+  // host→client `providerId` enum, so leaving it live let every id added after
+  // v7.0 shipped reach an already-released wire through this key.
+  managedVersions: lazySchema(() =>
+    providerManagedVersionsSchemaV70.nullable().catch(null).optional(),
+  ),
+  managedVersionsUnavailable: lazySchema(() =>
+    providerManagedVersionsUnavailableSchema.nullable().catch(null).optional(),
+  ),
+  nextRunBinary: lazySchema(() =>
+    providerNextRunBinarySchema.nullable().catch(null).optional(),
+  ),
+};
+
+export const providerCliStateSchemaV70 = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchemaV70,
+    ...providerCliStateBaseShapeV70,
+    auth: PROVIDER_AUTH_SCHEMA_V20,
+    nativeCapabilities: providerNativeCapabilitiesSchemaV70.catch(
+      DEFAULT_PROVIDER_NATIVE_CAPABILITIES,
+    ),
+  }),
+);
+export type ProviderCliStateV70 = z.infer<typeof providerCliStateSchemaV70>;
+
+export const providersListResponseSchemaV70 = lazySchema(() =>
+  z.object({
+    providers: z.array(providerCliStateSchemaV70),
+    native: nativeListResultSchemaBeforeMcpRemedies.nullable().default(null),
+  }),
+);
+export type ProvidersListResponseV70 = z.infer<
+  typeof providersListResponseSchemaV70
+>;
+
+// ── Frozen protocol-v8.0 provider state + list response ────────────────────
+//
+// v8.0 shipped in `cli-v1.3.0` / `host-v1.3.0` and bound the LIVE schema on
+// the (then true) reading that it was the unreleased head line. Two things
+// reached it afterwards and both are host→client:
+//
+//   - `antigravity`, on `providerId` and on `managedVersions`'
+//     `sharedWithProviders` array;
+//   - `profiles[].apiKey`, added by the per-profile API-key work, which the
+//     release branch predates.
+//
+// The key set is hand-listed off `providerCliStateBaseShapeV70` (identical to
+// the live shape's keys at this cut) rather than spread from the live shape,
+// for the reason `providerCliStateBaseShapeV20`'s comment gives: a released
+// line must not absorb a field the live shape grows later.
+const providerManagedVersionsSchemaV80 = lazySchema(() =>
+  z.object({
+    autoDownload: z.boolean(),
+    pinnedVersion: z.string().nullable(),
+    updateAvailable: z.object({ version: z.string() }).nullable(),
+    // The one leaf that differs from live - same reasoning as
+    // `providerManagedVersionsSchemaV70`: this is a host→client `providerId`
+    // enum, and leaving it live let Antigravity reach a released wire.
+    sharedWithProviders: z.array(providerIdSchemaV80).catch([]),
+    totalSizeBytes: z.number().int().nonnegative().nullable(),
+    available: z.array(providerPackVersionSchema),
+  }),
+);
+
+/**
+ * Frozen `providers.list@8.0` profile row: the live profile as 1.3.0 shipped
+ * it, i.e. WITHOUT `apiKey`.
+ *
+ * `apiKey` is `.catch(null).optional()`, so a v8.0 client tolerates its
+ * presence at parse time - but tolerance is not a versioning mechanism, and
+ * the gate scores an added host→client property on a released line breaking
+ * for the reason the finding states: a released peer never sends the key, so a
+ * consumer that assumes it is populated reads `undefined`. `launchCommand`
+ * stays, because it DID ship in 1.3.0.
+ */
+export const providerProfileSchemaV80 = lazySchema(() =>
+  z.object({
+    ...providerProfileShapeV70,
+    enabled: z.boolean().default(true).catch(true),
+    launchCommand: z
+      .object({
+        command: z.string(),
+        shell: z.enum(["posix", "powershell"]),
+      })
+      .nullable()
+      .catch(null)
+      .optional(),
+  }),
+);
+export type ProviderProfileV80 = z.infer<typeof providerProfileSchemaV80>;
+
+const providerCliStateBaseShapeV80 = {
+  enabled: lazySchema(() => z.boolean()),
+  disabledBy: lazySchema(() => providerDisabledBySchema.nullable()),
+  selected: providerSelectionSchemaV10,
+  candidates: lazySchema(() => z.array(providerCliCandidateSchema)),
+  authPending: lazySchema(() => z.boolean()),
+  checkedAt: lazySchema(() => z.number().nullable()),
+  apiKey: providerApiKeyStateSchema,
+  terminalAgentArgs: lazySchema(() => z.string().catch("")),
+  envOverrides: lazySchema(() => z.array(providerEnvOverrideSchema).catch([])),
+  // Same pin, same reason as `providerCliStateBaseShapeV70` above: v8.0 shipped
+  // the four-key capability in `cli-v1.3.0` / `host-v1.3.0`, so `remoteSafe`
+  // must not reach it. Both released list lines share the v7.0 snapshot because
+  // both released exactly that key set - this is a field freeze, not a second
+  // pre-image.
+  loginCapability: lazySchema(() =>
+    providerLoginCapabilitySchemaV70.nullable().catch(null),
+  ),
+  availabilityPending: lazySchema(() => z.boolean().catch(false)),
+  profiles: lazySchema(() => z.array(providerProfileSchemaV80).catch([])),
+  managedInstallState: lazySchema(() =>
+    providerManagedInstallStateSchemaV70.nullable().catch(null).optional(),
+  ),
+  versionVisibility: lazySchema(() =>
+    providerVersionVisibilitySchema.nullable().catch(null).optional(),
+  ),
+  advisory: lazySchema(() =>
+    providerAdvisorySchemaV70.nullable().catch(null).optional(),
+  ),
+  cliBinaryResolved: lazySchema(() => z.boolean().catch(true).optional()),
+  packId: lazySchema(() => z.string().nullable().catch(null).optional()),
+  managedVersions: lazySchema(() =>
+    providerManagedVersionsSchemaV80.nullable().catch(null).optional(),
+  ),
+  managedVersionsUnavailable: lazySchema(() =>
+    providerManagedVersionsUnavailableSchema.nullable().catch(null).optional(),
+  ),
+  nextRunBinary: lazySchema(() =>
+    providerNextRunBinarySchema.nullable().catch(null).optional(),
+  ),
+};
+
+export const providerCliStateSchemaV80 = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchemaV80,
+    ...providerCliStateBaseShapeV80,
+    auth: PROVIDER_AUTH_SCHEMA_V20,
+    nativeCapabilities: providerNativeCapabilitiesSchemaV70.catch(
+      DEFAULT_PROVIDER_NATIVE_CAPABILITIES,
+    ),
+  }),
+);
+export type ProviderCliStateV80 = z.infer<typeof providerCliStateSchemaV80>;
+
+export const providersListResponseSchemaV80 = lazySchema(() =>
+  z.object({
+    providers: z.array(providerCliStateSchemaV80),
+    native: nativeListResultSchemaBeforeMcpRemedies.nullable().default(null),
+  }),
+);
+export type ProvidersListResponseV80 = z.infer<
+  typeof providersListResponseSchemaV80
+>;
+
+// THERE IS NO `providers.list@7.1`. One was opened for the auth-aware
+// enablement pair (`enablementMode` / `enablementSource`) and removed with
+// them, before either reached a tag: those two optional fields were the
+// minor's ENTIRE delta over v7.0, so with enablement back to a plain sticky
+// boolean the line carried nothing v7.0 did not already carry. A minor that
+// adds no field is not a cheap compatibility cushion - it is a second name
+// for one shape, and every downgrade bridge in major 7 would have to keep
+// choosing between them. v8.0 (Reasonix + per-profile eligibility) therefore
+// upgrades straight from v7.0.
+//
+// `agent.gui.listHarnesses@7.1` is a different story and DOES survive: its
+// delta was `authStatus`, which the picker still renders (an enabled provider
+// whose account is signed out dims rather than vanishing), so that minor has
+// real content.
+
+// Frozen protocol-v1.0 provider state + list response. The v2.0 line of
+// `providers.list` adds ACP GUI harness providers; the v2→v1 bridge filters
+// them for v1.0 callers.
+export const providerCliStateSchemaV10 = lazySchema(() =>
+  z.strictObject({
+    providerId: providerIdSchemaV10,
+    ...providerCliStateBaseShapeV10,
+    auth: PROVIDER_AUTH_SCHEMA_V10,
+  }),
+);
+export type ProviderCliStateV10 = z.infer<typeof providerCliStateSchemaV10>;
+export const providersListResponseSchemaV10 = lazySchema(() =>
+  z.object({
+    providers: z.array(providerCliStateSchemaV10),
+  }),
+);
+export type ProvidersListResponseV10 = z.infer<
+  typeof providersListResponseSchemaV10
+>;
+
+export {
+  DEFAULT_PROVIDER_NATIVE_CAPABILITIES,
+  DEFAULT_PROVIDER_NATIVE_CAPABILITIES_V70_PREIMAGE,
+  providerNativeCapabilitiesSchemaV70Preimage,
+  type ProviderNativeCapabilities,
+  type ProviderNativeCapabilitiesV70Preimage,
+};
+
+// ── Frozen major-2.1 mutation-response provider state (pre-registry) ───────
+// The same freeze discipline as `providerMutationCliStateSchemaV20` above,
+// one minor later - and applied for the same reason it was needed there.
+//
+// The 2.1 line shipped (host-v1.1.7) as "the frozen 2.0 mutation shape plus
+// `profiles[]` plus the code-paste-capable login capability", but it was
+// WIRED to the LIVE `providerCliStateSchema` instead of a pinned shape. So
+// when the provider-pack-registry fields (`managedInstallState`,
+// `versionVisibility`, `advisory`) landed on the live state they silently
+// leaked onto ten already-released @2.1 echoes that no released peer ever
+// sends - exactly the drift the 2.0 pin was introduced to stop after
+// `profiles` did the same thing. Pinning the shape here restores the released
+// 2.1 wire byte-for-byte.
+//
+// This is the honest model, not merely a compat patch: a state echo can never
+// carry registry state in the first place. Enabling a provider, setting an
+// API key, or completing a login cannot change what is installed, so
+// `providers.list` - whose v5.0 line is properly versioned for these fields -
+// is their only carrier. Do not add new fields here; add them to the live
+// `providerCliStateBaseShape` and let `providers.list` publish them.
+//
+// The field set reuses `providerCliStateBaseShapeV40` (the list line's
+// hand-frozen v4.0 shape) because that is exactly what 2.1 released. Both are
+// frozen, so neither can drift into the other. `providerId` stays the LIVE
+// enum for the same reason the 2.0 pin keeps it: an echo returns the id the
+// caller just named, so enum growth stays request-gated (see the
+// `providers.set*` / `providers.add*` entries in compat-exceptions.json).
+export const providerMutationCliStateSchemaV21 = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    ...providerCliStateBaseShapeV40,
+    auth: PROVIDER_AUTH_SCHEMA_V20,
+  }),
+);
+export type ProviderMutationCliStateV21 = z.infer<
+  typeof providerMutationCliStateSchemaV21
+>;
+
+/** Live request: `providers.setSelection@2.2`, whose bundled arm carries `line`. */
+export const providersSetSelectionRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    selection: providerSelectionSchema,
+  }),
+);
+/**
+ * Frozen `providers.setSelection@2.0` / `@2.1` request: the selection before
+ * `line`. A 2.2 caller re-parsed through it loses `line`, which a host on those
+ * lines could not act on anyway.
+ */
+export const providersSetSelectionRequestSchemaV21 = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    selection: providerSelectionSchemaV10,
+  }),
+);
+export const providersSetSelectionRequestSchemaV10 = lazySchema(() =>
+  z.strictObject({
+    providerId: providerIdSchemaV10,
+    selection: providerSelectionSchemaV10,
+  }),
+);
+export type ProvidersSetSelectionRequest = z.infer<
+  typeof providersSetSelectionRequestSchema
+>;
+
+/**
+ * Live response: `providers.setSelection@2.2` echoes the selection it just
+ * stored, `line` included, so a caller reading the echo sees the Managed row it
+ * chose rather than a plain `bundled` (which reads as Managed 2.x).
+ */
+export const providersSetSelectionResponseSchema = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV21.extend({
+      selected: providerSelectionSchema,
+    }),
+  }),
+);
+/** Frozen `providers.setSelection@2.1` response: the selection before `line`. */
+export const providersSetSelectionResponseSchemaV21 = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV21,
+  }),
+);
+export const providersSetSelectionResponseSchemaV20 = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV20,
+  }),
+);
+export const providersSetSelectionResponseSchemaV10 = lazySchema(() =>
+  z.object({
+    state: providerCliStateSchemaV10,
+  }),
+);
+export type ProvidersSetSelectionResponse = z.infer<
+  typeof providersSetSelectionResponseSchema
+>;
+
+export const providersAddCustomPathRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    path: z.string().min(1),
+  }),
+);
+export const providersAddCustomPathRequestSchemaV10 = lazySchema(() =>
+  z.strictObject({
+    providerId: providerIdSchemaV10,
+    path: z.string().min(1),
+  }),
+);
+export type ProvidersAddCustomPathRequest = z.infer<
+  typeof providersAddCustomPathRequestSchema
+>;
+
+export const providersAddCustomPathResponseSchema = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV21,
+  }),
+);
+export const providersAddCustomPathResponseSchemaV20 = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV20,
+  }),
+);
+export const providersAddCustomPathResponseSchemaV10 = lazySchema(() =>
+  z.object({
+    state: providerCliStateSchemaV10,
+  }),
+);
+export type ProvidersAddCustomPathResponse = z.infer<
+  typeof providersAddCustomPathResponseSchema
+>;
+
+export const providersRemoveCustomPathRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    path: z.string().min(1),
+  }),
+);
+export const providersRemoveCustomPathRequestSchemaV10 = lazySchema(() =>
+  z.strictObject({
+    providerId: providerIdSchemaV10,
+    path: z.string().min(1),
+  }),
+);
+export type ProvidersRemoveCustomPathRequest = z.infer<
+  typeof providersRemoveCustomPathRequestSchema
+>;
+
+export const providersRemoveCustomPathResponseSchema = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV21,
+  }),
+);
+export const providersRemoveCustomPathResponseSchemaV20 = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV20,
+  }),
+);
+export const providersRemoveCustomPathResponseSchemaV10 = lazySchema(() =>
+  z.object({
+    state: providerCliStateSchemaV10,
+  }),
+);
+export type ProvidersRemoveCustomPathResponse = z.infer<
+  typeof providersRemoveCustomPathResponseSchema
+>;
+
+/**
+ * Frozen `providers.setEnabled@2.0` request (classic enable/disable only).
+ */
+export const providersSetEnabledRequestSchemaV20 = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    enabled: z.boolean(),
+  }),
+);
+export type ProvidersSetEnabledRequestV20 = z.infer<
+  typeof providersSetEnabledRequestSchemaV20
+>;
+
+/**
+ * `providers.setEnabled@2.1` request (classic enable/disable).
+ *
+ * `enabled` is REQUIRED and stays required: 2.1 is a released line, and
+ * demoting a required property to optional is a wire break in the dangerous
+ * direction - this tree would start emitting payloads omitting `enabled` that
+ * a released peer cannot parse. Native mutations therefore do NOT fold onto
+ * this carrier; they ride the dedicated optional `providers.nativeMutate@1.0`
+ * method instead (see `registry.ts`).
+ */
+export const providersSetEnabledRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    enabled: z.boolean(),
+  }),
+);
+export const providersSetEnabledRequestSchemaV10 = lazySchema(() =>
+  z.strictObject({
+    providerId: providerIdSchemaV10,
+    enabled: z.boolean(),
+  }),
+);
+export type ProvidersSetEnabledRequest = z.infer<
+  typeof providersSetEnabledRequestSchema
+>;
+
+/**
+ * `providers.setEnabled@2.1` response. Returns classic `state` only - 2.1 is
+ * released and its response shape is frozen. Native mutation results come back
+ * on `providers.nativeMutate@1.0` instead.
+ */
+export const providersSetEnabledResponseSchema = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV21,
+  }),
+);
+export const providersSetEnabledResponseSchemaV20 = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV20,
+  }),
+);
+export const providersSetEnabledResponseSchemaV10 = lazySchema(() =>
+  z.object({
+    state: providerCliStateSchemaV10,
+  }),
+);
+export type ProvidersSetEnabledResponse = z.infer<
+  typeof providersSetEnabledResponseSchema
+>;
+
+/**
+ * `providers.setEnabled@2.1` request - folds profile rename/remove/recolor onto this
+ * existing method rather than new `providers.renameProfile` /
+ * `removeProfile` / `recolorProfile` methods (see that contract in `registry.ts` for the full
+ * rationale). `profileAction: null` is today's plain enable/disable request,
+ * byte-identical to `providersSetEnabledRequestSchema` - old clients are
+ * unaffected. The 2.1 response is the live shape
+ * (`providersSetEnabledResponseSchema`, whose `state.profiles[]` reflects the
+ * rename/removal/recolor); the released 2.0 response is frozen pre-profiles
+ * (`providersSetEnabledResponseSchemaV20`) and the 2.0→2.1 upgrade fills
+ * `profiles: []`.
+ */
+export const providersSetEnabledRequestSchemaV21 = lazySchema(() =>
+  providersSetEnabledRequestSchema.extend({
+    profileAction: providerProfileActionSchema.nullable().default(null),
+  }),
+);
+export type ProvidersSetEnabledRequestV21 = z.infer<
+  typeof providersSetEnabledRequestSchemaV21
+>;
+
+// THERE IS NO `providers.setEnabled@2.2`. One was opened to carry an optional
+// tri-state `mode` for a three-way Auto/On/Off settings control; that control
+// is gone, and `mode` was the minor's entire delta over 2.1. `enabled` - a
+// required boolean since 2.0 - is once again the whole request, which is what
+// the method's name has always promised.
+
+export const providersSetApiKeyRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    apiKey: z.string().min(1),
+  }),
+);
+export const providersSetApiKeyRequestSchemaV10 = lazySchema(() =>
+  z.strictObject({
+    providerId: providerIdSchemaV10,
+    apiKey: z.string().min(1),
+  }),
+);
+export type ProvidersSetApiKeyRequest = z.infer<
+  typeof providersSetApiKeyRequestSchema
+>;
+
+export const providersSetApiKeyResponseSchema = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV21,
+  }),
+);
+export const providersSetApiKeyResponseSchemaV20 = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV20,
+  }),
+);
+export const providersSetApiKeyResponseSchemaV10 = lazySchema(() =>
+  z.object({
+    state: providerCliStateSchemaV10,
+  }),
+);
+export type ProvidersSetApiKeyResponse = z.infer<
+  typeof providersSetApiKeyResponseSchema
+>;
+
+export const providersClearApiKeyRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+  }),
+);
+export const providersClearApiKeyRequestSchemaV10 = lazySchema(() =>
+  z.strictObject({
+    providerId: providerIdSchemaV10,
+  }),
+);
+export type ProvidersClearApiKeyRequest = z.infer<
+  typeof providersClearApiKeyRequestSchema
+>;
+
+export const providersClearApiKeyResponseSchema = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV21,
+  }),
+);
+export const providersClearApiKeyResponseSchemaV20 = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV20,
+  }),
+);
+export const providersClearApiKeyResponseSchemaV10 = lazySchema(() =>
+  z.object({
+    state: providerCliStateSchemaV10,
+  }),
+);
+export type ProvidersClearApiKeyResponse = z.infer<
+  typeof providersClearApiKeyResponseSchema
+>;
+
+export const providersSetTerminalAgentArgsRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    // Empty string clears the saved override.
+    terminalAgentArgs: z.string(),
+  }),
+);
+export const providersSetTerminalAgentArgsRequestSchemaV10 = lazySchema(() =>
+  z.strictObject({
+    providerId: providerIdSchemaV10,
+    terminalAgentArgs: z.string(),
+  }),
+);
+export type ProvidersSetTerminalAgentArgsRequest = z.infer<
+  typeof providersSetTerminalAgentArgsRequestSchema
+>;
+
+export const providersSetTerminalAgentArgsResponseSchema = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV21,
+  }),
+);
+export const providersSetTerminalAgentArgsResponseSchemaV20 = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV20,
+  }),
+);
+export const providersSetTerminalAgentArgsResponseSchemaV10 = lazySchema(() =>
+  z.object({
+    state: providerCliStateSchemaV10,
+  }),
+);
+export type ProvidersSetTerminalAgentArgsResponse = z.infer<
+  typeof providersSetTerminalAgentArgsResponseSchema
+>;
+
+/**
+ * The 2.0 and 2.1 request, FROZEN when 2.2 opened (both are released). The
+ * provider id stays the live enum by reference, as it was while 2.1 was the
+ * head.
+ */
+export const providersSetEnvOverrideRequestSchemaV21 = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    key: z.string().min(1),
+    // null = explicit unset; a string sets the value.
+    value: z.string().nullable(),
+  }),
+);
+export type ProvidersSetEnvOverrideRequestV21 = z.infer<
+  typeof providersSetEnvOverrideRequestSchemaV21
+>;
+
+/**
+ * `providers.setEnvOverride@2.2` request: a launch-sensitive
+ * override selects what a harness starts, so the write carries the
+ * executable-write grant; whether a given key reaches a sink is the host's
+ * decision. Older callers are upgraded with `null`.
+ */
+export const providersSetEnvOverrideRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    key: z.string().min(1),
+    // null = explicit unset; a string sets the value.
+    value: z.string().nullable(),
+    executableWriteGrant: executableWriteGrantSchema,
+  }),
+);
+export const providersSetEnvOverrideRequestSchemaV10 = lazySchema(() =>
+  z.strictObject({
+    providerId: providerIdSchemaV10,
+    key: z.string().min(1),
+    value: z.string().nullable(),
+  }),
+);
+export type ProvidersSetEnvOverrideRequest = z.infer<
+  typeof providersSetEnvOverrideRequestSchema
+>;
+
+export const providersSetEnvOverrideResponseSchema = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV21,
+  }),
+);
+export const providersSetEnvOverrideResponseSchemaV20 = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV20,
+  }),
+);
+export const providersSetEnvOverrideResponseSchemaV10 = lazySchema(() =>
+  z.object({
+    state: providerCliStateSchemaV10,
+  }),
+);
+export type ProvidersSetEnvOverrideResponse = z.infer<
+  typeof providersSetEnvOverrideResponseSchema
+>;
+
+export const providersDeleteEnvOverrideRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    key: z.string().min(1),
+  }),
+);
+export const providersDeleteEnvOverrideRequestSchemaV10 = lazySchema(() =>
+  z.strictObject({
+    providerId: providerIdSchemaV10,
+    key: z.string().min(1),
+  }),
+);
+export type ProvidersDeleteEnvOverrideRequest = z.infer<
+  typeof providersDeleteEnvOverrideRequestSchema
+>;
+
+export const providersDeleteEnvOverrideResponseSchema = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV21,
+  }),
+);
+export const providersDeleteEnvOverrideResponseSchemaV20 = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV20,
+  }),
+);
+export const providersDeleteEnvOverrideResponseSchemaV10 = lazySchema(() =>
+  z.object({
+    state: providerCliStateSchemaV10,
+  }),
+);
+export type ProvidersDeleteEnvOverrideResponse = z.infer<
+  typeof providersDeleteEnvOverrideResponseSchema
+>;
+
+export const providersDetectVersionRequestSchema = lazySchema(() =>
+  z.object({
+    candidatePath: z.string().min(1),
+  }),
+);
+export type ProvidersDetectVersionRequest = z.infer<
+  typeof providersDetectVersionRequestSchema
+>;
+
+export const providersDetectVersionResponseSchema = lazySchema(() =>
+  z.object({
+    executable: z.boolean(),
+    version: z.string().nullable(),
+  }),
+);
+export type ProvidersDetectVersionResponse = z.infer<
+  typeof providersDetectVersionResponseSchema
+>;
+
+/**
+ * Frozen `providers.startLogin@1.0` request/response (classic provider OAuth).
+ */
+export const providersStartLoginRequestSchemaV10 = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+  }),
+);
+export type ProvidersStartLoginRequestV10 = z.infer<
+  typeof providersStartLoginRequestSchemaV10
+>;
+
+export const providersStartLoginResponseSchemaV10 = lazySchema(() =>
+  z.object({
+    url: z.string().nullable(),
+    started: z.boolean(),
+  }),
+);
+export type ProvidersStartLoginResponseV10 = z.infer<
+  typeof providersStartLoginResponseSchemaV10
+>;
+
+/**
+ * `providers.startLogin@1.1` request (classic provider login only). MCP auth
+ * does NOT fold onto this released carrier - it rides the dedicated optional
+ * `providers.mcpAuth@1.0` method (see `registry.ts`).
+ */
+export const providersStartLoginRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+  }),
+);
+export type ProvidersStartLoginRequest = z.infer<
+  typeof providersStartLoginRequestSchema
+>;
+
+/**
+ * `providers.startLogin@1.1` response (classic provider login only).
+ */
+export const providersStartLoginResponseSchema = lazySchema(() =>
+  z.object({
+    url: z.string().nullable(),
+    started: z.boolean(),
+  }),
+);
+export type ProvidersStartLoginResponse = z.infer<
+  typeof providersStartLoginResponseSchema
+>;
+
+/**
+ * Frozen `providers.awaitLogin@2.0` request (classic provider-child await).
+ */
+export const providersAwaitLoginRequestSchemaV20 = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+  }),
+);
+export type ProvidersAwaitLoginRequestV20 = z.infer<
+  typeof providersAwaitLoginRequestSchemaV20
+>;
+
+/**
+ * `providers.startLogin@1.1` request - adds `profileId` (re-authenticate an
+ * existing managed profile's isolated config dir) and `createProfile` (mint a
+ * brand-new profile - create its dir, seed it from the ambient snapshot, then
+ * spawn the login CLI against it - see the decision log's "Add profile flow").
+ * `profileId` and `createProfile` are mutually exclusive from the caller's
+ * point of view; the resolver treats a non-null `createProfile` as
+ * authoritative when both are somehow set. Both default to `null`, which
+ * preserves today's exact behavior (re-auth whatever binary/dir is currently
+ * selected for this provider, no profile dir override) - so old clients that
+ * predate profiles are unaffected.
+ *
+ * `createProfile.shareSkillsAndPlugins` was added in place while this surface
+ * was unreleased, which was the established precedent then - see `profileId`/
+ * `createProfile` themselves, added the same way onto the v1.0 base. It is
+ * NOT precedent now: `released-baseline-surface.json` carries
+ * `providers.startLogin` at canonical `@1.1` with this exact field in its
+ * request, so the line is frozen and a further field costs a new minor. Claude
+ * profile creation only: dir-symlinks `skills/`/`plugins/` to ambient instead
+ * of copying (shadow-home plan §6). Defaults to `false` (copy, today's
+ * behavior) so old clients that predate the checkbox are unaffected; every
+ * other provider ignores it.
+ */
+export const providersStartLoginRequestSchemaV11 = lazySchema(() =>
+  providersStartLoginRequestSchema.extend({
+    profileId: z.string().nullable().default(null),
+    createProfile: z
+      .object({
+        // User-chosen label. Empty string defers naming to the login probe's
+        // resolved identity (renderer default: email prefix) - the host
+        // applies its own placeholder until then; rename later via
+        // `providers.setEnabled`'s `profileAction`. Capped (not `.min(1)` -
+        // empty is the deferred-naming signal above) so a hostile label
+        // can't bloat the registry file or break layout downstream
+        // (durability audit B6).
+        label: z.string().max(64),
+        shareSkillsAndPlugins: z.boolean().default(false),
+      })
+      .nullable()
+      .default(null),
+  }),
+);
+export type ProvidersStartLoginRequestV11 = z.infer<
+  typeof providersStartLoginRequestSchemaV11
+>;
+
+/** A caller's claim on a shared login. Null preserves released-client behavior. */
+export const providersStartLoginRequestSchemaV14 = lazySchema(() =>
+  providersStartLoginRequestSchemaV11.extend({
+    holderId: z.string().min(1).max(128).nullable().default(null),
+  }),
+);
+export type ProvidersStartLoginRequestV14 = z.infer<
+  typeof providersStartLoginRequestSchemaV14
+>;
+
+/**
+ * `providers.startLogin@1.1` response - echoes the profile this login
+ * targeted, so a `createProfile` caller learns the host-minted id without a
+ * separate round-trip. `null` for a legacy (no-profile-override) login,
+ * mirroring the request's `null` default.
+ */
+export const providersStartLoginResponseSchemaV11 = lazySchema(() =>
+  providersStartLoginResponseSchema.extend({
+    profileId: z.string().nullable().default(null),
+  }),
+);
+export type ProvidersStartLoginResponseV11 = z.infer<
+  typeof providersStartLoginResponseSchemaV11
+>;
+
+/**
+ * Why a headless login did not start, when `started` is false for a reason
+ * the GUI can act on. Null on success and on the generic "did not start"
+ * path (unresolvable binary, cancelled before spawn, …).
+ *
+ * `device_auth_unavailable`: we spawned `login --device-auth` and the CLI
+ * printed the localhost-callback flow instead. Codex does this when ChatGPT
+ * device-code login is not enabled for the account/workspace.
+ *
+ * `device_code_missing`: we scraped an external device URL but no user code
+ * before the URL-grace timer. A slow Codex print must not read as "the
+ * provider tooling is unavailable".
+ */
+export const providerLoginFailureSchema = lazySchema(() =>
+  z.enum(["device_auth_unavailable", "device_code_missing"]),
+);
+export type ProviderLoginFailure = z.infer<typeof providerLoginFailureSchema>;
+
+/**
+ * `providers.startLogin@1.2` response - adds the device-code user code and a
+ * typed failure. Request is unchanged from v1.1. Codex `--device-auth` prints
+ * `https://auth.openai.com/codex/device` and a separate one-time code; stuffing
+ * the code into `url` would break `openLink`. `.default(null)` so a v1.1 body
+ * is a valid v1.2 body.
+ */
+export const providersStartLoginResponseSchemaV12 = lazySchema(() =>
+  providersStartLoginResponseSchemaV11.extend({
+    userCode: z.string().nullable().default(null),
+    failure: providerLoginFailureSchema.nullable().default(null),
+  }),
+);
+export type ProvidersStartLoginResponseV12 = z.infer<
+  typeof providersStartLoginResponseSchemaV12
+>;
+
+/**
+ * Why `started` is false when the sign-in has NOT failed: the host is still
+ * getting there, and asking again is the right move. Null on success and on
+ * every outcome that is final for this attempt.
+ *
+ * Deliberately not more members of `failure`. That field's contract is a
+ * reason the attempt is over, and a caller that renders it as an error is
+ * reading it correctly; these two are the opposite claim.
+ *
+ * `pack_preparing`: the provider's managed pack is queued or downloading, so
+ * there is no binary to spawn yet. Asking is what put it at the front of the
+ * queue; asking again reports how far it has got (`pack.percent`) and starts
+ * the sign-in once it has landed.
+ *
+ * `starting`: the login child is running and has not produced its sign-in URL
+ * within this call's wait. The host keeps the child alive, and a further
+ * `providers.startLogin` for the same target attaches to it rather than
+ * spawning another. The same target is the same `profileId`, or for a create
+ * the same `createProfile` request (label and sharing choice): the host
+ * continues the profile it minted for the first call rather than minting
+ * another, so the caller repeats its request unchanged. A caller that stops
+ * asking releases the child with `providers.cancelLogin`. Antigravity's server takes 36 to 42 s to answer
+ * `initialize` on Windows, which no single call inside the transport's
+ * response budget can wait out.
+ */
+export const providerLoginPendingSchema = lazySchema(() =>
+  z.enum(["pack_preparing", "starting"]),
+);
+export type ProviderLoginPending = z.infer<typeof providerLoginPendingSchema>;
+
+/**
+ * The provider's managed pack, as the sign-in found it, when the pack is the
+ * reason there was nothing to spawn. Null whenever a binary was resolved.
+ *
+ * `reason` decides which of two opposite things this says. Null: a transfer
+ * is queued or running, `percent` is how far it has got (null when the host
+ * cannot know - queued behind another pack, or fetched by a sibling host),
+ * and the response carries `pending: "pack_preparing"`. Non-null: the install
+ * FAILED, this attempt is over, and the value is the same reason the
+ * provider's `managedInstallState` reports on `providers.list` - repeated here
+ * because the caller is rendering the outcome of THIS call and its copy of
+ * the list may be a quarter of an hour old. `retryAtMs` is when the host
+ * tries again by itself; `providers.ensurePack` is how a user does it now.
+ *
+ * Every field degrades rather than throws. A reason this build has never
+ * heard of is still a failed install, so it reads as `unknown`, not as a
+ * download in progress.
+ */
+export const providerLoginPackSchema = lazySchema(() =>
+  z.object({
+    percent: z.number().min(0).max(100).nullable().catch(null),
+    reason: providerManagedInstallErrorReasonSchema.nullable().catch("unknown"),
+    retryAtMs: z.number().int().nonnegative().nullable().catch(null),
+  }),
+);
+export type ProviderLoginPack = z.infer<typeof providerLoginPackSchema>;
+
+/**
+ * `providers.startLogin@1.3` response - adds `pending` and `pack`. Request is
+ * unchanged from v1.1. Both are new KEYS, so a v1.2 caller loses them to its
+ * own schema's strip: it sees `started: false` with no failure, exactly what
+ * it saw before this minor, while the child it would have been told about
+ * stays alive for its next call to attach to.
+ *
+ * `.catch(null)` on both, which also covers a body that omits them. A value
+ * a later host adds to `pending` reads as null here - "not started", with no
+ * promise that asking again helps - rather than failing the whole response.
+ */
+export const providersStartLoginResponseSchemaV13 = lazySchema(() =>
+  providersStartLoginResponseSchemaV12.extend({
+    pending: providerLoginPendingSchema.nullable().catch(null),
+    pack: providerLoginPackSchema.nullable().catch(null),
+  }),
+);
+export type ProvidersStartLoginResponseV13 = z.infer<
+  typeof providersStartLoginResponseSchemaV13
+>;
+
+/**
+ * `providers.awaitLogin@2.1` request. Blocks until an in-flight
+ * `providers.startLogin` child finishes (the browser loopback completes or the
+ * CLI exits), then returns the freshly re-probed state - the honest "did the
+ * reconnect work?" signal, so the GUI awaits this instead of polling auth
+ * status. MCP auth polling is NOT folded onto this released carrier; it uses
+ * the dedicated optional `providers.awaitMcpAuth@1.0` method.
+ */
+// `profileId` mirrors `providers.startLogin@1.1`'s request field so the
+// caller awaits the same profile-scoped login child it started. Ships with
+// `providers.awaitLogin@2.1` (originally landed as a bare additive/defaulted
+// field on the released 2.0 line; the 2.0 shapes are frozen without it below
+// and the 2.0→2.1 upgrade fills `null`). The v2->v1 downgrade bridge in
+// registry.ts explicitly drops it before the strict v1.0 parse (see
+// `providersAwaitLoginDowngradeV22ToV10`).
+export const providersAwaitLoginRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    profileId: z.string().nullable().default(null),
+  }),
+);
+export const providersAwaitLoginRequestSchemaV10 = lazySchema(() =>
+  z.strictObject({
+    providerId: providerIdSchemaV10,
+  }),
+);
+export type ProvidersAwaitLoginRequest = z.infer<
+  typeof providersAwaitLoginRequestSchema
+>;
+
+/**
+ * Why a provider refused a sign-in the user completed in the browser, in the
+ * provider's own words, and where it sends the user to resolve it.
+ *
+ * The consent page can succeed and the provider still turn the account away
+ * afterwards: Antigravity asks Google whether the account may use it, and an
+ * account Google wants verified first is refused with a verification link.
+ * The provider discards the sign-in, so nothing about the account changed.
+ *
+ * `reason` is text the provider wrote. A client renders it as text, never as
+ * markup. `actionUrl` is an `https` link the host has already checked against
+ * the provider's own sign-in hosts, or null when the provider offered none.
+ */
+export const providerLoginRefusalSchema = lazySchema(() =>
+  z.object({
+    reason: z.string(),
+    actionUrl: z.string().nullable(),
+  }),
+);
+export type ProviderLoginRefusal = z.infer<typeof providerLoginRefusalSchema>;
+
+/**
+ * Frozen `providers.awaitLogin@2.1` response. Released, so it never grows:
+ * the refusal below is 2.2's. Keep construction inside the lazy factory.
+ */
+export const providersAwaitLoginResponseSchemaV21 = lazySchema(() =>
+  z.object({
+    // The provider's state after the login child closed and auth was re-probed.
+    // Null when no login was in flight for this provider (nothing to await),
+    // and when the provider approved a sign-in the host could not install
+    // into the account's home: the account is what it was before, so a
+    // re-probed state would show the previous account and read as this
+    // sign-in's success. Either way nothing about the provider changed, and a
+    // caller reads null as "the sign-in did not complete".
+    state: providerMutationCliStateSchemaV21.nullable(),
+    // Create-profile only: when the authenticated account already belongs to
+    // an active profile, the host discards the pending profile instead of
+    // activating a duplicate and identifies the existing profile here. Ships
+    // with `providers.awaitLogin@2.1`; the frozen 2.0 response below never
+    // carried it.
+    existingProfileId: z.string().nullable().default(null),
+    // Code-paste only: true when this call resolved because a previously
+    // submitted `providers.submitLoginCode` was rejected by the exchange (the
+    // login child exited nonzero without auth success on re-probe - see the
+    // code-paste decision log's "Failure classification" row), distinct from
+    // the default outcome (a successful re-probe, or nothing was in flight).
+    // The GUI uses this to drive its bounded auto-restart (decision log's
+    // "Bad-code recovery" row) instead of surfacing a generic failed state.
+    // Added as a bare additive field while the 2.1 line was unreleased (same
+    // precedent as `providers.startLogin@1.1`'s
+    // `createProfile.shareSkillsAndPlugins`): old hosts never emit it and
+    // `.default(false)` keeps old-client parses byte-identical to today.
+    codeRejected: z.boolean().default(false),
+  }),
+);
+
+/**
+ * `providers.awaitLogin@2.2` response. Returns the re-probed `state`, and
+ * `refusal` when the provider turned the sign-in away.
+ */
+export const providersAwaitLoginResponseSchema = lazySchema(() =>
+  z.object({
+    ...providersAwaitLoginResponseSchemaV21.shape,
+    // Non-null when the provider refused the sign-in after the browser leg
+    // (`providerLoginRefusalSchema`). `state` is null then: the refusal is
+    // the answer, and a re-probe would describe whatever account was there
+    // before. A 2.1 caller drops the key and reads the null state as "the
+    // sign-in did not complete", which is still true.
+    refusal: providerLoginRefusalSchema.nullable().default(null),
+  }),
+);
+export const providersAwaitLoginResponseSchemaV20 = lazySchema(() =>
+  z.object({
+    state: providerMutationCliStateSchemaV20.nullable(),
+  }),
+);
+export const providersAwaitLoginResponseSchemaV10 = lazySchema(() =>
+  z.object({
+    state: providerCliStateSchemaV10.nullable(),
+  }),
+);
+export type ProvidersAwaitLoginResponse = z.infer<
+  typeof providersAwaitLoginResponseSchema
+>;
+
+/**
+ * Client-side response-frame budget for `providers.awaitLogin`, which is a
+ * long-poll: the host's response is contractually silent until the OAuth
+ * login child terminates. A transport-default frame timeout (~30 s) misreads
+ * that silence as a dead host and abandons a healthy in-flight sign-in as
+ * soon as the user takes longer than the timeout in the browser.
+ *
+ * Derivation: the host's login timeout is now a rolling deadline (see the
+ * code-paste decision log's "Timeouts" row) - each `providers.touchLogin`
+ * keepalive or `providers.submitLoginCode` submit resets the kill timer to
+ * 3 minutes out, hard-capped at 15 minutes from spawn - so a child can
+ * legitimately stay alive up to 15 minutes even while the long-poll caller
+ * sees no traffic. 16 minutes covers that hard cap plus slack for the await
+ * path's own bounded auth re-probe before the response is framed. The host
+ * must keep its internal deadline strictly under this budget - clients wait
+ * exactly this long before declaring the call dead.
+ */
+export const PROVIDERS_AWAIT_LOGIN_RESPONSE_BUDGET_MS = 16 * 60_000;
+
+/**
+ * Frozen `providers.cancelLogin@1.0` request/response.
+ */
+export const providersCancelLoginRequestSchemaV10 = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+  }),
+);
+export type ProvidersCancelLoginRequestV10 = z.infer<
+  typeof providersCancelLoginRequestSchemaV10
+>;
+
+export const providersCancelLoginResponseSchemaV10 = lazySchema(() =>
+  z.object({
+    cancelled: z.boolean(),
+  }),
+);
+export type ProvidersCancelLoginResponseV10 = z.infer<
+  typeof providersCancelLoginResponseSchemaV10
+>;
+
+/**
+ * `providers.cancelLogin@1.1` request (classic provider login only). MCP
+ * cancel rides the dedicated optional `providers.cancelMcpAuth@1.0` method.
+ */
+export const providersCancelLoginRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+  }),
+);
+export type ProvidersCancelLoginRequest = z.infer<
+  typeof providersCancelLoginRequestSchema
+>;
+
+// `providers.cancelLogin@1.1` request - adds `profileId`, mirroring
+// `providers.startLogin@1.1`, so the caller cancels the same profile-scoped
+// login child it started. Shipped as a minor (not an in-place edit to v1.0,
+// which every released peer already negotiates): `profileId` defaults to
+// `null`, byte-identical to today's request, so old clients are unaffected.
+export const providersCancelLoginRequestSchemaV11 = lazySchema(() =>
+  providersCancelLoginRequestSchema.extend({
+    profileId: z.string().nullable().default(null),
+  }),
+);
+export type ProvidersCancelLoginRequestV11 = z.infer<
+  typeof providersCancelLoginRequestSchemaV11
+>;
+
+/** Release one caller's claim; a null holder keeps the legacy scope cancel. */
+export const providersCancelLoginRequestSchemaV12 = lazySchema(() =>
+  providersCancelLoginRequestSchemaV11.extend({
+    holderId: z.string().min(1).max(128).nullable().default(null),
+  }),
+);
+export type ProvidersCancelLoginRequestV12 = z.infer<
+  typeof providersCancelLoginRequestSchemaV12
+>;
+
+/**
+ * `providers.cancelLogin@1.1` response (classic provider login only).
+ */
+export const providersCancelLoginResponseSchema = lazySchema(() =>
+  z.object({
+    cancelled: z.boolean(),
+  }),
+);
+export type ProvidersCancelLoginResponse = z.infer<
+  typeof providersCancelLoginResponseSchema
+>;
+
+// ── Dedicated native methods (optional capability channel) ─────────────────
+//
+// These carry the MCP/plugins/skills payloads that used to fold onto the
+// released `providers.startLogin@1.1` / `awaitLogin@2.1` / `cancelLogin@1.1` /
+// `setEnabled@2.1` carriers. Folding grew already-released wire shapes, which
+// the compat gate correctly rejects: a released line is frozen. Because they
+// are brand-new METHOD NAMES they ride the optional-capability channel with
+// `degrade: { kind: "unsupported" }` (see `registry.ts`), so a host that
+// predates them fails these calls per-call with upgrade guidance instead of
+// failing the whole handshake.
+//
+// Unlike the carrier fields, `result` here is non-nullable: these methods
+// exist only to serve native actions, so "no payload" is not a reachable
+// success state - the resolver either answers with a result (including the
+// typed `error`/`unsupported` arms) or throws.
+
+/** `providers.mcpAuth@1.0` request - the full MCP auth action set. */
+export const providersMcpAuthRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    action: nativeAuthActionSchema,
+  }),
+);
+export type ProvidersMcpAuthRequest = z.infer<
+  typeof providersMcpAuthRequestSchema
+>;
+
+/** `providers.mcpAuth@1.0` response. */
+export const providersMcpAuthResponseSchema = lazySchema(() =>
+  z.object({
+    result: nativeAuthResultSchema,
+  }),
+);
+export type ProvidersMcpAuthResponse = z.infer<
+  typeof providersMcpAuthResponseSchema
+>;
+
+/**
+ * `providers.awaitMcpAuth@1.0` request - a **bounded status poll** (well under
+ * the 30s unary frame deadline), never a long poll. The host pending-auth
+ * registry (R02) owns concurrency.
+ */
+export const providersAwaitMcpAuthRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    context: nativeAuthPollContextSchema,
+  }),
+);
+export type ProvidersAwaitMcpAuthRequest = z.infer<
+  typeof providersAwaitMcpAuthRequestSchema
+>;
+
+/** `providers.awaitMcpAuth@1.0` response. */
+export const providersAwaitMcpAuthResponseSchema = lazySchema(() =>
+  z.object({
+    result: nativeAuthResultSchema,
+  }),
+);
+export type ProvidersAwaitMcpAuthResponse = z.infer<
+  typeof providersAwaitMcpAuthResponseSchema
+>;
+
+/** `providers.cancelMcpAuth@1.0` request. */
+export const providersCancelMcpAuthRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    context: nativeAuthCancelContextSchema,
+  }),
+);
+export type ProvidersCancelMcpAuthRequest = z.infer<
+  typeof providersCancelMcpAuthRequestSchema
+>;
+
+/**
+ * `providers.cancelMcpAuth@1.0` response. `cancelled` reports whether a
+ * pending auth was actually found and torn down, distinct from `result`, which
+ * describes the server's resulting auth state - cancelling something that was
+ * never in flight is `cancelled: false` with a perfectly normal result.
+ */
+export const providersCancelMcpAuthResponseSchema = lazySchema(() =>
+  z.object({
+    cancelled: z.boolean(),
+    result: nativeAuthResultSchema,
+  }),
+);
+export type ProvidersCancelMcpAuthResponse = z.infer<
+  typeof providersCancelMcpAuthResponseSchema
+>;
+
+/**
+ * `providers.nativeMutate@1.1` request - MCP/plugins/skills mutations, with
+ * the MCP remedies. The scope tuple and its `scope`/`workspaceRoot` invariant
+ * live inside `nativeMutationSchema`, so no XOR refinement is needed on this
+ * envelope.
+ *
+ * Frozen when 1.3 opened above it; 1.3 below is the live request.
+ */
+export const providersNativeMutateRequestSchemaV11 = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    mutation: nativeMutationSchema,
+  }),
+);
+export type ProvidersNativeMutateRequestV11 = z.infer<
+  typeof providersNativeMutateRequestSchemaV11
+>;
+
+/**
+ * `providers.nativeMutate@1.3` request: the `promoteToPersonal` arm, and the
+ * executable-write grant, since an MCP add or update installs a command and a
+ * skill import or update installs content an agent runs. A v1.2 caller's
+ * request is upgraded with a `null` grant.
+ */
+export const providersNativeMutateRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    mutation: nativeMutationSchemaV12,
+    executableWriteGrant: executableWriteGrantSchema,
+  }),
+);
+export const providersNativeMutateRequestSchemaV10Preimage = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    mutation: nativeMutationSchemaV10Preimage,
+  }),
+);
+export type ProvidersNativeMutateRequest = z.infer<
+  typeof providersNativeMutateRequestSchema
+>;
+
+/**
+ * `providers.nativeMutate@1.4` request: `@1.3` plus `expectedEnvironmentId`,
+ * the environment the caller is editing. Null writes wherever this host
+ * writes; an id is refused with `environment_mismatch` unless this host
+ * serves that environment when it writes.
+ */
+export const providersNativeMutateRequestSchemaV14 = lazySchema(() =>
+  providersNativeMutateRequestSchema.extend({
+    expectedEnvironmentId: z.string().min(1).nullable().default(null),
+  }),
+);
+export type ProvidersNativeMutateRequestV14 = z.infer<
+  typeof providersNativeMutateRequestSchemaV14
+>;
+
+/**
+ * `providers.nativeMutate@1.0` response. Returns only the mutated native
+ * collection: the old `setEnabled` carrier also echoed the full
+ * `ProviderCliState`, but no client ever read it on the native arm, and
+ * recomputing a whole provider catalog for a tool toggle is pure overhead.
+ */
+export const providersNativeMutateResponseSchema = lazySchema(() =>
+  z.object({
+    result: nativeMutationResultSchema,
+  }),
+);
+export const providersNativeMutateResponseSchemaV10Preimage = lazySchema(() =>
+  z.object({ result: nativeMutationResultSchemaV10Preimage }),
+);
+export const providersNativeMutateResponseSchemaV11Preimage = lazySchema(() =>
+  z.object({ result: nativeMutationResultSchemaV11Preimage }),
+);
+export type ProvidersNativeMutateResponse = z.infer<
+  typeof providersNativeMutateResponseSchema
+>;
+
+/** `providers.nativeMutate@1.4` response: the result may be `environment_mismatch`. */
+export const providersNativeMutateResponseSchemaV14 = lazySchema(() =>
+  z.object({ result: nativeMutationResultSchemaV14 }),
+);
+export type ProvidersNativeMutateResponseV14 = z.infer<
+  typeof providersNativeMutateResponseSchemaV14
+>;
+
+// ── Model providers (optional capability channel) ──────────────────────────
+//
+// Four dedicated methods for the Model Providers tab, registered with
+// `degrade: { kind: "unsupported" }` exactly like the `providers.mcpAuth` trio
+// above and for the same reason: they are new METHOD NAMES, so an older host
+// fails them per call with upgrade guidance instead of failing the handshake.
+//
+// Dedicated methods rather than new arms on `providers.list`'s `native`
+// carrier or on `providers.nativeMutate`. Both of those are released shapes,
+// and both bake the MCP model into their payloads - `nativeListQuerySchema`
+// carries a scope tuple every arm must answer, `nativeAuthActionSchema` a
+// `serverName`. Upstream LLM credentials have neither: no project scope, no
+// server. Widening those unions would grow a released wire shape (which the
+// compat gate rejects) in order to model fields that are meaningless here.
+//
+// `result` is non-nullable on all four, matching the mcpAuth trio: these
+// methods exist only to serve this surface, so "no payload" is not a reachable
+// success state - the resolver answers with a result (including the typed
+// `error` / `unsupported` arms) or throws.
+
+/**
+ * `providers.listModelProviders@1.0` request. `providerId` is the Traycer
+ * provider whose settings tab is open - the `opencode` module today, and the
+ * host gates the capability to it.
+ */
+export const providersListModelProvidersRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+  }),
+);
+export type ProvidersListModelProvidersRequest = z.infer<
+  typeof providersListModelProvidersRequestSchema
+>;
+
+/** `providers.listModelProviders@1.0` response. */
+export const providersListModelProvidersResponseSchema = lazySchema(() =>
+  z.object({
+    result: modelProvidersListResultSchema,
+  }),
+);
+export type ProvidersListModelProvidersResponse = z.infer<
+  typeof providersListModelProvidersResponseSchema
+>;
+
+/** `providers.modelProviderAuth@1.0` request - the full auth action set. */
+export const providersModelProviderAuthRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    action: modelProviderAuthActionSchema,
+  }),
+);
+export type ProvidersModelProviderAuthRequest = z.infer<
+  typeof providersModelProviderAuthRequestSchema
+>;
+
+/** `providers.modelProviderAuth@1.0` response. */
+export const providersModelProviderAuthResponseSchema = lazySchema(() =>
+  z.object({
+    result: modelProviderAuthResultSchema,
+  }),
+);
+export type ProvidersModelProviderAuthResponse = z.infer<
+  typeof providersModelProviderAuthResponseSchema
+>;
+
+/**
+ * `providers.awaitModelProviderAuth@1.0` request - a **bounded status poll**
+ * (well under the 30s unary frame deadline), never a long poll. The host's
+ * pending-auth registry owns concurrency and expiry.
+ */
+export const providersAwaitModelProviderAuthRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    context: modelProviderAuthPollContextSchema,
+  }),
+);
+export type ProvidersAwaitModelProviderAuthRequest = z.infer<
+  typeof providersAwaitModelProviderAuthRequestSchema
+>;
+
+/** `providers.awaitModelProviderAuth@1.0` response. */
+export const providersAwaitModelProviderAuthResponseSchema = lazySchema(() =>
+  z.object({
+    result: modelProviderAuthResultSchema,
+  }),
+);
+export type ProvidersAwaitModelProviderAuthResponse = z.infer<
+  typeof providersAwaitModelProviderAuthResponseSchema
+>;
+
+/** `providers.cancelModelProviderAuth@1.0` request. */
+export const providersCancelModelProviderAuthRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    context: modelProviderAuthCancelContextSchema,
+  }),
+);
+export type ProvidersCancelModelProviderAuthRequest = z.infer<
+  typeof providersCancelModelProviderAuthRequestSchema
+>;
+
+/**
+ * `providers.cancelModelProviderAuth@1.0` response. `cancelled` reports
+ * whether a pending attempt was actually found and torn down, distinct from
+ * `result`, which describes the resulting auth state - cancelling an attempt
+ * that already completed, expired or was superseded is `cancelled: false` with
+ * a perfectly normal result. Same split as
+ * `providersCancelMcpAuthResponseSchema`.
+ *
+ * Cancel is best-effort and LOCAL: upstream exposes no OAuth-cancel endpoint,
+ * so this discards the pending attempt and releases its server lease. It never
+ * claims to have revoked anything on the provider's side.
+ */
+export const providersCancelModelProviderAuthResponseSchema = lazySchema(() =>
+  z.object({
+    cancelled: z.boolean(),
+    result: modelProviderAuthResultSchema,
+  }),
+);
+export type ProvidersCancelModelProviderAuthResponse = z.infer<
+  typeof providersCancelModelProviderAuthResponseSchema
+>;
+
+export type {
+  ModelProviderAuthAction,
+  ModelProviderAuthCancelContext,
+  ModelProviderAuthPollContext,
+  ModelProviderAuthResult,
+  ModelProvidersListResult,
+  NativeAuthAction,
+  NativeAuthCancelContext,
+  NativeAuthPollContext,
+  NativeAuthResult,
+  NativeListQuery,
+  NativeListResult,
+  NativeMutation,
+  NativeMutationResult,
+};
+
+/**
+ * Relay a pasted authorization code to an in-flight `providers.startLogin`
+ * child's stdin (see the code-paste decision log's "Mechanism" row).
+ * `profileId` mirrors `providers.startLogin@1.1`'s convention - the same
+ * profile-scoped login child the caller started - and defaults to `null`
+ * for the legacy (no-profile-override) login. The exchange outcome itself
+ * (accepted vs rejected by claude.ai) is NOT carried here: submitting only
+ * confirms the code reached a live child; the real outcome surfaces later
+ * via the existing `providers.awaitLogin` long-poll (see that response's
+ * `codeRejected` flag) or, after an auto-restart, a fresh login.
+ */
+export const providersSubmitLoginCodeRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    profileId: z.string().nullable().default(null),
+    code: z.string(),
+  }),
+);
+export type ProvidersSubmitLoginCodeRequest = z.infer<
+  typeof providersSubmitLoginCodeRequestSchema
+>;
+
+/**
+ * `accepted`: the code reached a live login child (a real exchange attempt
+ * is now underway, or the child re-armed after a malformed paste - see the
+ * decision log's "Malformed paste" row); await the result via
+ * `providers.awaitLogin`. `noActiveLogin`: no login child is running for
+ * this provider/profile (already finished, cancelled, or timed out) - the
+ * caller should start a fresh login instead of waiting.
+ */
+export const providersSubmitLoginCodeResponseSchema = lazySchema(() =>
+  z.object({
+    outcome: z.enum(["accepted", "noActiveLogin"]),
+  }),
+);
+export type ProvidersSubmitLoginCodeResponse = z.infer<
+  typeof providersSubmitLoginCodeResponseSchema
+>;
+
+/**
+ * Keepalive for an in-flight `providers.startLogin` child: resets the
+ * host's rolling kill timer without submitting a code (see the code-paste
+ * decision log's "Timeouts" row - each keepalive or submit resets the timer
+ * to 3 minutes out, hard-capped at 15 minutes from spawn). The GUI fires
+ * this while the user is still away in the browser so a slow copy-paste
+ * doesn't race the kill timer. `profileId` mirrors the same profile-scoped
+ * convention as `providers.submitLoginCode`; unlike that request this
+ * method has no pre-profile legacy shape to stay compatible with, so the
+ * field is required rather than defaulted.
+ */
+export const providersTouchLoginRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    profileId: z.string().nullable(),
+  }),
+);
+export type ProvidersTouchLoginRequest = z.infer<
+  typeof providersTouchLoginRequestSchema
+>;
+
+/**
+ * `extended: false` when no live login child exists for this
+ * provider/profile (already finished, cancelled, or timed out) - the
+ * caller should stop touching and re-probe instead of retrying.
+ */
+export const providersTouchLoginResponseSchema = lazySchema(() =>
+  z.object({
+    extended: z.boolean(),
+  }),
+);
+export type ProvidersTouchLoginResponse = z.infer<
+  typeof providersTouchLoginResponseSchema
+>;
+
+/**
+ * Start (or restart) a host-owned terminal running this provider's login
+ * command, for providers whose capability declares `terminalLogin`. The host -
+ * not the client - creates the PTY: only the host can build the provider's
+ * spawn env (binary path, profile overrides, `COPILOT_AUTO_UPDATE=false`) and
+ * pick the cwd, and a plain `terminal.create` would get bare filtered
+ * `process.env` in a surface that has no cwd of its own. The client's job is
+ * to render the session the host names back.
+ *
+ * This is the FROZEN `@1.0` request: `epicId` scopes the session to an epic's
+ * Terminals surface, the only surface that existed when the method shipped.
+ * `@2.0` below replaces it with a `TerminalScope`, exactly as
+ * `terminal.create@2.0` did, so the landing page's independent terminal panel
+ * can host a sign-in too. Never edit this shape in place; the registry's
+ * v1.0 line binds it.
+ *
+ * `cols`/`rows` are the size the PTY is opened at, applied while the shell's
+ * output is still buffered so its first redraw is not torn; they are an
+ * INITIAL size, not a promise about the user's viewport - the tile resizes on
+ * mount, and today's client sends a fixed 80x24. A host must not treat them
+ * as the real geometry (no sizing heuristics, no resize-suppression window).
+ *
+ * No `profileId`: terminal login is Copilot-only today and Copilot has no
+ * managed profiles, so the field could only ever carry the ambient sentinel -
+ * a value with two live spellings in the host (`"ambient"` on the wire, `null`
+ * in the domain) and therefore a way for one provider to end up with two
+ * "single" login shells. If terminal login ever reaches a provider WITH
+ * managed profiles, add the field then and normalize it at the resolver
+ * boundary.
+ *
+ * No `desiredSessionId` either: the host mints a fresh one per attempt. A
+ * reused id is what makes a retry silently fail - a killed session lingers
+ * `exited` in the host's grace window, so a readiness watch armed on that id
+ * settles immediately and the login command is never delivered, and a reused
+ * tile id re-focuses the previous, permanently dead tile.
+ */
+export const providersStartTerminalLoginRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    epicId: z.string().min(1),
+    cols: z.number().int().positive(),
+    rows: z.number().int().positive(),
+  }),
+);
+export type ProvidersStartTerminalLoginRequest = z.infer<
+  typeof providersStartTerminalLoginRequestSchema
+>;
+
+/**
+ * Canonical `@2.0` request. `scope` replaces `epicId`: `{ kind: "epic" }`
+ * lands the sign-in terminal in that epic's Terminals surface exactly as
+ * `@1.0` did, and `{ kind: "independent" }` lands it in the landing page's
+ * terminal panel - the surface a provider that is signed out BEFORE any epic
+ * exists can actually reach. A field rename is not additive, so this rides a
+ * new major (the `terminalScopeSchema` comment records why); the registry's
+ * v1.0→v2.0 upgrade folds an old client's `epicId` into an epic scope, and
+ * the downgrade refuses an independent scope against an old host (that
+ * refusal IS the feature gate - the old host has no surface to put it in).
+ *
+ * Everything the `@1.0` doc says about `cols`/`rows`, the absent `profileId`
+ * and the absent `desiredSessionId` holds unchanged here.
+ *
+ * The epic arm keeps `@1.0`'s non-empty floor on `epicId` rather than
+ * borrowing `terminalScopeSchema`'s bare string: an empty id decodes fine and
+ * then names no surface, leaving the host holding a live sign-in PTY nothing
+ * can list. Same inferred type as `TerminalScope`, so the host passes it
+ * through unchanged.
+ */
+export const providersStartTerminalLoginRequestSchemaV20 = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+    scope: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("epic"), epicId: z.string().min(1) }),
+      z.object({ kind: z.literal("independent") }),
+    ]),
+    cols: z.number().int().positive(),
+    rows: z.number().int().positive(),
+  }),
+);
+export type ProvidersStartTerminalLoginRequestV20 = z.infer<
+  typeof providersStartTerminalLoginRequestSchemaV20
+>;
+
+/**
+ * `sessionId` is the freshly created session - the client opens it as a tile
+ * and ATTACHES; it must never `terminal.create` that id itself.
+ *
+ * `replacedSessionId` is the previous login session this attempt killed, or
+ * `null` on a first attempt. Every click starts a fresh sign-in (a completed
+ * login leaves an idle interactive shell behind that carries no state worth
+ * resuming), so the client closes any open tile bound to this id before
+ * focusing the new one - otherwise the retry lands on a tile that can never
+ * come back to life.
+ */
+export const providersStartTerminalLoginResponseSchema = lazySchema(() =>
+  z.object({
+    // Bounded like the request's `epicId`: an empty id decodes fine and then
+    // vanishes downstream - `useFocusEpicTerminalSession` returns early on a
+    // zero-length session id - leaving the host holding a live sign-in PTY with
+    // no tile and no error. The host mints a uuid so this is a contract floor,
+    // not a live defect.
+    sessionId: z.string().min(1),
+    replacedSessionId: z.string().nullable(),
+  }),
+);
+export type ProvidersStartTerminalLoginResponse = z.infer<
+  typeof providersStartTerminalLoginResponseSchema
+>;
+
+/**
+ * User-initiated "get this provider's managed pack ready". A NON-BLOCKING
+ * kick: the host promotes the pack to the front of its install queue, clears
+ * the cell's exponential backoff (this is a human pressing retry, not an
+ * automatic poll), and returns the pack's CURRENT state immediately - it never
+ * awaits the download. Poll `providers.list` for progress.
+ *
+ * The user-initiated flag is not on the wire because it is not the client's to
+ * assert: reaching the host through THIS method is what makes a call
+ * user-initiated. `providers.list` and boot convergence take the automatic
+ * arm, which honors backoff and may not quarantine an unverifiable version
+ * dir; only this method's arm may.
+ */
+export const providersEnsurePackRequestSchema = lazySchema(() =>
+  z.object({
+    providerId: providerIdSchema,
+  }),
+);
+export type ProvidersEnsurePackRequest = z.infer<
+  typeof providersEnsurePackRequestSchema
+>;
+
+/**
+ * The pack's state as of the kick, in the same vocabulary `providers.list`
+ * carries. `null` where that field is null there: the provider has no managed
+ * pack on this host (store not managed, or a provider the staged rollout has
+ * not cut over), so there was nothing to ensure.
+ *
+ * A host with no install machinery at all does NOT answer null here - it
+ * refuses the call with an error. Null and "refused" would otherwise be the
+ * same response, and a client cannot tell a kick it should poll for from one
+ * that did nothing and never will. That is how a retry affordance stays
+ * offered forever for a click that cannot work.
+ */
+export const providersEnsurePackResponseSchema = lazySchema(() =>
+  z.object({
+    managedInstallState: providerManagedInstallStateSchema.nullable(),
+  }),
+);
+export type ProvidersEnsurePackResponse = z.infer<
+  typeof providersEnsurePackResponseSchema
+>;
+
+// ── v7.0: the four per-pack version-manager methods ────────────────────────
+//
+// Each is a BRAND-NEW METHOD NAME at `@1.0`, and `providers.ensurePack@1.0`
+// above is left byte-identical. That split is deliberate and is not a style
+// choice: a rename cannot be a version bump. `ensurePack` is a released method
+// name, and a version bump on it would tell a peer "same method, richer shape"
+// when the truth is "different method entirely" - while REMOVING the old name
+// is fatal to the handshake for every peer that still lists it. New behaviour
+// that is not the old method's behaviour gets a new name, and the new name
+// rides the optional-capability channel (`degrade: { kind: "unsupported" }` in
+// `registry.ts`) so a host predating it refuses these calls per-call with
+// upgrade guidance instead of failing the whole connection.
+//
+// All four are keyed by `packId`, never by provider (D5): the store is
+// machine-shared and one pack serves several providers, so a per-provider
+// mutation would be one provider silently rewriting a cell three others read.
+//
+// TYPED RESULTS, not thrown errors, for the refusals a USER can act on -
+// same `{ ok: true, … } | { ok: false, code, detail }` shape the native
+// surface uses. The split is about who the message is for: a refusal the user
+// can do something about (switch away from the current version first, pick a
+// version at or above the floor) is a typed result the panel renders on the
+// row it belongs to. A caller BUG or a host that has no install machinery at
+// all is not - those throw, exactly as `providers.ensurePack` refuses rather
+// than answering null. An unknown `packId` is in the second class.
+
+/**
+ * User-requested download of one specific version, installed into the
+ * versioned store WITHOUT flipping `current` (the manager's download/flip
+ * split exists for this call). Non-blocking, like `providers.ensurePack`:
+ * returns the version's state as of the kick and never awaits the transfer.
+ *
+ * The refusal codes are one-per-producer-outcome; the reasoning for each, and
+ * for why none of them may be folded into another, lives on the `code` enum in
+ * `providersInstallPackVersionResultSchema` below.
+ *
+ * The distinction that drives the UI: `condemned` is TERMINAL - a persisted
+ * verdict that this build is defective on this machine, so no retry can ever
+ * succeed and the row must draw no retry affordance. `unfetchable` means the
+ * registry has nothing to fetch for this version right now (head-pruned, or a
+ * yank tombstone whose assets are gone); the bytes are missing, not broken, and
+ * a later head refresh can legitimately change the answer. Rendering the first
+ * as retryable is offered-then-failed forever; rendering the second as terminal
+ * buries a version that may come back. The three certification refusals sit in
+ * a third group again - not retryable, but not terminal either: they change if
+ * the publisher raises the floor's ceiling or lifts a yank.
+ *
+ * NOT modelled here on purpose: a live SIBLING HOST already fetching these
+ * bytes. That is `downloading` with a null percent on the version's
+ * `installState`, never a refusal - the transfer is progressing, just not under
+ * this host's control, and reporting it as an error would tell the user a
+ * download broke while it is actively running on the same machine.
+ */
+export const providersInstallPackVersionRequestSchema = lazySchema(() =>
+  z.object({
+    packId: z.string().min(1),
+    version: z.string().min(1),
+  }),
+);
+export type ProvidersInstallPackVersionRequest = z.infer<
+  typeof providersInstallPackVersionRequestSchema
+>;
+
+export const providersInstallPackVersionResultSchema = lazySchema(() =>
+  z.union([
+    z.object({
+      ok: z.literal(true),
+      installState: providerPackVersionInstallStateSchema,
+    }),
+    z.object({
+      ok: z.literal(false),
+      // ONE MEMBER PER PRODUCER OUTCOME, deliberately. The host resolves a
+      // user-picked version through `resolveUserPickedProviderPackTarget`, whose
+      // result is a four-arm union that fans out to exactly these six refusals
+      // (`refused` -> `invalid-version`; `ineligible` ->
+      // `below-security-floor` / `host-ineligible` / `yanked`; plus
+      // `unfetchable` and the terminal `condemned` verdict). Keeping the mapping
+      // 1:1 is the point: it is total and mechanical, so no host author has to
+      // pick a "closest fit" and no later reader has to reverse-engineer which
+      // real outcome a collapsed code stood for. (`pin-below-floor` was the
+      // seventh member until the 2026-08-12 D1 revision made below-pin versions
+      // an ordinary, certification-gated offer.)
+      //
+      // The temptation was to fold the three `ineligible` reasons into
+      // `unfetchable`. That is wrong on the facts and wrong in the copy it
+      // produces. An ineligible version is DISALLOWED, not missing: its assets
+      // usually exist and the host refuses to serve them, whereas `unfetchable`
+      // means the registry has nothing to hand over (head-pruned, or a yank
+      // tombstone that outlived its assets). Rendering "couldn't download" for
+      // "below the publisher's security minimum" is precisely the
+      // offered-then-failed copy D2 exists to remove - the user retries a
+      // download that is refused by policy and can never succeed.
+      //
+      // Likewise `condemned` is not a spelling of any of these: it means the
+      // bytes were digest-verified and only then found defective ON THIS
+      // MACHINE, so it is terminal and must draw no retry affordance. Disallowed
+      // and defective are different sentences to write.
+      //
+      // `below-security-floor` / `host-ineligible` / `yanked` reuse the
+      // `providerPackVersionCertificationSchema` vocabulary on purpose, so a
+      // renderer writes one copy string per certification and reuses it here
+      // instead of parsing `detail` (which stays operator-facing, never primary
+      // copy - same rule as every other typed error in this file).
+      code: z.enum([
+        "condemned",
+        "unfetchable",
+        "invalid-version",
+        "below-security-floor",
+        "host-ineligible",
+        "yanked",
+      ]),
+      detail: z.string().nullable(),
+    }),
+  ]),
+);
+export type ProvidersInstallPackVersionResult = z.infer<
+  typeof providersInstallPackVersionResultSchema
+>;
+
+export const providersInstallPackVersionResponseSchema = lazySchema(() =>
+  z.object({
+    result: providersInstallPackVersionResultSchema,
+  }),
+);
+export type ProvidersInstallPackVersionResponse = z.infer<
+  typeof providersInstallPackVersionResponseSchema
+>;
+
+/**
+ * Delete one installed version's bytes.
+ *
+ * `deferred-locked` is the one member of this enum that is NOT a failure -
+ * called out here the way `unrepairable` is called out on
+ * `providerManagedInstallErrorReasonSchema`, and for the same reason: an enum
+ * whose members are all read as "it broke" will be rendered that way. It means
+ * the binary is locked right now (Windows, or a turnover-only pack), so the
+ * delete was RECORDED and the boot GC pass will carry it out. The row says
+ * "Removes when no longer in use". A renderer that draws it as an error tells
+ * the user their delete failed when it is queued and will happen.
+ *
+ * The other three are genuine refusals with a user-visible next step:
+ * `is-current` ("switch to another version first"), `holder-reserved` (a live
+ * session pinned this dir for its whole life - it goes when that session
+ * ends), `quarantine-reserved` (the host is holding the dir as evidence of a
+ * failed verification).
+ */
+export const providersRemovePackVersionRequestSchema = lazySchema(() =>
+  z.object({
+    packId: z.string().min(1),
+    version: z.string().min(1),
+  }),
+);
+export type ProvidersRemovePackVersionRequest = z.infer<
+  typeof providersRemovePackVersionRequestSchema
+>;
+
+export const providersRemovePackVersionResultSchema = lazySchema(() =>
+  z.union([
+    z.object({ ok: z.literal(true) }),
+    z.object({
+      ok: z.literal(false),
+      code: z.enum([
+        "is-current",
+        "holder-reserved",
+        "quarantine-reserved",
+        "deferred-locked",
+      ]),
+      detail: z.string().nullable(),
+    }),
+  ]),
+);
+export type ProvidersRemovePackVersionResult = z.infer<
+  typeof providersRemovePackVersionResultSchema
+>;
+
+export const providersRemovePackVersionResponseSchema = lazySchema(() =>
+  z.object({
+    result: providersRemovePackVersionResultSchema,
+  }),
+);
+export type ProvidersRemovePackVersionResponse = z.infer<
+  typeof providersRemovePackVersionResponseSchema
+>;
+
+/**
+ * Pin this pack to a version, or clear the pin. `version: null` is the clear
+ * ("use latest automatically"), which is why it is nullable rather than a
+ * separate method - the two are one user-facing control.
+ *
+ * Setting a pin implies NOTIFY-ONLY for newer versions (D4): there is no
+ * background pre-staging, so a pinned pack announces a new version and waits
+ * for the user to ask, identical to the paused surface.
+ *
+ * A pin below the baked pin is honoured (D1 as revised 2026-08-12): target
+ * derivation consults the user pin before the baked pin, so no flip-back
+ * follows, and the only server-side bounds are the signed refusal facts
+ * below - which must hold server-side because the UI is not the only caller
+ * and a stale client can ask for anything.
+ *
+ * `below-security-floor` and `host-ineligible` are signed positive refusal
+ * facts. Unlike a yanked or uncertified installed copy (D8), neither may
+ * become this pack's durable pin or `current` binary, even for a stale client
+ * that bypassed the panel's disabled affordance.
+ *
+ * `verification-failed` covers the D15 re-verification the flip performs
+ * inside the install lock: the pin record is written FIRST (a crash between
+ * pin and flip converges toward the pin on the next tick, which is safe), then
+ * the target dir is re-verified before `current` moves. If that verification
+ * fails the pin is rolled back, and the caller has to be told the difference
+ * between "your pin was refused" and "your pin was accepted and then undone" -
+ * otherwise the panel shows a pin that silently is not in force.
+ */
+export const providersUsePackVersionRequestSchema = lazySchema(() =>
+  z.object({
+    packId: z.string().min(1),
+    // Null clears the pin and returns the pack to auto.
+    version: z.string().min(1).nullable(),
+  }),
+);
+export type ProvidersUsePackVersionRequest = z.infer<
+  typeof providersUsePackVersionRequestSchema
+>;
+
+export const providersUsePackVersionResultSchemaV10 = lazySchema(() =>
+  z.union([
+    z.object({
+      ok: z.literal(true),
+      // The pin as it now stands durably - null after a clear. Echoed rather
+      // than assumed by the caller so a client that raced another host's write
+      // re-renders the truth instead of its own optimistic guess.
+      pinnedVersion: z.string().nullable(),
+    }),
+    z.object({
+      ok: z.literal(false),
+      code: z.enum([
+        "verification-failed",
+        "below-security-floor",
+        "host-ineligible",
+      ]),
+      detail: z.string().nullable(),
+    }),
+  ]),
+);
+export type ProvidersUsePackVersionResultV10 = z.infer<
+  typeof providersUsePackVersionResultSchemaV10
+>;
+
+/** Frozen 1.0 response; never let a new refusal arm widen it in place. */
+export const providersUsePackVersionResponseSchemaV10 = lazySchema(() =>
+  z.object({ result: providersUsePackVersionResultSchemaV10 }),
+);
+
+export const providersUsePackVersionResultSchema = lazySchema(() =>
+  z.union([
+    ...providersUsePackVersionResultSchemaV10.options,
+    z.object({
+      ok: z.literal(false),
+      code: z.literal("macos-ineligible"),
+      requiredMacos: providerMacosVersionSchema,
+      runningMacos: providerMacosVersionSchema,
+    }),
+  ]),
+);
+
+export type ProvidersUsePackVersionResult = z.infer<
+  typeof providersUsePackVersionResultSchema
+>;
+
+export const providersUsePackVersionResponseSchema = lazySchema(() =>
+  z.object({
+    result: providersUsePackVersionResultSchema,
+  }),
+);
+export type ProvidersUsePackVersionResponse = z.infer<
+  typeof providersUsePackVersionResponseSchema
+>;
+
+/** 1.0 peers can truthfully say only that the requested pin was not kept. */
+export function projectUsePackVersionResultToV10(
+  result: ProvidersUsePackVersionResult,
+): ProvidersUsePackVersionResultV10 {
+  return !result.ok && result.code === "macos-ineligible"
+    ? { ok: false, code: "verification-failed", detail: null }
+    : result;
+}
+
+/**
+ * Set the per-pack auto-download policy. Default on, which is today's
+ * behaviour (newest eligible auto-installs and, absent a pin, becomes
+ * current). Off means a newer eligible version only NOTIFIES - the download
+ * waits for the user.
+ *
+ * Turning it off does not soften the security floor: the floor is not advisory
+ * (D2), so when it passes the installed current the managed lane stops serving
+ * that copy whether or not auto-download is paused. The download waits for the
+ * user; the consequence does not.
+ *
+ * No typed-error arm - there is no refusal a user can act on here. Writing the
+ * policy either succeeds or the call throws (unknown pack, unwritable store),
+ * which is the same division the block comment above draws.
+ */
+export const providersSetPackPolicyRequestSchema = lazySchema(() =>
+  z.object({
+    packId: z.string().min(1),
+    autoDownload: z.boolean(),
+  }),
+);
+export type ProvidersSetPackPolicyRequest = z.infer<
+  typeof providersSetPackPolicyRequestSchema
+>;
+
+export const providersSetPackPolicyResponseSchema = lazySchema(() =>
+  z.object({
+    // The policy as it now stands durably, echoed for the same reason
+    // `usePackVersion` echoes the pin.
+    autoDownload: z.boolean(),
+  }),
+);
+export type ProvidersSetPackPolicyResponse = z.infer<
+  typeof providersSetPackPolicyResponseSchema
+>;
+
+// ── Native subagents ───────────────────────────────────────────────────────
+//
+// `providers.setNativeSubagents` writes the per-provider `nativeSubagents`
+// switch (the row field above) - a brand-new method at `@1.0`, registered
+// `degrade: unsupported` like `providers.setAutoJudge`, whose shape it copies:
+// keyed by HARNESS on the wire (the live GUI enum; the host re-validates
+// against its own roster), stored per provider, and echoing the persisted
+// value so the settings row can settle on truth.
+export const providersSetNativeSubagentsRequestSchema = lazySchema(() =>
+  z.object({
+    harnessId: guiHarnessIdSchema,
+    nativeSubagents: z.boolean(),
+  }),
+);
+export type ProvidersSetNativeSubagentsRequest = z.infer<
+  typeof providersSetNativeSubagentsRequestSchema
+>;
+
+export const providersSetNativeSubagentsResponseSchema = lazySchema(() =>
+  z.object({
+    nativeSubagents: z.boolean(),
+  }),
+);
+export type ProvidersSetNativeSubagentsResponse = z.infer<
+  typeof providersSetNativeSubagentsResponseSchema
+>;
+
+// ── Native memory ──────────────────────────────────────────────────────────
+//
+// `providers.setNativeMemory` writes the per-provider `nativeMemory` switch
+// (the row field above) - a brand-new method at `@1.0`, registered
+// `degrade: unsupported` like `providers.setNativeSubagents`, whose shape it
+// copies: keyed by HARNESS on the wire (the live GUI enum; the host
+// re-validates against its own roster), stored per provider, and echoing the
+// persisted value so the settings row can settle on truth.
+//
+// There is deliberately no "and also tell me whether it applied" field: a
+// provider this host cannot enforce the switch for is refused outright rather
+// than answered with a value, because a successful-looking response carrying
+// an unenforced `false` is exactly the cosmetic switch this must not be.
+export const providersSetNativeMemoryRequestSchema = lazySchema(() =>
+  z.object({
+    harnessId: guiHarnessIdSchema,
+    nativeMemory: z.boolean(),
+  }),
+);
+export type ProvidersSetNativeMemoryRequest = z.infer<
+  typeof providersSetNativeMemoryRequestSchema
+>;
+
+export const providersSetNativeMemoryResponseSchema = lazySchema(() =>
+  z.object({
+    nativeMemory: z.boolean(),
+  }),
+);
+export type ProvidersSetNativeMemoryResponse = z.infer<
+  typeof providersSetNativeMemoryResponseSchema
+>;
+
+// ── On-demand pack discovery refresh ───────────────────────────────────────
+//
+// Another BRAND-NEW method name at `@1.0`, riding the same
+// optional-capability channel as the version-manager mutations above and for
+// the same reason: a host that predates it must refuse the call per-call with
+// upgrade guidance rather than fail the handshake.
+//
+// It is not one of those mutations. Nothing here writes the store - it runs
+// the discovery poll this host otherwise only runs on its own jittered
+// ticker, so a user who knows a version was just published does not have to
+// wait out the period to see it.
+
+/**
+ * Run the pack-discovery poll for one pack now.
+ *
+ * Keyed by `packId`, never by provider (D5): the head this polls belongs to
+ * the PACK, and one pack serves several providers, so a per-provider request
+ * would resolve to the same pack from several ids and poll one head once per
+ * provider.
+ */
+export const providersRefreshPackDiscoveryRequestSchema = lazySchema(() =>
+  z.object({
+    // A managed pack id. An unknown one is a caller BUG, not a typed refusal
+    // below - the host throws, exactly as the per-pack mutations do.
+    packId: z.string().min(1),
+  }),
+);
+export type ProvidersRefreshPackDiscoveryRequest = z.infer<
+  typeof providersRefreshPackDiscoveryRequestSchema
+>;
+
+/**
+ * What the poll did to this host's knowledge of the pack.
+ *
+ * `moved` means THIS HOST'S target knowledge changed - a new head revision,
+ * generation or floor, the first population of a never-derived pack, or a
+ * sibling host's pin/install move. It does NOT mean a newer version exists;
+ * read `providers.list`'s `updateAvailable` for that. `unchanged` covers a
+ * 304, an identical revision, and a pack this host has never seen that the
+ * registry has not published yet.
+ *
+ * `unreachable` and `unusable` are both failures and are NOT interchangeable.
+ * `unreachable` is the transport class - timeout, 403, 5xx, an unopenable
+ * keyring - and leaves existing knowledge in place, so the honest copy is
+ * "couldn't reach the registry, try again". `unusable` means the registry
+ * answered and the answer could not be trusted (stale head, schema error, no
+ * generation this host supports); a pack that WAS known has its update
+ * knowledge cleared until a later check succeeds. Collapsing the two into one
+ * "check failed" would offer a retry for an answer that will not change and
+ * would hide the cleared knowledge behind a transient-sounding message.
+ */
+export const providerPackRefreshOutcomeSchema = lazySchema(() =>
+  z.enum(["moved", "unchanged", "unreachable", "unusable"]),
+);
+export type ProviderPackRefreshOutcome = z.infer<
+  typeof providerPackRefreshOutcomeSchema
+>;
+
+/**
+ * Same `{ ok: true, … } | { ok: false, code, detail }` shape the per-pack
+ * mutations use, so the panel's refusal handling stays uniform across the
+ * popover's controls.
+ */
+export const providersRefreshPackDiscoveryResultSchema = lazySchema(() =>
+  z.union([
+    z.object({
+      ok: z.literal(true),
+      outcome: providerPackRefreshOutcomeSchema,
+    }),
+    z.object({
+      ok: z.literal(false),
+      // Two members, both typed rather than thrown because the panel has a
+      // specific sentence to put ON THE ROW for each - a thrown error only ever
+      // reaches a generic toast.
+      //
+      // `discovery-unavailable` means this host has no discovery machinery to
+      // run at all right now (an abandoned or failed boot chain, or a call
+      // landing in the window before the ticker is constructed): update checks
+      // are off on this host, not broken for this pack. `pack-disabled` means
+      // the provider is turned off, and the scheduled poll deliberately never
+      // includes a disabled pack - the popover stays reachable for one because
+      // version staging has no enablement refcount - so enabling it is the
+      // user's next step.
+      //
+      // An unknown `packId` is NOT a member: it is a caller bug and throws.
+      // `detail` stays operator-facing and is never primary copy, same rule as
+      // every other typed error in this file.
+      code: z.enum(["discovery-unavailable", "pack-disabled"]),
+      detail: z.string().nullable(),
+    }),
+  ]),
+);
+export type ProvidersRefreshPackDiscoveryResult = z.infer<
+  typeof providersRefreshPackDiscoveryResultSchema
+>;
+
+/** Response envelope, shaped like every sibling's in this group. */
+export const providersRefreshPackDiscoveryResponseSchema = lazySchema(() =>
+  z.object({
+    result: providersRefreshPackDiscoveryResultSchema,
+  }),
+);
+export type ProvidersRefreshPackDiscoveryResponse = z.infer<
+  typeof providersRefreshPackDiscoveryResponseSchema
+>;
+
+export function downgradeProviderAuthV20ToV10(
+  auth: ProviderAuthV20,
+): ProviderAuthV10 {
+  switch (auth.status) {
+    case "configured":
+    case "unavailable":
+      return { ...auth, status: "unknown" };
+    case "authenticated":
+      return { ...auth, status: "authenticated" };
+    case "unauthenticated":
+      return { ...auth, status: "unauthenticated" };
+    case "unknown":
+      return { ...auth, status: "unknown" };
+  }
+}
+
+// Accepts any latest-shaped state and downgrades it to the frozen v1.0 shape.
+// A provider outside v1.0's id set (ACP GUI harnesses, Amp) simply fails the
+// `providerCliStateSchemaV10` parse below and is filtered by the caller.
+// Accepts the live (latest) state or any of the frozen v2.0/v3.0 states -
+// those already lack `profiles`/`nativeCapabilities` (see
+// `providerCliStateBaseShapeV20`), so both are typed optional here rather
+// than requiring callers to conjure one (the provider-pack-registry fields -
+// `managedInstallState`, `versionVisibility`, `advisory` - are already
+// optional on `ProviderCliState` itself, so no extra typing is needed for
+// those). `providersListDowngradeV2ToV1` (v2.0/mutation-v2.0 sources) and the
+// v3.0/latest downgrade paths (live source) share this one stripping
+// function.
+// `loginCapability` is typed as the live OR either frozen capability shape for
+// the same reason: the v2.0/v3.0 frozen states carry the pre-`codePaste` shape
+// (`providerLoginCapabilitySchemaV10`) and `ProviderMutationCliStateV21` carries
+// the pre-`terminalLogin` one (`providerLoginCapabilitySchemaV40`), neither of
+// them live. All three are fine here since the strict v1.0 parse below only
+// keeps `oauthArgs`/`token` regardless.
+// Exported so `registry.ts` names the same shape instead of restating it: the
+// two definitions had already been written twice, identically, and the widened
+// `loginCapability` below is exactly the kind of detail that drifts when only
+// one copy gets updated.
+//
+// A union of the real source shapes rather than a single `Omit<ProviderCliState>`:
+// the frozen v2.0/v3.0/mutation-v2.0 states genuinely lack `nativeCapabilities`
+// and the provider-pack-registry fields, so those are widened to optional here.
+// That keeps them destructurable in the strip below no matter which side fed
+// this call.
+//
+// `ProviderCliStateV80` is a member because `providersListDowngradeV8ToV1`
+// genuinely feeds this function v8.0 rows. It was absent while
+// `enabledProviderProfilesOnly` was declared over the live state, which
+// re-typed those rows on the way in - v8.0 was structurally assignable to live
+// until its capability leaf was pinned for `remoteSafe`. It is not assignable
+// to `ProviderCliStateV70` either: v8.0 added `antigravity`, so its
+// `providerId` union is WIDER than v7.0's, not narrower.
+export type DowngradableToV10ProviderState = (
+  | ProviderCliState
+  | ProviderCliStateV80
+  | ProviderCliStateV70
+  | ProviderCliStateV70Preimage
+  | ProviderCliStateV60
+  | ProviderCliStateV50
+  | ProviderCliStateV40
+  | ProviderCliStateV30
+  | ProviderCliStateV20
+  | ProviderMutationCliStateV20
+  | ProviderMutationCliStateV21
+) & {
+  profiles?:
+    | ProviderCliState["profiles"]
+    | ProviderCliStateV80["profiles"]
+    | ProviderCliStateV70["profiles"];
+  // Widened to the pre-image capability shape as well as the live one for
+  // the same reason `loginCapability` below is widened across its own frozen
+  // snapshots: callers reach this function holding either shape, and the
+  // strict v1.0 parse strips the field either way.
+  nativeCapabilities?:
+    | ProviderNativeCapabilities
+    | ProviderNativeCapabilitiesBeforeOpenChatPlugins
+    | ProviderNativeCapabilitiesV70Preimage;
+  // Widened to the live OR the pre-image union once the version-manager work
+  // grew the live arms with `version`. `providersListDowngradeV7ToV1` feeds
+  // this function pre-image rows, which no longer satisfy the live type - both
+  // are
+  // both fine here for the same reason the widened `loginCapability` below is:
+  // the strict v1.0 parse discards this field either way. Without the
+  // widening the v7->v1 bridge simply stops compiling, which is the good
+  // outcome; the bad one would have been a shared type loose enough to hide it.
+  managedInstallState?:
+    | ProviderCliState["managedInstallState"]
+    | ProviderManagedInstallStateV70Preimage
+    | null;
+  versionVisibility?: ProviderCliState["versionVisibility"];
+  advisory?: ProviderCliState["advisory"];
+  cliBinaryResolved?: ProviderCliState["cliBinaryResolved"];
+  // v7.0 fields, present only when the source is a live-shaped row.
+  packId?: ProviderCliState["packId"];
+  managedVersions?: ProviderCliState["managedVersions"];
+  managedVersionsUnavailable?: ProviderCliState["managedVersionsUnavailable"];
+  nextRunBinary?: ProviderCliState["nextRunBinary"];
+  // (v9.1) the auto-mode judge. Optional here for the same reason as the rest:
+  // a caller may hold a row from any released line, and only a 9.1 row has it.
+  autoJudge?: ProviderCliState["autoJudge"];
+  // (v10.2) list-only host facts, absent from every earlier released carrier.
+  macosRequirement?: ProviderCliState["macosRequirement"];
+  // (v10.5) per-provider native subagent setting, absent from earlier rows.
+  nativeSubagents?: ProviderCliState["nativeSubagents"];
+  // (v10.6) OpenCode's per-line managed packs, absent from earlier rows.
+  managedLines?: ProviderCliState["managedLines"];
+  // (v10.7) whether existing chats follow the selection, absent from earlier rows.
+  chatsFollow?: ProviderCliState["chatsFollow"];
+  // (v10.8) the per-provider native-memory switch and whether this host can
+  // enforce it, absent from earlier rows.
+  nativeMemory?: ProviderCliState["nativeMemory"];
+  nativeMemorySupported?: ProviderCliState["nativeMemorySupported"];
+  // `V70` is named explicitly rather than left to ride the `V10` arm on the
+  // strength of structural width: the v7.0 and v8.0 list lines are pinned to
+  // `providerLoginCapabilitySchemaV70`, so that is the concrete shape those
+  // rows carry, and stating it keeps this union readable as "every capability
+  // snapshot a caller can hold" instead of "whatever happens to be assignable".
+  loginCapability:
+    | ProviderLoginCapability
+    | ProviderLoginCapabilityV70
+    | ProviderLoginCapabilityV10
+    | null;
+};
+
+export function downgradeProviderCliStateToV10(
+  state: DowngradableToV10ProviderState,
+): ProviderCliStateV10 | null {
+  // `providerCliStateSchemaV10` is a `z.strictObject`, so it REJECTS any key it
+  // doesn't model. Drop later-than-v1.0 fields before the parse — otherwise
+  // every provider fails the parse and silently vanishes from the downgraded
+  // payload for v1.0 clients.
+  // - `availabilityPending` (v2.0+)
+  // - `profiles` (v4.0+) — must never reach a v1.0 caller; also keeps
+  //   profile identity (email, label) off the wire for peers that never
+  //   negotiated profile support. Labelled "unreleased" until the baseline
+  //   caught up; it is in every released major from 4.0 through the canonical
+  //   8.0, which is exactly why this drop is load-bearing rather than
+  //   defensive.
+  // - `nativeCapabilities` (v3.1 / v2.1+) — CRITICAL silent-data-loss trap
+  // - `managedInstallState` / `versionVisibility` / `advisory` — the
+  //   provider-pack-registry fields.
+  // - `cliBinaryResolved` — the binary-absent explanation field.
+  // - `macosRequirement` (v10.2) — list-only host macOS requirements.
+  // - `nativeSubagents` (v10.5) — the per-provider native subagent setting.
+  // - `managedLines` (v10.6) — OpenCode's per-line managed packs.
+  // - `chatsFollow` (v10.7) — whether existing chats follow the selection.
+  // - `nativeMemory` / `nativeMemorySupported` (v10.8) — the per-provider
+  //   native-memory switch and its enforceability.
+  // - `packId` / `managedVersions` / `managedVersionsUnavailable` /
+  //   `nextRunBinary` (v7.0) — the version manager. Same trap, and it is worth
+  //   restating rather than assuming the list above covers it: this parse is
+  //   STRICT, so every field added to the live shape from here to the end of
+  //   time must be added to this destructure too. Forgetting one does not
+  //   fail loudly - it empties the provider list for v1.0 clients, silently,
+  //   because the row fails the parse and the caller filters it out.
+  //
+  // That trap has already fired once here: the (since removed) auth-aware
+  // `enablementMode` / `enablementSource` pair was forgotten on its first pass
+  // and caught by a test, exactly as the paragraph above predicts - a row
+  // carrying either one did not lose the two fields, it disappeared.
+  const {
+    availabilityPending: _availabilityPending,
+    profiles: _profiles,
+    nativeCapabilities: _nativeCapabilities,
+    managedInstallState: _managedInstallState,
+    versionVisibility: _versionVisibility,
+    advisory: _advisory,
+    cliBinaryResolved: _cliBinaryResolved,
+    packId: _packId,
+    managedVersions: _managedVersions,
+    managedVersionsUnavailable: _managedVersionsUnavailable,
+    nextRunBinary: _nextRunBinary,
+    // (v9.1) the per-provider auto-mode judge. The trap above fired a SECOND
+    // time on this field: it landed with the `auto` permission mode and was not
+    // added here, so any user who set a judge preference made that provider
+    // disappear for v1.0 clients. It is `.optional()` on the live shape, which
+    // is why it went unnoticed - the row only carries the key once someone
+    // actually chooses, so the fault is invisible on a default install.
+    //
+    // The comment above was not enough to prevent it, and neither were the
+    // hand-written per-field fixtures that caught the last one. What guards it
+    // now is `provider-schemas-v70-pins.test.ts`'s derived check, which reads
+    // the obligation out of the two schemas' key sets instead of a list a human
+    // maintains. ADD THE FIELD HERE; do not weaken that test.
+    autoJudge: _autoJudge,
+    macosRequirement: _macosRequirement,
+    // (v10.5) the per-provider native subagent setting.
+    nativeSubagents: _nativeSubagents,
+    managedLines: _managedLines,
+    // (v10.7) whether existing chats follow the selection.
+    chatsFollow: _chatsFollow,
+    // (v10.8) the native-memory switch and its enforceability.
+    nativeMemory: _nativeMemory,
+    nativeMemorySupported: _nativeMemorySupported,
+    ...rest
+  } = state;
+  const parsed = providerCliStateSchemaV10.safeParse({
+    ...rest,
+    auth: downgradeProviderAuthV20ToV10(state.auth),
+  });
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * The shared body of every `downgradeProviderCliStateListTo*` below: project
+ * each row onto the frozen line, then keep the rows that survive it.
+ *
+ * The filter half is the rule these bridges have always applied - a row whose
+ * `providerId` is not in the frozen enum simply does not survive the parse, and
+ * that is how post-vN providers stay off an already-shipped wire. What
+ * {@link projectOntoFrozenLine} adds is the same rule one level DOWN: before
+ * this round decides whether to drop the whole row, it drops the individual
+ * array members the frozen line cannot represent, so a single unknown enum
+ * member costs that member rather than its enclosing object (or the row).
+ *
+ * Written once rather than seven times deliberately. These helpers were seven
+ * copies of one body, and a policy that has to be re-typed per line is a policy
+ * that eventually differs per line.
+ */
+function projectRowsOntoFrozenLine<T extends z.ZodType>(
+  frozen: T,
+  states: readonly unknown[],
+): z.infer<T>[] {
+  return states.flatMap((state) => {
+    const parsed = frozen.safeParse(projectOntoFrozenLine(frozen, state));
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+/**
+ * Parse a whole `providers.list` response onto a frozen line, projecting first.
+ *
+ * The row helper above covers `providers[]`. This covers the response's OTHER
+ * half - `native`, the optional MCP/plugins/skills query result - which no row
+ * helper touches. Of the TWELVE catch-less enum leaves on `providers.list@7.0`,
+ * eight are under `native`, and growth in any of them fails the ENTIRE
+ * `providers.list` response rather than degrading part of it. FIVE sit under an
+ * array and so are repairable by dropping - `servers[].status`,
+ * `servers[].statusSource`, `servers[].tools[].denySources[]`,
+ * `skills[].source`, and `server.tools[].denySources[]` on the single-server
+ * arm. The other three are scalars (`server.status` and `server.statusSource`
+ * on that same arm, plus the error arm's `code`); dropping cannot rescue those,
+ * and they want a `.catch()` rather than a pin. Calling this instead of a bare
+ * `.safeParse` is what puts the five inside the projection's reach.
+ *
+ * The remaining four catch-less leaves are on the row itself and reach the
+ * projection through `projectRowsOntoFrozenLine` above, where an unrepresentable
+ * value drops its row - already the shipped behaviour.
+ *
+ * Reach, not effect: like the row helper, this only acts on a leaf the frozen
+ * line pins STRICTLY NARROWER than the head, because the host has already
+ * parsed the value against the head before any downgrade runs. None of the
+ * eight is pinned narrower today - see the module docblock on
+ * `frozen-line-projection.ts` - so this is currently a parse with a walk in
+ * front of it, waiting on the first of those enums to move.
+ */
+export function parseProvidersListResponseForFrozenLine<T extends z.ZodType>(
+  frozen: T,
+  response: unknown,
+): z.infer<T> {
+  return frozen.parse(projectOntoFrozenLine(frozen, response));
+}
+
+// Downgrades a latest-shaped provider-state list to the frozen v2.0 shape,
+// dropping Amp/Devin/Pi (or any post-v2.0 provider) and stripping
+// `nativeCapabilities` so an already-shipped v2.0 client's decode never sees
+// them. Zod object parse strips unknown keys, so this is a pure filter+reparse
+// - no field remapping needed (unlike the v1.0 downgrade above). LIST only —
+// mutations use {@link downgradeProviderCliStateToMutationV20}.
+export function downgradeProviderCliStateListToV20(
+  states: readonly unknown[],
+): ProviderCliStateV20[] {
+  return projectRowsOntoFrozenLine(providerCliStateSchemaV20, states);
+}
+
+// Downgrades a latest-shaped provider-state list to the frozen v3.0 shape,
+// dropping Devin/Pi (or any future post-v3.0 provider) so an already-shipped
+// v3.0 client's strict decode never sees it. The reparse also strips
+// `profiles`/`nativeCapabilities` - the frozen v3.0 object doesn't model
+// them - keeping profile identity (email, label) off the wire for callers
+// that never negotiated profile support.
+export function downgradeProviderCliStateListToV30(
+  states: readonly unknown[],
+): ProviderCliStateV30[] {
+  return projectRowsOntoFrozenLine(providerCliStateSchemaV30, states);
+}
+
+// Downgrades latest state to frozen list@2.0 (drops Amp/Devin/Pi + nativeCapabilities).
+export function downgradeProviderCliStateToV20(
+  state: ProviderCliState | ProviderCliStateV30,
+): ProviderCliStateV20 | null {
+  const parsed = providerCliStateSchemaV20.safeParse(state);
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * Downgrades latest state to tag-exact mutation@2.0 (amp-inclusive, no
+ * nativeCapabilities). Used by state-returning mutation 2.1→2.0 bridges.
+ */
+export function downgradeProviderCliStateToMutationV20(
+  state: ProviderCliState | ProviderCliStateV30 | ProviderMutationCliStateV21,
+): ProviderMutationCliStateV20 {
+  // No destructure-and-cast to strip `nativeCapabilities`:
+  // `providerMutationCliStateSchemaV20` is a plain (non-strict) `z.object`, so
+  // the parse itself drops every key the frozen shape does not model. That is
+  // the same mechanism the v4.0->v3.0 bridge relies on to keep `profiles` off
+  // the wire - keep this schema non-strict or unmodeled fields start leaking.
+  return providerMutationCliStateSchemaV20.parse(state);
+}
+
+// Downgrades a latest-shaped provider-state list to the frozen v4.0 shape,
+// dropping Hermes/omp (or any future post-v4.0 provider) so an already-shipped
+// v4.0 client's strict decode never sees them.
+export function downgradeProviderCliStateListToV40(
+  states: readonly unknown[],
+): ProviderCliStateV40[] {
+  return projectRowsOntoFrozenLine(providerCliStateSchemaV40, states);
+}
+
+/**
+ * Drop post-v5.0 providers (currently `omp`) for an already-shipped v5.0
+ * client. Same filter-by-reparse shape as the older bridges: an entry whose
+ * id is not in the frozen v5.0 enum simply does not survive the parse.
+ */
+export function downgradeProviderCliStateListToV50(
+  states: readonly unknown[],
+): ProviderCliStateV50[] {
+  return projectRowsOntoFrozenLine(providerCliStateSchemaV50, states);
+}
+
+/**
+ * Lift a frozen v6.0 state onto the v7.0 PRE-IMAGE shape (not the live one).
+ *
+ * This is the v6 -> v7 hop's FIRST PASS, not the whole hop: the version-manager
+ * fields land on top of what this returns, in the caller (see
+ * `providersListUpgradeV6ToV7` in `registry.ts`). Pointing it at the live shape
+ * instead would have the bridge emit whatever the live capability object
+ * happens to be, which stays correct only while the two agree.
+ * `DEFAULT_PROVIDER_NATIVE_CAPABILITIES_V70_PREIMAGE` is the same "old host
+ * never had this feature" reading its live counterpart carries - a v6.0 host
+ * advertised no native capabilities at all.
+ */
+export function upgradeProviderCliStateToV70Preimage(
+  state:
+    | ProviderCliStateV20
+    | ProviderCliStateV30
+    | ProviderMutationCliStateV20,
+): ProviderCliStateV70Preimage {
+  return providerCliStateSchemaV70Preimage.parse({
+    ...state,
+    nativeCapabilities: DEFAULT_PROVIDER_NATIVE_CAPABILITIES_V70_PREIMAGE,
+  });
+}
+
+export function upgradeProviderCliStateListToV70Preimage(
+  states: readonly (
+    | ProviderCliStateV20
+    | ProviderCliStateV30
+    | ProviderMutationCliStateV20
+  )[],
+): ProviderCliStateV70Preimage[] {
+  return states.map(upgradeProviderCliStateToV70Preimage);
+}
+
+/**
+ * v7.0 clients cannot render disabled profiles safely. Omit those rows, then
+ * reparse through the frozen v7.0 profile shape to strip `enabled` from the
+ * remaining rows without disturbing the rest of the catalog.
+ */
+function parseProviderStateWithEnabledProfiles(state: unknown) {
+  const current = providerCliStateSchema
+    .extend({ providerId: z.string() })
+    .safeParse(state);
+  if (!current.success) return null;
+  return {
+    ...current.data,
+    profiles: current.data.profiles.filter(isProfileEnabled),
+  };
+}
+
+export function downgradeProviderCliStateListToV70(
+  states: readonly unknown[],
+): ProviderCliStateV70[] {
+  // The enabled-profiles pre-pass runs FIRST and stays separate: omitting a
+  // disabled profile is a v7.0 PRODUCT rule (that line cannot render one
+  // safely), not a question of what the frozen shape can represent. Folding it
+  // into the projection would file a deliberate omission under "the line could
+  // not hold it", which is the kind of conflation that makes a bridge's
+  // behaviour impossible to reason about later.
+  const enabledProfilesOnly = states.flatMap((state) => {
+    const current = parseProviderStateWithEnabledProfiles(state);
+    return current === null ? [] : [current];
+  });
+  return projectRowsOntoFrozenLine(
+    providerCliStateSchemaV70,
+    enabledProfilesOnly,
+  );
+}
+
+/**
+ * Drop post-v8.0 providers (currently `antigravity`) for an already-shipped
+ * v8.0 client, and strip `profiles[].apiKey`, which the frozen v8.0 profile
+ * does not model.
+ *
+ * Both fall out of the same reparse: `providerCliStateSchemaV80` is a plain
+ * (non-strict) object, so the added key is stripped, while an id outside the
+ * frozen enum fails the parse and the row is dropped. No `enabledProfilesOnly`
+ * pre-pass, unlike the v7.0 helper - v8.0 is the line that introduced
+ * `profiles[].enabled`, so it can carry a disabled row itself.
+ */
+export function downgradeProviderCliStateListToV80(
+  states: readonly unknown[],
+): ProviderCliStateV80[] {
+  return projectRowsOntoFrozenLine(providerCliStateSchemaV80, states);
+}
+
+/**
+ * Drop the providers major 9 cannot spell for an already-shipped major-9
+ * client. Nothing else differs from the head row, so the reparse is a pure row
+ * filter - an id outside the frozen enum fails the parse and the row is
+ * dropped, exactly as the v8.0 helper drops a post-v8.0 one.
+ */
+export function downgradeProviderCliStateListToV92(
+  states: readonly unknown[],
+): ProviderCliStateV92[] {
+  return projectRowsOntoFrozenLine(providerCliStateSchemaV92, states);
+}
+
+/**
+ * Drop post-v6.0 providers (currently `huggingface`) for an already-shipped
+ * v6.0 client, and strip the provider-pack-registry fields the frozen v6.0
+ * state does not model. Same filter-by-reparse shape as the older bridges: an
+ * entry whose id is not in the frozen v6.0 enum simply does not survive the
+ * parse.
+ */
+export function downgradeProviderCliStateListToV60(
+  states: readonly unknown[],
+): ProviderCliStateV60[] {
+  return projectRowsOntoFrozenLine(providerCliStateSchemaV60, states);
+}
+
+// Upgrades a v1.0 state to the frozen v2.0 shape - used only by
+// `providers.list`'s v1.0 -> v2.0 bridge, whose response is pinned to
+// `providerCliStateSchemaV20` (narrower `providerId`, no `profiles`). Every
+// other provider.* mutation's v1.0 -> v2.0 bridge upgrades to the frozen
+// major-2 mutation shape instead - see
+// `upgradeProviderCliStateV10ToMutationV20` below.
+export function upgradeProviderCliStateV10ToV20(
+  state: ProviderCliStateV10,
+): ProviderCliStateV20 {
+  return providerCliStateSchemaV20.parse({
+    ...state,
+    availabilityPending: false,
+  });
+}
+
+/**
+ * Upgrade a tag-exact mutation@2.0 state (amp-inclusive) to latest by attaching
+ * the default descriptor.
+ */
+export function upgradeProviderMutationCliStateV20ToLatest(
+  state: ProviderMutationCliStateV20,
+): ProviderCliState {
+  return providerCliStateSchema.parse({
+    ...state,
+    nativeCapabilities: DEFAULT_PROVIDER_NATIVE_CAPABILITIES,
+  });
+}
+
+// The `providers.list` fills are `upgradeProviderCliStateToV70Preimage` /
+// `...ListToV70Preimage`, named for their TARGET SHAPE rather than for
+// "latest". A bridge aims at a fixed shape: the moment a v8.0 opens above v7.0,
+// a fill named "latest" silently means a shape v7.0 cannot carry. What these
+// two aim at is a stage INSIDE the v6 -> v7 hop rather than a line of its own,
+// which is why they are named for the pre-image and not for v7.0 - the
+// version-manager fill that finishes the hop runs after them. The latest-named
+// fills below aim at the HEAD line and move with it.
+
+/** Upgrade frozen list@2.0 / v3.0 state to latest by attaching the default descriptor. */
+export function upgradeProviderCliStateToLatest(
+  state:
+    | ProviderCliStateV20
+    | ProviderCliStateV30
+    | ProviderMutationCliStateV20,
+): ProviderCliState {
+  return providerCliStateSchema.parse({
+    ...state,
+    nativeCapabilities: DEFAULT_PROVIDER_NATIVE_CAPABILITIES,
+  });
+}
+
+export function upgradeProviderCliStateListToLatest(
+  states: readonly (
+    | ProviderCliStateV20
+    | ProviderCliStateV30
+    | ProviderMutationCliStateV20
+  )[],
+): ProviderCliState[] {
+  return states.map(upgradeProviderCliStateToLatest);
+}
+
+// Upgrades a v1.0 state to the frozen major-2 mutation-response shape - used
+// by every provider.* state-echo mutation's v1.0 -> v2.0 bridge
+// (setSelection, addCustomPath, setEnabled, ...). Like the v1.0 host itself,
+// the frozen 2.0 shape predates `profiles`; each method's 2.0 -> 2.1 upgrade
+// fills `profiles: []` for the caller's canonical.
+export function upgradeProviderCliStateV10ToMutationV20(
+  state: ProviderCliStateV10,
+): ProviderMutationCliStateV20 {
+  return providerMutationCliStateSchemaV20.parse({
+    ...state,
+    availabilityPending: false,
+  });
+}

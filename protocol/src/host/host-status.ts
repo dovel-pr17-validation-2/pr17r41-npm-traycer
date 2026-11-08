@@ -1,0 +1,531 @@
+import { z } from "zod";
+import { lazySchema } from "@traycer/protocol/framework/lazy-schema";
+
+/**
+ * Client-side mirror of the Remote Host Support status contract.
+ *
+ * ⚠️ CROSS-REPO MIRROR — keep in sync with the internal monorepo:
+ *   - `@traycerai/common/types/host` (`HostStatusDTO`, `HostKind`,
+ *     `HostUpdateState`, presence/viewer/cloud enums) — the T1 contract, and
+ *   - `authn-v3/src/utils/hosts/host-status-dto.ts` (`HostListItem`) — the
+ *     `GET /api/v3/hosts` response envelope.
+ *
+ * The open-source `traycer/` submodule does NOT depend on `@traycerai/common`
+ * (zero references in the repo), so the DTO cannot be imported across the repo
+ * boundary. `@traycer/protocol` is the shared workspace every client already
+ * consumes, so the contract is mirrored here. Field names match the JSON wire
+ * shape verbatim (camelCase, exactly what authn-v3 serializes). When the
+ * server contract changes, update this file to match — the Zod schemas below
+ * fail closed on drift (an unknown/removed field surfaces as a parse error the
+ * fetcher classifies as a transport failure, never a silent mis-render).
+ *
+ * Liveness is RELAY-ATTACHMENT, not a heartbeat. The 20s host→authn beat and
+ * the presence lease it fed are gone; the relay pushes attach/detach and authn
+ * keeps a short-TTL lease, which it collapses into the single {@link
+ * HostConnectivity} enum below. That replaced `presenceLease` (a tri-state
+ * about the beat leg) and `hostRelayAttached` (a second, separately-derived
+ * claim about the same leg — the pair is what produced the "Up, re-establishing
+ * its tunnel" and "Not reporting — likely reachable" states, both of which
+ * described a disagreement between two signals rather than anything about the
+ * host).
+ *
+ * `busy` / `busySessionCount` went with them, for a different reason: they
+ * describe a *right now* that a lease refreshed on the order of minutes cannot
+ * carry. Both already exist on the live host↔GUI connection
+ * (`host.status@1.2`), and the notification room's
+ * {@link HOST_RUNTIME_STATUS_AWARENESS_FIELD} carries them for surfaces that
+ * hold a room rather than a session. A client with neither has no live source
+ * and must render no drain state at all — not a stale one, and not a zero.
+ *
+ * `updateState` / `appVersion` / `lastSeenAt` STAY: they are Postgres-derived,
+ * cost no liveness read, and are precisely what an OFFLINE host's update UI
+ * needs to stay useful.
+ *
+ * This shape changed in one coordinated cut with authn — no version marker, no
+ * dual-parse. That is only sound because nothing released parses it; treat any
+ * FUTURE change as breaking (`.strict()` at every level, and GUIs have no
+ * force-update lever).
+ */
+
+// -----------------------------------------------------------------------------
+// Enums (mirror `@traycerai/common/types/host`)
+// -----------------------------------------------------------------------------
+
+/**
+ * Host classification. Mirrors the `HostKind` common type / Prisma enum.
+ * `machine` is a team's own computer (Tracy Bots T141): authn lists it only
+ * behind `?include=machine`, and `host.hostInventory.subscribe` carries it
+ * from `@1.2`.
+ */
+export type HostRegistryKind = "personal" | "sandbox" | "machine";
+
+/** The kinds before `machine`, which every frozen row below carries. */
+export type HostRegistryKindV11 = Exclude<HostRegistryKind, "machine">;
+
+/**
+ * Whether this host can be reached, as the cloud sees it. The ONE liveness
+ * word — there is no second signal to reconcile it against.
+ *
+ *  - `connectable` — the relay holds a live attachment for the host's own leg.
+ *    This is what "Online" means now.
+ *  - `offline`     — no attachment. Includes a host that is *running* but whose
+ *    relay egress is blocked (the ws-proxy population): the client cannot get
+ *    to it, so saying anything warmer than Offline would be a promise we can't
+ *    keep. Support reading: "Offline + host process up ⇒ relay egress blocked".
+ *  - `unknown`     — the liveness store could not be read. Never render this as
+ *    Offline: blind is not the same as absent, and the durable `lastSeenAt` is
+ *    the only honest thing left to show.
+ *
+ * These three values are PURE LIVENESS — one fact about one host. Remote hosts
+ * are available on every plan, so nothing about the account enters this word.
+ *
+ * `local-only` is a RETIRED value that no server emits. It once meant "the
+ * owner's plan has no remote hosts" and carried no liveness evidence at all.
+ * It stays in the type and the schema only because this enum is part of a
+ * released wire surface (`host.hostInventory.subscribe@1.0` frames carry these
+ * rows), which may not be narrowed. A client that ever receives it reads it
+ * exactly as `unknown`: the absence of an answer, never a death claim.
+ *
+ * Detach latency is asymmetric and the UI copy should not over-promise: a clean
+ * teardown is pushed in seconds, while a dirty death (lid close, cable pull)
+ * waits out the lease TTL — on the order of 15 minutes.
+ */
+export type HostConnectivity =
+  | "connectable"
+  | "offline"
+  | "unknown"
+  | "local-only";
+
+/**
+ * TOMBSTONED (redesign P3.4). Was "this client's own probe result at
+ * tab-open / on-demand (S2)". The probe was never built: the server has
+ * always sent `"unknown"` and, as of P3.4, no client reads the field at all.
+ *
+ * It stays on the wire because it CANNOT be removed unilaterally in either
+ * direction - `hostStatusDtoSchema` is `.strict()` and this key is required,
+ * so a server that stopped sending it would fail every released client's
+ * parse of `GET /api/v3/hosts`, and a client that dropped it from the schema
+ * would reject the payloads the server still sends. Dropping it is a
+ * two-release sequence: (1) this release stops reading it, (2) once the
+ * support floor is past a client that tolerates its absence, the server stops
+ * emitting and the key leaves the schema. Do not skip step 1's soak.
+ */
+export type HostViewerReachability = "ok" | "failing" | "unknown";
+
+/** Whether this client is online at all. */
+export type HostClientCloudState = "ok" | "down";
+
+/** Update lifecycle surfaced per host (Architecture §7 & §13). */
+export type HostUpdateState =
+  | "current"
+  | "available"
+  | "pending"
+  | "updating"
+  | "failed"
+  | "required";
+
+/**
+ * The command interpreter a host runs a NEWLY resolved command under, as that
+ * host last reported it. `platform` cannot answer this on Windows, where the
+ * same command meets Git Bash, PowerShell or cmd depending on Settings → Shell.
+ *
+ * Absent OR `null` both mean unknown, and they are different facts about the
+ * SERVER, not about the host: absent means this response did not opt in
+ * (`GET /api/v3/hosts?include=commandInterpreter`), null means the server
+ * opted in and the host has never successfully reported one. Neither licenses
+ * inferring a value from `platform` — that inference is the defect the field
+ * exists to remove.
+ *
+ * Mirrors `HostCommandInterpreter` in `@traycerai/common/types/host`.
+ */
+export type HostCommandInterpreter =
+  | "posix-shell"
+  | "git-bash"
+  | "powershell"
+  | "cmd";
+
+/**
+ * Per-host update policy (Architecture §13, T16). `manual` (default) means
+ * updates are the user's explicit choice; `auto` is an explicit per-host
+ * opt-in. Mirrors `@traycerai/common/types/host`'s `HostUpdatePolicy` /
+ * the `HostUpdatePolicy` Prisma enum verbatim.
+ */
+export type HostUpdatePolicy = "manual" | "auto";
+
+/**
+ * The lifecycle state of a `kind: sandbox` host, as traycer-server's
+ * `sandboxes` row holds it and authn mirrors it on `Host.sandboxState`. Only
+ * `awake` is dialable; `suspended` and `stopped` are woken by the control
+ * plane before a dial; `released` is the Automations row's idle state.
+ *
+ * Mirrors `HOST_SANDBOX_STATES` in `@traycerai/common/types/host`.
+ */
+export const HOST_SANDBOX_STATES = [
+  "creating",
+  "awake",
+  "suspending",
+  "suspended",
+  "resuming",
+  "stopping",
+  "stopped",
+  "starting",
+  "destroying",
+  "destroyed",
+  "failed",
+  "released",
+] as const;
+
+export type HostSandboxState = (typeof HOST_SANDBOX_STATES)[number];
+
+/**
+ * One word per state, everywhere, including filters and sort menus.
+ * Words never decide actions; behavioural classifiers keep reading raw state.
+ */
+export const HOST_SANDBOX_STATE_WORDS: Record<HostSandboxState, string> = {
+  creating: "Creating",
+  awake: "Awake",
+  suspending: "Suspending",
+  suspended: "Suspended",
+  resuming: "Resuming",
+  stopping: "Stopping",
+  stopped: "Stopped",
+  starting: "Starting",
+  destroying: "Destroying",
+  destroyed: "Destroyed",
+  failed: "Failed",
+  released: "Not running",
+};
+
+export function hostSandboxStateWord(state: HostSandboxState | null): string {
+  return state === null ? "Status unknown" : HOST_SANDBOX_STATE_WORDS[state];
+}
+
+/** Frozen is a condition shown beside the state, never a state of its own. */
+export const HOST_FROZEN_WORD = "Out of credits";
+
+export const HOST_KIND_WORDS: Record<HostRegistryKind, string> = {
+  personal: "Computer",
+  sandbox: "Sandbox",
+  machine: "Team machine",
+};
+
+/**
+ * The runtime profile a host reported at registration: `agent` is the full
+ * host (sandbox mode included), `automation` the slim Automations pod. It
+ * arrives on the host list, never on `host capabilities` (no CLI runs in a
+ * pod). Mirrors `HOST_PROFILES` in `@traycerai/common/types/host`.
+ */
+export type HostProfile = "agent" | "automation";
+
+// -----------------------------------------------------------------------------
+// Status DTO — the single render source (Architecture §7)
+// -----------------------------------------------------------------------------
+
+export type HostStatusDTO = {
+  /** The single liveness word, from the relay lease. */
+  connectivity: HostConnectivity;
+  /** Tombstoned; parsed and ignored. See {@link HostViewerReachability}. */
+  viewerReachability: HostViewerReachability;
+  /** Is this client online at all. */
+  clientCloud: HostClientCloudState;
+  /** Update lifecycle for the host. */
+  updateState: HostUpdateState;
+  /** App version the host last reported (null until first check-in). */
+  appVersion: string | null;
+  /** ISO-8601 last-seen timestamp from Postgres (null until first seen). */
+  lastSeenAt: string | null;
+};
+
+// -----------------------------------------------------------------------------
+// `GET /api/v3/hosts` response envelope (mirror authn-v3 T5)
+// -----------------------------------------------------------------------------
+
+/** A single registry row: durable identity wrapping the status DTO. */
+export type HostListItem = {
+  hostId: string;
+  displayName: string | null;
+  platform: string | null;
+  kind: HostRegistryKind;
+  /** Host static key for the E2E Noise-NK handshake (consumed in S2). */
+  publicKey: string;
+  createdAt: string;
+  status: HostStatusDTO;
+  /**
+   * Present only when the request opted in, and `null` when the host has never
+   * reported one. Optional-AND-nullable is load-bearing in both directions:
+   * the un-opted response omits the key entirely, so requiring it would fail
+   * every default `GET /api/v3/hosts`, and an opted-in response can carry an
+   * explicit null, so a non-nullable optional would fail those.
+   *
+   * See {@link HostCommandInterpreter}. Advisory: it describes what a NEWLY
+   * resolved command meets, can lag a Settings change or an offline period,
+   * and says nothing about an already-persisted managed command.
+   */
+  commandInterpreter?: HostCommandInterpreter | null;
+  /**
+   * Present only with `?include=sandboxState`, which is also the only way a
+   * caller receives `kind: sandbox` rows at all, so a released client (which
+   * never sends it) sees neither the field nor the rows. `null` on a personal
+   * host, and on a sandbox before the control plane's first state post.
+   */
+  sandboxState?: HostSandboxState | null;
+  /**
+   * With `?include=sandboxState`: the stored out-of-credits flag, sent for
+   * every state and meaningful on a row at rest; a destroyed row keeps its
+   * last value. `null` on a personal host.
+   */
+  sandboxFrozen?: boolean | null;
+  /**
+   * With `?include=sandboxState`: the runtime profile the host reported, or
+   * `null` when it reported none (every host that predates the field).
+   */
+  profile?: HostProfile | null;
+  /**
+   * With `?include=owner`: the principal that owns the host, a person or a
+   * team (the team arm carries its `name`). The host list groups a team's
+   * sandboxes and pods under the team's name from it, and a host's
+   * sending-side gate compares it to its own owner. Absent unless asked for,
+   * so a client that does not ask parses the row it always did.
+   */
+  owner?: HostOwnerPrincipal;
+  /**
+   * This host's configured update policy (Architecture §13, T16): `manual`
+   * (default) surfaces "Update now" as an explicit action; `auto` means the
+   * reconciler applies an approved `desiredVersion` without a per-update
+   * click. Drives the My Hosts auto-update toggle.
+   */
+  updatePolicy: HostUpdatePolicy;
+};
+
+/**
+ * The `GET /api/v3/hosts` envelope. Just the rows.
+ *
+ * It used to carry a `presenceHealth` flag — the server's self-report that its
+ * liveness-read pipeline was degraded — which the client turned into "status
+ * unknown" instead of a false "Offline". That rule is intact and load-bearing;
+ * it simply moved INTO the row, as `connectivity: "unknown"`. Per-host is the
+ * better carrier: a partial read (some hosts resolved, the rest not) has an
+ * honest answer under the per-host form and none at all under one envelope
+ * flag, which had to be all-or-nothing and so was wrong in one direction or
+ * the other whenever the read was partial.
+ */
+export type HostListResponse = {
+  hosts: HostListItem[];
+};
+
+// -----------------------------------------------------------------------------
+// Zod schemas — fail-closed parsing of the untrusted network response
+// -----------------------------------------------------------------------------
+
+export const hostConnectivitySchema = lazySchema(() =>
+  z.enum(["connectable", "offline", "unknown", "local-only"]),
+);
+
+export const hostViewerReachabilitySchema = lazySchema(() =>
+  z.enum(["ok", "failing", "unknown"]),
+);
+
+export const hostClientCloudStateSchema = lazySchema(() =>
+  z.enum(["ok", "down"]),
+);
+
+export const hostUpdateStateSchema = lazySchema(() =>
+  z.enum(["current", "available", "pending", "updating", "failed", "required"]),
+);
+
+export const hostRegistryKindSchema = lazySchema(() =>
+  z.enum(["personal", "sandbox", "machine"]),
+);
+
+/**
+ * The kind enum before `machine`, FROZEN: the rows of
+ * `host.hostInventory.subscribe@1.0` and `@1.1` carry it.
+ */
+export const hostRegistryKindSchemaV11 = lazySchema(() =>
+  z.enum(["personal", "sandbox"]),
+);
+
+export const hostUpdatePolicySchema = lazySchema(() =>
+  z.enum(["manual", "auto"]),
+);
+
+export const hostCommandInterpreterSchema = lazySchema(() =>
+  z.enum(["posix-shell", "git-bash", "powershell", "cmd"]),
+);
+
+export const hostSandboxStateSchema = lazySchema(() =>
+  z.enum(HOST_SANDBOX_STATES),
+);
+
+export const hostProfileSchema = lazySchema(() =>
+  z.enum(["agent", "automation"]),
+);
+
+// `.strict()` on every level (S5 / fix #5): a non-strict `z.object` silently
+// STRIPS a field the server adds, so a contract addition would render with a
+// piece quietly missing instead of failing loud. `.strict()` is not deep, so
+// each nested object below opts in individually — the negative fixture test
+// in `__tests__/host-status.test.ts` proves this actually rejects rather than
+// strips at every level, not just the top one.
+export const hostStatusDtoSchema: z.ZodType<HostStatusDTO> = lazySchema(() =>
+  z
+    .object({
+      connectivity: hostConnectivitySchema,
+      viewerReachability: hostViewerReachabilitySchema,
+      clientCloud: hostClientCloudStateSchema,
+      updateState: hostUpdateStateSchema,
+      appVersion: z.string().nullable(),
+      lastSeenAt: z.string().nullable(),
+    })
+    .strict(),
+);
+
+/**
+ * A host's owner as authn's `?include=owner` sends it: `user` with the
+ * person's id, or `team` with the team's id and display name. The person's
+ * arm carries no name: a person reads only their own hosts and their teams'.
+ */
+export type HostOwnerPrincipal =
+  | { readonly kind: "user"; readonly id: string }
+  | { readonly kind: "team"; readonly id: string; readonly name: string };
+
+export const hostOwnerPrincipalSchema: z.ZodType<HostOwnerPrincipal> =
+  lazySchema(() =>
+    z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("user"), id: z.string().min(1) }).strict(),
+      z
+        .object({
+          kind: z.literal("team"),
+          id: z.string().min(1),
+          name: z.string().min(1),
+        })
+        .strict(),
+    ]),
+  );
+
+export const hostListItemSchema: z.ZodType<HostListItem> = lazySchema(() =>
+  z
+    .object({
+      hostId: z.string(),
+      displayName: z.string().nullable(),
+      platform: z.string().nullable(),
+      kind: hostRegistryKindSchema,
+      publicKey: z.string(),
+      createdAt: z.string(),
+      status: hostStatusDtoSchema,
+      // `.optional().nullable()` under `.strict()`: absent is the un-opted
+      // response every released client already receives, and null is the
+      // opted-in "this host has never reported one". Adding it here does NOT
+      // make an older client tolerate it — a released binary carries its own
+      // frozen copy of this schema and would reject the extra key — which is
+      // exactly why the server keeps it behind an explicit `?include=`.
+      commandInterpreter: hostCommandInterpreterSchema.nullable().optional(),
+      // The same opt-in as `commandInterpreter`, behind `?include=sandboxState`.
+      // `host.hostInventory.subscribe@1.0` frames do NOT carry these: that line
+      // is frozen on `hostListItemSchemaV10` below and the serving host strips
+      // them (and drops `kind: sandbox` rows) for a 1.0 subscriber.
+      sandboxState: hostSandboxStateSchema.nullable().optional(),
+      sandboxFrozen: z.boolean().nullable().optional(),
+      profile: hostProfileSchema.nullable().optional(),
+      // Behind `?include=owner`. Like the sandbox fields, a `@1.0` inventory
+      // frame never carries it: that line is frozen below.
+      owner: hostOwnerPrincipalSchema.optional(),
+      updatePolicy: hostUpdatePolicySchema,
+    })
+    .strict(),
+);
+
+/**
+ * A registry row as `host.hostInventory.subscribe@1.0` carries it: the row
+ * before the sandbox fields existed. FROZEN, a hand-copy rather than an
+ * `.omit()` of the live schema, so growing the live row never grows a released
+ * line. A 1.0 frame carrying `sandboxState`, `sandboxFrozen` or `profile` fails
+ * this parse, which is exactly what a released client's own frozen copy does.
+ */
+export type HostListItemV10 = Omit<
+  HostListItem,
+  "sandboxState" | "sandboxFrozen" | "profile" | "owner" | "kind"
+> & { kind: HostRegistryKindV11 };
+
+export const hostListItemSchemaV10: z.ZodType<HostListItemV10> = lazySchema(
+  () =>
+    z
+      .object({
+        hostId: z.string(),
+        displayName: z.string().nullable(),
+        platform: z.string().nullable(),
+        kind: hostRegistryKindSchemaV11,
+        publicKey: z.string(),
+        createdAt: z.string(),
+        status: hostStatusDtoSchema,
+        commandInterpreter: hostCommandInterpreterSchema.nullable().optional(),
+        updatePolicy: hostUpdatePolicySchema,
+      })
+      .strict(),
+);
+
+/**
+ * A registry row as `host.hostInventory.subscribe@1.1` carries it: the live
+ * row before a team's own computer (`kind: machine`, Tracy Bots T141).
+ * FROZEN, a hand-copy for the same reason as {@link hostListItemSchemaV10}.
+ * The serving host drops `machine` rows for a 1.1 subscriber.
+ */
+export type HostListItemV11 = Omit<HostListItem, "kind"> & {
+  kind: HostRegistryKindV11;
+};
+
+export const hostListItemSchemaV11: z.ZodType<HostListItemV11> = lazySchema(
+  () =>
+    z
+      .object({
+        hostId: z.string(),
+        displayName: z.string().nullable(),
+        platform: z.string().nullable(),
+        kind: hostRegistryKindSchemaV11,
+        publicKey: z.string(),
+        createdAt: z.string(),
+        status: hostStatusDtoSchema,
+        commandInterpreter: hostCommandInterpreterSchema.nullable().optional(),
+        sandboxState: hostSandboxStateSchema.nullable().optional(),
+        sandboxFrozen: z.boolean().nullable().optional(),
+        profile: hostProfileSchema.nullable().optional(),
+        owner: hostOwnerPrincipalSchema.optional(),
+        updatePolicy: hostUpdatePolicySchema,
+      })
+      .strict(),
+);
+
+export const hostListResponseSchema: z.ZodType<HostListResponse> = lazySchema(
+  () =>
+    z
+      .object({
+        hosts: z.array(hostListItemSchema),
+      })
+      .strict(),
+);
+
+// -----------------------------------------------------------------------------
+// `PATCH /api/v3/hosts/:hostId` response — "Update now" / auto-policy toggle /
+// "Apply now — ends N sessions" (Architecture §13, T16; mirror authn-v3's
+// `PATCH /api/v3/hosts/:hostId` route)
+// -----------------------------------------------------------------------------
+
+/**
+ * Response body of `PATCH /api/v3/hosts/:hostId`. Deliberately snake_case —
+ * unlike the rest of this file's camelCase DTOs, this mirrors the wire shape
+ * verbatim (exactly what authn-v3 serializes for this route).
+ */
+export type HostVersionPolicyResponse = {
+  host_id: string;
+  update_policy: HostUpdatePolicy;
+  desired_version: string | null;
+};
+
+export const hostVersionPolicyResponseSchema: z.ZodType<HostVersionPolicyResponse> =
+  lazySchema(() =>
+    z.object({
+      host_id: z.string(),
+      update_policy: hostUpdatePolicySchema,
+      desired_version: z.string().nullable(),
+    }),
+  );

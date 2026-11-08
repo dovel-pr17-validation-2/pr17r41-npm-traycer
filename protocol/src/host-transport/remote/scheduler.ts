@@ -1,0 +1,474 @@
+import type { TimerHandle } from "../timers";
+import {
+  FINE_INBOUND_CREDIT_GRANT_BATCH,
+  QosClass,
+  type EncodeMuxFrameInput,
+} from "@traycer/protocol/host-transport/mux";
+import {
+  ChunkPacer,
+  type OutboundChunkSource,
+} from "@traycer/protocol/host-transport/chunking";
+
+/**
+ * Priority scheduler with per-session bulk credits (Architecture §3, audit C2).
+ *
+ * The unit of queued work is a LOGICAL MESSAGE (`OutboundChunkSource`), not a
+ * frame: frames materialize one at a time as the pump pulls, drawing their
+ * per-stream `seq` at pull time. Two queues:
+ *   - INTERACTIVE (high): keystrokes, live output, unary/control frames. Never
+ *     credit-gated — it must not stall on a slow peer. Always drained first.
+ *   - BULK (low): large transfers (a >1 MiB body rides BULK regardless of its
+ *     stream's class — the chunk source applies that override). Credit-gated,
+ *     one frame at a time; between every frame the interactive queue is
+ *     re-checked, so a keystroke preempts the next bulk chunk.
+ *
+ * Ordering: per-stream FIFO holds ACROSS the two queues — an item is skipped
+ * while an earlier-enqueued message for the same stream is still queued in
+ * the other queue — because interleaving a frame into another message's chunk
+ * sequence on the same stream is reassembler corruption on the peer.
+ *
+ * Pacing: EVERY frame — chunked or single — is metered by a `ChunkPacer`
+ * kept safely under the relay's per-session rate caps, because the relay
+ * counts raw frames with no class distinction and kills a session over
+ * budget: an ungated single-frame burst would trade a few ms of latency for
+ * losing the whole session. The pacer is clock-fed, so a pace-blocked
+ * interactive frame waits on the bucket refill (ms-scale), never on the
+ * peer. When only paced work remains, the pump re-arms at the next refill.
+ *
+ * Writes are serialized (one in flight at a time) so per-stream FIFO survives
+ * the async encode+encrypt.
+ */
+
+interface QueuedSource {
+  readonly source: OutboundChunkSource;
+  /** Enqueue order across both queues; the per-stream FIFO comparator. */
+  readonly serial: number;
+}
+
+export interface PrioritySchedulerOptions {
+  /** Serialized wire write (encode → Noise-encrypt → socket.send). */
+  readonly write: (frame: EncodeMuxFrameInput) => Promise<void>;
+  /** Invoked once if a write rejects; the pump stops and the session recovers. */
+  readonly onWriteError: (error: unknown) => void;
+  readonly initialBulkCredits: number;
+  /** Injectable clock for the pacer + resume timer; `undefined` = `Date.now`. */
+  readonly now: (() => number) | undefined;
+}
+
+/** A resume gap draining ahead of both queues. */
+interface ResumeResend {
+  readonly frames: readonly Uint8Array[];
+  readonly write: (muxFrame: Uint8Array) => Promise<void>;
+  readonly onDrained: () => void;
+  next: number;
+}
+
+export class PriorityScheduler {
+  private readonly interactive: QueuedSource[] = [];
+  private readonly bulk: QueuedSource[] = [];
+  private readonly options: PrioritySchedulerOptions;
+  private readonly now: () => number;
+  private readonly pacer: ChunkPacer;
+  private bulkCredits: number;
+  private nextSerial = 0;
+  private pumping = false;
+  private stopped = false;
+  private paused = false;
+  private paceResumeTimer: TimerHandle | null = null;
+  private paceResumeAtMs: number | null = null;
+  /** The resume gap still draining; see {@link resumeAfterResend}. */
+  private resend: ResumeResend | null = null;
+  /** The one write in flight, for {@link writeSettled}. */
+  private inFlightWrite: Promise<void> | null = null;
+  /**
+   * Invoked after each frame's write settles, with that frame's stream id.
+   * Assigned after construction by the owning session (the same shape as
+   * `OutboundChunkSource.onDrained`); `null` when nobody is watching.
+   *
+   * It runs BETWEEN pump iterations - after `write` resolved and before the
+   * next `next()` - never inside a queue scan, so a listener that enqueues
+   * (a tunnel releasing the bytes it held back) appends to a queue nobody is
+   * iterating, and its nested `pump()` call returns at once on `pumping`.
+   */
+  onFrameWritten: ((streamId: number) => void) | null = null;
+
+  constructor(options: PrioritySchedulerOptions) {
+    this.options = options;
+    this.now = options.now ?? (() => Date.now());
+    this.pacer = new ChunkPacer(this.now);
+    this.bulkCredits = options.initialBulkCredits;
+  }
+
+  enqueue(source: OutboundChunkSource): void {
+    if (this.stopped) {
+      return;
+    }
+    const item: QueuedSource = { source, serial: this.nextSerial++ };
+    if (source.qos === QosClass.BULK) {
+      this.bulk.push(item);
+    } else {
+      this.interactive.push(item);
+    }
+    void this.pump();
+  }
+
+  /** Replenishes bulk credits granted by the peer and resumes the pump. */
+  grantCredits(credits: number): void {
+    if (credits <= 0) {
+      return;
+    }
+    this.bulkCredits += credits;
+    void this.pump();
+  }
+
+  /**
+   * Replaces the unspent send window once the peer's `openAck` proved it
+   * grants credits finely (`SESSION_CAPABILITY_FINE_CREDITS`).
+   *
+   * Assignment rather than `Math.min`, and the direction is the point: a
+   * window that ends up LARGER than intended only weakens pacing, while one
+   * that ends up smaller than the peer's grant batch deadlocks the first
+   * transfer outright. In practice neither happens — no bulk frame can be
+   * pulled before the session is ready, so the window is still untouched when
+   * this runs — but if that ever stops being true, this fails toward the
+   * recoverable side.
+   */
+  adoptNegotiatedCreditWindow(credits: number): void {
+    this.bulkCredits = credits;
+    void this.pump();
+  }
+
+  availableCredits(): number {
+    return this.bulkCredits;
+  }
+
+  /**
+   * Stops draining WITHOUT dropping what is queued, for the window where the
+   * relay leg has no host behind it, or a resume exchange owns the wire.
+   * Frames enqueued while paused are held rather than handed to a relay with
+   * nobody to deliver them to, and a half-sent chunk source stays where it is.
+   * A resend in progress ends here too: the ledger still holds its frames, and
+   * the next exchange recomputes the gap.
+   *
+   * WHAT ENDS THE PAUSE DEPENDS ON WHETHER THE SESSION NEGOTIATED RESUME. With
+   * it, the session keeps its Noise channel and {@link resumeAfterResend} ends
+   * the pause. Without it, `host_attached` is proof the responder is gone:
+   * `onHostAttached` rebuilds through `handleConnectionLost`, which calls
+   * {@link stop}, and the held frames are dropped for the higher layer to
+   * re-drive after the handshake, the contract {@link stop} states.
+   */
+  pause(): void {
+    this.paused = true;
+    this.resend = null;
+  }
+
+  /** Ends a pause with nothing to resend. Test seam: see {@link pause}. */
+  resume(): void {
+    if (!this.paused) {
+      return;
+    }
+    this.paused = false;
+    void this.pump();
+  }
+
+  /**
+   * Resends a resume gap, then ends the pause and calls `onDrained`.
+   *
+   * The gap goes ahead of both queues, so a frame queued during the outage
+   * cannot overtake it, and `write` is the serialized seal-and-send without
+   * the ledger append. Each frame spends pacing budget, because the relay
+   * kills a session over its frame rate whatever the frames are, and no bulk
+   * credit, because the peer grants credit once per unique frame and the
+   * first send of each already spent one.
+   *
+   * `onDrained` runs once the last resent frame's write has settled, before
+   * anything queued goes out, and never for a resend that {@link pause} or
+   * {@link stop} ended. An empty gap drains synchronously unless a pump is
+   * already running.
+   */
+  resumeAfterResend(
+    frames: readonly Uint8Array[],
+    write: (muxFrame: Uint8Array) => Promise<void>,
+    onDrained: () => void,
+  ): void {
+    if (this.stopped) {
+      return;
+    }
+    this.resend = { frames, write, onDrained, next: 0 };
+    void this.pump();
+  }
+
+  /**
+   * Resolves when the write in flight, if any, has settled. A resume exchange
+   * waits on it: sealing is not serialized once a Noise counter is reserved,
+   * so a frame still sealing could otherwise reach the peer after RESUME and
+   * be counted ahead of the gap. Never rejects; a failed write reports through
+   * `onWriteError`.
+   */
+  writeSettled(): Promise<void> {
+    return this.inFlightWrite === null
+      ? Promise.resolve()
+      : this.inFlightWrite.catch(() => undefined);
+  }
+
+  /**
+   * Remaining body bytes this stream has queued or mid-transfer - the client
+   * twin of the host scheduler's `queuedBytesForStream`. A pure read.
+   *
+   * A scan rather than tracked accounting, deliberately. Its one caller is a
+   * tunnel endpoint, which bounds what it queues here by FRAME COUNT as well
+   * as bytes: at most `TUNNEL_STREAM_WINDOW_FRAMES` data frames plus three
+   * control frames (one coalesced credit, one end, one finished) per stream,
+   * whatever the slice size. So the scan costs O(tunnels x 35) entries, not
+   * O(bytes), and that holds only because the caller counts frames - a
+   * byte-only bound would let one-byte writes queue tens of thousands of
+   * entries and make this quadratic. A running total would be a second copy
+   * of the truth for `dropStreamOutbound` and `stop` to keep in step.
+   */
+  queuedBytesForStream(streamId: number): number {
+    let total = 0;
+    for (const queue of [this.interactive, this.bulk]) {
+      for (const item of queue) {
+        if (item.source.streamId === streamId) {
+          total += item.source.remainingBytes;
+        }
+      }
+    }
+    return total;
+  }
+
+  /** Queued MESSAGES (a mid-transfer chunk source still counts as one). */
+  queuedCount(): number {
+    return this.interactive.length + this.bulk.length;
+  }
+
+  /**
+   * Drops every queued message for one stream — including a partially-sent
+   * chunk source. The caller then sends that stream's terminal CLOSE/FATAL,
+   * which the peer's reassembler accepts mid-sequence as a transfer abort.
+   */
+  dropStreamOutbound(streamId: number): void {
+    for (const queue of [this.interactive, this.bulk]) {
+      for (let index = queue.length - 1; index >= 0; index -= 1) {
+        if (queue[index].source.streamId === streamId) {
+          queue.splice(index, 1);
+        }
+      }
+    }
+  }
+
+  /**
+   * Drops all queued frames and halts the pump — called when the underlying
+   * session resets (a resume rebuilds the mux, so in-flight frames are re-driven
+   * by the higher layer, never replayed blindly).
+   */
+  stop(): void {
+    this.stopped = true;
+    this.interactive.length = 0;
+    this.bulk.length = 0;
+    this.resend = null;
+    if (this.paceResumeTimer !== null) {
+      clearTimeout(this.paceResumeTimer);
+      this.paceResumeTimer = null;
+    }
+  }
+
+  private blockedByOtherQueue(
+    other: readonly QueuedSource[],
+    item: QueuedSource,
+  ): boolean {
+    for (const candidate of other) {
+      if (
+        candidate.source.streamId === item.source.streamId &&
+        candidate.serial < item.serial
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private pullFromQueue(
+    queue: QueuedSource[],
+    other: readonly QueuedSource[],
+  ): EncodeMuxFrameInput | null {
+    // Streams already passed over in this scan: a later item for one of them
+    // must not overtake the earlier item that was skipped.
+    const blockedStreams = new Set<number>();
+    for (let index = 0; index < queue.length; index += 1) {
+      const item = queue[index];
+      const streamId = item.source.streamId;
+      if (blockedStreams.has(streamId)) {
+        continue;
+      }
+      if (this.blockedByOtherQueue(other, item)) {
+        blockedStreams.add(streamId);
+        continue;
+      }
+      const frameBytes = item.source.nextFrameByteSize;
+      if (!this.pacer.tryConsume(frameBytes)) {
+        this.notePaceWait(this.pacer.msUntilAvailable(frameBytes));
+        blockedStreams.add(streamId);
+        continue;
+      }
+      const frame = item.source.nextFrame();
+      if (item.source.done) {
+        queue.splice(index, 1);
+      }
+      return frame;
+    }
+    return null;
+  }
+
+  private next(): EncodeMuxFrameInput | null {
+    const interactive = this.pullFromQueue(this.interactive, this.bulk);
+    if (interactive !== null) {
+      return interactive;
+    }
+    if (this.bulk.length > 0 && this.bulkCredits > 0) {
+      const bulk = this.pullFromQueue(this.bulk, this.interactive);
+      if (bulk !== null) {
+        this.bulkCredits -= 1;
+        return bulk;
+      }
+    }
+    return null;
+  }
+
+  private notePaceWait(waitMs: number): void {
+    const resumeAt = this.now() + waitMs;
+    if (this.paceResumeAtMs === null || resumeAt < this.paceResumeAtMs) {
+      this.paceResumeAtMs = resumeAt;
+    }
+  }
+
+  private armPaceResume(): void {
+    const resumeAt = this.paceResumeAtMs;
+    this.paceResumeAtMs = null;
+    if (
+      resumeAt === null ||
+      this.stopped ||
+      (this.paused && this.resend === null) ||
+      this.paceResumeTimer !== null
+    ) {
+      return;
+    }
+    const delay = Math.max(1, resumeAt - this.now());
+    this.paceResumeTimer = setTimeout(() => {
+      this.paceResumeTimer = null;
+      void this.pump();
+    }, delay);
+  }
+
+  /**
+   * One step of the resend. Returns whether the pump goes on: `false` means
+   * paced out, with the refill armed.
+   */
+  private async pumpResend(resend: ResumeResend): Promise<boolean> {
+    const frame = resend.frames[resend.next];
+    if (frame === undefined) {
+      this.resend = null;
+      this.paused = false;
+      resend.onDrained();
+      return true;
+    }
+    this.paceResumeAtMs = null;
+    if (!this.pacer.tryConsume(frame.byteLength)) {
+      this.notePaceWait(this.pacer.msUntilAvailable(frame.byteLength));
+      this.armPaceResume();
+      return false;
+    }
+    resend.next += 1;
+    await this.trackWrite(resend.write(frame));
+    return true;
+  }
+
+  private async trackWrite(write: Promise<void>): Promise<void> {
+    this.inFlightWrite = write;
+    try {
+      await write;
+    } finally {
+      this.inFlightWrite = null;
+    }
+  }
+
+  private async pump(): Promise<void> {
+    if (this.pumping || this.stopped || (this.paused && this.resend === null)) {
+      return;
+    }
+    this.pumping = true;
+    try {
+      for (;;) {
+        if (this.stopped) {
+          return;
+        }
+        if (this.resend !== null) {
+          if (!(await this.pumpResend(this.resend))) {
+            return;
+          }
+          continue;
+        }
+        if (this.paused) {
+          return;
+        }
+        this.paceResumeAtMs = null;
+        const frame = this.next();
+        if (frame === null) {
+          this.armPaceResume();
+          return;
+        }
+        await this.trackWrite(this.options.write(frame));
+        try {
+          this.onFrameWritten?.(frame.streamId);
+        } catch {
+          // A listener's failure is not a write failure: letting it reach the
+          // catch below would tear the whole connection down for it.
+        }
+      }
+    } catch (error) {
+      try {
+        this.options.onWriteError(error);
+      } catch {
+        // onWriteError must not throw; swallow to avoid an unhandled rejection.
+      }
+    } finally {
+      this.pumping = false;
+    }
+  }
+}
+
+/**
+ * Tracks inbound bulk frames consumed and tells the caller when to grant a
+ * fresh batch of credits back to the peer (so the peer's send window reopens).
+ * Counted at FRAME receipt (post-decrypt, pre-reassembly) on BOTH peers:
+ * credits meter transport frames in flight, so reassembly state is irrelevant
+ * to them — a per-completed-message count deadlocks any transfer longer than
+ * the initial credit window.
+ *
+ * The batch is `FINE_INBOUND_CREDIT_GRANT_BATCH` UNCONDITIONALLY, with no
+ * negotiation, because granting more often is the one direction of the credit
+ * change that cannot hurt: extra grants can only un-stall a sender, never
+ * stall one. It is the SEND window that must not shrink without the peer's
+ * consent. The old "coarse on purpose, credit returns must not become
+ * chatter" rationale does not survive the arithmetic: at 32 frames a 34 MB
+ * transfer costs ~17 extra sub-100-byte control frames, against a per-session
+ * budget of 500 frames per second.
+ */
+export class InboundCreditTracker {
+  private consumed = 0;
+
+  /** Records one consumed inbound bulk frame; returns credits to grant, or 0. */
+  onBulkFrameConsumed(): number {
+    this.consumed += 1;
+    if (this.consumed >= FINE_INBOUND_CREDIT_GRANT_BATCH) {
+      const grant = this.consumed;
+      this.consumed = 0;
+      return grant;
+    }
+    return 0;
+  }
+
+  reset(): void {
+    this.consumed = 0;
+  }
+}

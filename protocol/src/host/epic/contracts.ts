@@ -1,0 +1,2713 @@
+import {
+  createChatRequestSchemaV14,
+  createChatRequestSchemaV15,
+  createEpicRequestSchemaV14,
+  createEpicRequestSchemaV15,
+  updateChatRunSettingsRequestSchemaV12,
+} from "./unary-schemas";
+import {
+  getChatRunSettingsResponseSchemaV41,
+  getChatRunSettingsBatchResponseSchemaV21,
+} from "./chat-records";
+import {
+  hydrateChatRequestSchema,
+  hydrateChatResponseSchema,
+} from "./chat-hydration";
+import {
+  defineDowngradePath,
+  defineRpcContract,
+  defineUpgradePath,
+} from "@traycer/protocol/framework/index";
+import {
+  batchDeleteRequestSchema,
+  batchDeleteResponseSchema,
+  batchDeleteResponseSchemaPre11,
+  batchUpdateEpicRolesRequestSchema,
+  batchUpdateEpicRolesResponseSchema,
+  createArtifactRequestSchema,
+  createArtifactRequestSchemaPreHtml,
+  createArtifactResponseSchema,
+  createChatRequestSchema,
+  createChatRequestSchemaV11,
+  createChatRequestSchemaV12,
+  createChatRequestSchemaV13,
+  createChatResponseSchema,
+  createChatResponseSchemaV12,
+  continueSubagentRequestSchema,
+  continueSubagentResponseSchema,
+  createCommentThreadRequestSchema,
+  createCommentThreadRequestSchemaPreCanvasPoint,
+  createCommentThreadRequestSchemaPreAnchor,
+  createCommentThreadRequestSchemaPreHtml,
+  createCommentThreadResponseSchema,
+  createEpicRequestSchema,
+  createEpicRequestSchemaV12,
+  createEpicRequestSchemaV13,
+  createEpicResponseSchema,
+  createEpicResponseSchemaPre11,
+  createEpicResponseSchemaV12,
+  createTuiAgentRequestSchema,
+  createTuiAgentRequestSchemaV10,
+  createTuiAgentResponseSchema,
+  deleteArtifactRequestSchema,
+  deleteArtifactResponseSchema,
+  deleteChatRequestSchema,
+  deleteChatResponseSchema,
+  deleteChatResponseSchemaV10,
+  deleteChatResponseSchemaV11,
+  deleteCommentRequestSchema,
+  deleteCommentRequestSchemaPreHtml,
+  deleteCommentResponseSchema,
+  deleteCommentThreadRequestSchema,
+  deleteCommentThreadRequestSchemaPreHtml,
+  deleteCommentThreadResponseSchema,
+  deleteTuiAgentRequestSchema,
+  deleteTuiAgentResponseSchema,
+  deleteTuiAgentResponseSchemaV10,
+  editCommentRequestSchema,
+  editCommentRequestSchemaPreHtml,
+  editCommentResponseSchema,
+  epicMentionArtifactsRequestSchema,
+  epicMentionArtifactsResponseSchema,
+  epicMentionEpicsRequestSchema,
+  epicMentionEpicsResponseSchema,
+  epicMentionReviewsResponseSchema,
+  epicMentionSpecsResponseSchema,
+  epicMentionStoriesResponseSchema,
+  epicMentionTicketsResponseSchema,
+  finishArtifactImageRequestSchema,
+  finishArtifactImageResponseSchema,
+  grantEpicAccessRequestSchema,
+  grantEpicAccessResponseSchema,
+  listCommentThreadsRequestSchema,
+  listCommentThreadsRequestSchemaPreHtml,
+  listCommentThreadsResponseSchema,
+  listCommentThreadsResponseSchemaPreAnchor,
+  listCommentThreadsResponseSchemaPreCanvasPoint,
+  listEpicCollaboratorsRequestSchema,
+  listEpicCollaboratorsResponseSchema,
+  listEpicCollaboratorsResponseSchemaPre11,
+  getTaskContextsRequestSchema,
+  getTaskContextsResponseSchema,
+  getTaskContextsResponseSchemaPre14,
+  getTaskContextsResponseSchemaPre12,
+  getTaskContextsResponseSchemaV10,
+  getTaskContextsResponseSchemaPre13,
+  isFoundTaskContext,
+  listTasksRequestSchema,
+  listTasksRequestSchemaPre16,
+  listTasksRequestSchemaV11,
+  listTasksRequestSchemaPre13,
+  listTasksResponseSchema,
+  listTasksResponseSchemaPre18,
+  listTasksResponseSchemaPre19,
+  listTasksResponseSchemaV10,
+  listTasksResponseSchemaPre13,
+  listTasksResponseSchemaPre14,
+  listTasksResponseSchemaPre15,
+  listTasksResponseSchemaPre16,
+  listTasksResponseSchemaPre17,
+  prepareArtifactImageRequestSchema,
+  prepareArtifactImageResponseSchema,
+  removeEpicRepoRequestSchema,
+  removeEpicRepoResponseSchema,
+  resolveArtifactByPathRequestSchema,
+  resolveArtifactByPathResponseSchema,
+  resolveArtifactByPathResponseSchemaPreHtml,
+  searchArtifactsRequestSchema,
+  searchArtifactsRequestSchemaPreHtml,
+  searchArtifactsResponseSchema,
+  searchArtifactsResponseSchemaPreHtml,
+  renameArtifactRequestSchema,
+  renameArtifactResponseSchema,
+  renameChatRequestSchema,
+  renameChatResponseSchema,
+  renameTuiAgentRequestSchema,
+  renameTuiAgentResponseSchema,
+  reparentArtifactRequestSchema,
+  reparentArtifactResponseSchema,
+  reparentChatRequestSchema,
+  reparentChatResponseSchema,
+  replyToCommentThreadRequestSchema,
+  replyToCommentThreadRequestSchemaPreHtml,
+  replyToCommentThreadResponseSchema,
+  recordEpicViewedRequestSchema,
+  recordEpicViewedResponseSchema,
+  revokeEpicCollaboratorRequestSchema,
+  revokeEpicCollaboratorResponseSchema,
+  chatPublicationStateRequestSchema,
+  chatPublicationStateResponseSchema,
+  setChatArchivedRequestSchema,
+  setChatArchivedResponseSchema,
+  setChatArchivedResponseSchemaV10,
+  setCommentThreadResolvedRequestSchema,
+  setCommentThreadResolvedRequestSchemaPreHtml,
+  setCommentThreadResolvedResponseSchema,
+  setEpicPinnedRequestSchema,
+  setEpicPinnedResponseSchema,
+  setEpicPinnedResponseSchemaPre11,
+  updateArtifactStatusRequestSchema,
+  updateArtifactStatusResponseSchema,
+  updateChatProfileRequestSchema,
+  updateChatProfileResponseSchema,
+  updateChatRunSettingsRequestSchema,
+  updateChatRunSettingsRequestSchemaV11,
+  updateChatRunSettingsResponseSchema,
+  updateEpicRequestSchema,
+  updateEpicResponseSchema,
+} from "@traycer/protocol/host/epic/unary-schemas";
+import type {
+  GetTaskContextsResponse,
+  GetTaskContextsResponseV10,
+  ListEpicCollaboratorsResponse,
+  ListEpicCollaboratorsResponsePre11,
+} from "@traycer/protocol/host/epic/unary-schemas";
+import {
+  epicSubscribeV10,
+  epicSubscribeV11,
+  epicSubscribeV12,
+  epicSubscribeV13,
+  epicSubscribeV14,
+  epicSubscribeV15,
+  epicSubscribeV16,
+} from "@traycer/protocol/host/epic/subscribe";
+import {
+  listTaskHostsRequestSchema,
+  listTaskHostsResponseSchema,
+} from "@traycer/protocol/host/task-host-summary";
+import {
+  listCloudChatPayloadsRequestSchema,
+  listCloudChatPayloadsResponseSchema,
+  listCloudChatsRequestSchema,
+  listCloudChatsResponseSchema,
+  readCloudChatPartRequestSchema,
+  readCloudChatPartResponseSchema,
+  readCloudChatPayloadRequestSchema,
+  readCloudChatPayloadResponseSchema,
+  resolveCloudChatHeadRequestSchema,
+  resolveCloudChatHeadResponseSchema,
+  setChatSharingDefaultRequestSchema,
+  setChatSharingDefaultResponseSchema,
+  setCloudChatVisibilityRequestSchema,
+  setCloudChatVisibilityResponseSchema,
+} from "@traycer/protocol/host/epic/cloud-chat";
+import {
+  listChatPublicationTargetsRequestSchema,
+  listChatPublicationTargetsResponseSchema,
+} from "@traycer/protocol/host/epic/chat-publication-identity";
+import {
+  chatBackupStatusRequestSchema,
+  chatBackupStatusResponseSchema,
+} from "@traycer/protocol/host/epic/chat-backup-status";
+import {
+  chatReplicaReadRequestSchema,
+  chatReplicaReadResponseSchema,
+} from "@traycer/protocol/host/epic/chat-replica-read";
+import {
+  listChatRecordsRequestSchema,
+  listChatRecordsRequestV11Schema,
+  listChatRecordsRequestV13Schema,
+  listChatRecordsResponseSchema,
+  listChatRecordsResponseV11Schema,
+  listChatRecordsResponseV12Schema,
+  listChatRecordsResponseV13Schema,
+  listChatRecordsResponseV14Schema,
+  getChatRunSettingsRequestSchema,
+  getChatRunSettingsResponseSchema,
+  getChatRunSettingsResponseSchemaV10,
+  getChatRunSettingsResponseSchemaV20,
+  getChatRunSettingsResponseSchemaV30,
+  getChatRunSettingsBatchEntrySchemaV10,
+  getChatRunSettingsBatchRequestSchema,
+  getChatRunSettingsBatchResponseSchema,
+  getChatRunSettingsBatchResponseSchemaV10,
+} from "@traycer/protocol/host/epic/chat-records";
+import {
+  readChatAttachmentRequestSchema,
+  readChatAttachmentRequestSchemaPre11,
+  readChatAttachmentResponseSchema,
+} from "@traycer/protocol/host/epic/chat-attachment";
+import {
+  artifactVersionsGetBlobRequestSchema,
+  artifactVersionsGetBlobResponseSchema,
+  artifactVersionsListRequestSchema,
+  artifactVersionsListResponseSchema,
+  artifactVersionsRestoreRequestSchema,
+  artifactVersionsRestoreResponseSchema,
+  deletedArtifactsListRequestSchema,
+  deletedArtifactsListResponseSchema,
+  deletedArtifactsReviveRequestSchema,
+  deletedArtifactsReviveResponseSchema,
+  artifactVersionSettingsGetRequestSchema,
+  artifactVersionSettingsGetResponseSchema,
+  artifactVersionSettingsSetEnabledRequestSchema,
+  artifactVersionSettingsSetRetentionPolicyRequestSchema,
+  artifactVersionSettingsClearHistoryRequestSchema,
+  artifactVersionSettingsCommandResponseSchema,
+} from "@traycer/protocol/host/epic/artifact-versions";
+import {
+  fetchArtifactAttachmentRequestSchema,
+  fetchArtifactAttachmentResponseSchema,
+} from "@traycer/protocol/host/epic/artifact-attachment";
+import {
+  attachEnvironmentRequestSchema,
+  attachEnvironmentResponseSchema,
+} from "@traycer/protocol/host/epic/environment-attachment";
+import {
+  localHistoryReadRequestSchema,
+  localHistoryReadResponseSchema,
+} from "@traycer/protocol/host/epic/local-history";
+
+// `epic.listTasks@1.0` - frozen pre-pinning host entry point for the CloudData
+// task-list query. Both request and response preserve the released wire shape.
+export const epicListTasksV10 = defineRpcContract({
+  method: "epic.listTasks",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: listTasksRequestSchemaV11,
+  responseSchema: listTasksResponseSchemaV10,
+});
+
+// `epic.listTasks@1.1` adds the signed-in user's personal `pinned` bit to each
+// row. The request is unchanged; an older host's rows upgrade as unpinned.
+// Response shape is frozen at the pin-aware (pre-home) schema so later home
+// tagging lands on a new minor rather than rewriting released 1.1/1.2.
+export const epicListTasksV11 = defineRpcContract({
+  method: "epic.listTasks",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: listTasksRequestSchemaV11,
+  responseSchema: listTasksResponseSchemaPre13,
+});
+
+export const epicListTasksUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicListTasksV10,
+  typeof epicListTasksV11
+>({
+  from: epicListTasksV10.schemaVersion,
+  to: epicListTasksV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => ({
+    ...response,
+    tasks: response.tasks.map((task) => ({ ...task, pinned: false })),
+  }),
+});
+
+// `epic.listTasks@1.2` adds the centrally evaluated `last-viewed` sort. The
+// response is unchanged; older requests are already valid latest requests.
+export const epicListTasksV12 = defineRpcContract({
+  method: "epic.listTasks",
+  schemaVersion: { major: 1, minor: 2 } as const,
+  requestSchema: listTasksRequestSchemaPre13,
+  responseSchema: listTasksResponseSchemaPre13,
+});
+
+export const epicListTasksUpgradeV11ToV12 = defineUpgradePath<
+  typeof epicListTasksV11,
+  typeof epicListTasksV12
+>({
+  from: epicListTasksV11.schemaVersion,
+  to: epicListTasksV12.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+// `epic.listTasks@1.3` adds the chat-host dimension: a `chatHostIds` filter on
+// the request and a matching `chatHosts` facet group on the response. Both are
+// optional, so a v1.2 request is already a valid latest request - but the
+// version gate is what stops a NEW client from believing an OLD host applied a
+// host filter it silently dropped, which would render an unfiltered list as a
+// filtered one.
+export const epicListTasksV13 = defineRpcContract({
+  method: "epic.listTasks",
+  schemaVersion: { major: 1, minor: 3 } as const,
+  requestSchema: listTasksRequestSchemaPre16,
+  responseSchema: listTasksResponseSchemaPre14,
+});
+
+export const epicListTasksUpgradeV12ToV13 = defineUpgradePath<
+  typeof epicListTasksV12,
+  typeof epicListTasksV13
+>({
+  from: epicListTasksV12.schemaVersion,
+  to: epicListTasksV13.schemaVersion,
+  upgradeRequest: (request) => request,
+  // A v1.2 host never counted chat hosts. `chatHosts` stays absent rather
+  // than becoming `[]`: an empty array reads as "no host has any task", and
+  // the popover would render an empty section instead of falling back.
+  upgradeResponse: (response) => response,
+});
+
+// `epic.listTasks@1.4` adds the optional per-row `home` marker so the host can
+// union local-homed registry rows into the cloud list without breaking older
+// clients (absence ⇒ treat as cloud / unknown). Request is unchanged from 1.3.
+export const epicListTasksV14 = defineRpcContract({
+  method: "epic.listTasks",
+  schemaVersion: { major: 1, minor: 4 } as const,
+  requestSchema: listTasksRequestSchemaPre16,
+  responseSchema: listTasksResponseSchemaPre15,
+});
+
+export const epicListTasksUpgradeV13ToV14 = defineUpgradePath<
+  typeof epicListTasksV13,
+  typeof epicListTasksV14
+>({
+  from: epicListTasksV13.schemaVersion,
+  to: epicListTasksV14.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => ({
+    ...response,
+    tasks: response.tasks.map((task) => ({ ...task })),
+  }),
+});
+
+// `epic.listTasks@1.5` - the s5 discovery-honesty minor. TWO tickets land on
+// it because they are two halves of one answer and a client that negotiated
+// only half would render the other half's rows without its caveats:
+//
+// - `s5-offline-history` (C5/C6) adds `completeness`, the positive statement
+//   of whether the cloud leg settled, whether the facets still describe the
+//   rows, whether host rows are present or were suppressed as unprovable, and
+//   whether the order is the server's or a loaded-union.
+// - `s5-orphaned-epic-recovery` adds the per-row `preservation` marker, which
+//   is what makes an epic preserved through a refused delete listable at all.
+//
+// Both keys are additive and optional, so `@1.0`-`@1.4` peers keep byte-
+// identical payloads: the older response schemas strip them, and the host
+// gates emission on the negotiated minor rather than trusting the strip.
+// Request is unchanged from 1.3.
+export const epicListTasksV15 = defineRpcContract({
+  method: "epic.listTasks",
+  schemaVersion: { major: 1, minor: 5 } as const,
+  requestSchema: listTasksRequestSchemaPre16,
+  responseSchema: listTasksResponseSchemaPre16,
+});
+
+export const epicListTasksUpgradeV14ToV15 = defineUpgradePath<
+  typeof epicListTasksV14,
+  typeof epicListTasksV15
+>({
+  from: epicListTasksV14.schemaVersion,
+  to: epicListTasksV15.schemaVersion,
+  upgradeRequest: (request) => request,
+  // No synthesized `completeness`. An upgraded `@1.4` payload came from a host
+  // that cannot make this statement, and absence is exactly the right reading:
+  // manufacturing `cloudPage: "settled"` here would be the reassuring default
+  // this minor exists to remove.
+  upgradeResponse: (response) => ({
+    ...response,
+    tasks: response.tasks.map((task) => ({ ...task })),
+  }),
+});
+
+// `epic.listTasks@1.6` permits a capable client to receive locally provable
+// rows immediately, then perform one explicit cloud revalidation. The new
+// request directive and `pending` completeness state are deliberately absent
+// from 1.5: a new renderer negotiating an old host must keep today's single,
+// settled-or-unavailable response behaviour.
+export const epicListTasksV16 = defineRpcContract({
+  method: "epic.listTasks",
+  schemaVersion: { major: 1, minor: 6 } as const,
+  requestSchema: listTasksRequestSchema,
+  responseSchema: listTasksResponseSchemaPre17,
+});
+
+export const epicListTasksUpgradeV15ToV16 = defineUpgradePath<
+  typeof epicListTasksV15,
+  typeof epicListTasksV16
+>({
+  from: epicListTasksV15.schemaVersion,
+  to: epicListTasksV16.schemaVersion,
+  upgradeRequest: (request) => request,
+  // An older host cannot have returned a local-first page. Do not manufacture
+  // `pending`: its absence continues to mean the released single-response
+  // behaviour, exactly as a 1.5 renderer already reads it.
+  upgradeResponse: (response) => response,
+});
+
+// The per-viewer activity key is additive and optional. A 1.6 peer keeps its
+// frozen row schema, so it cannot accidentally claim to know Recent activity.
+export const epicListTasksV17 = defineRpcContract({
+  method: "epic.listTasks",
+  schemaVersion: { major: 1, minor: 7 } as const,
+  requestSchema: listTasksRequestSchema,
+  responseSchema: listTasksResponseSchemaPre18,
+});
+
+export const epicListTasksUpgradeV16ToV17 = defineUpgradePath<
+  typeof epicListTasksV16,
+  typeof epicListTasksV17
+>({
+  from: epicListTasksV16.schemaVersion,
+  to: epicListTasksV17.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+/** listTasks 1.8 adds optional counts; 1.7 keeps its frozen response. */
+export const epicListTasksV18 = defineRpcContract({
+  method: "epic.listTasks",
+  schemaVersion: { major: 1, minor: 8 } as const,
+  requestSchema: listTasksRequestSchema,
+  responseSchema: listTasksResponseSchemaPre19,
+});
+
+export const epicListTasksUpgradeV17ToV18 = defineUpgradePath<
+  typeof epicListTasksV17,
+  typeof epicListTasksV18
+>({
+  from: epicListTasksV17.schemaVersion,
+  to: epicListTasksV18.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+// The owning environment is display metadata and optional. A 1.8 peer keeps
+// its frozen row, so an upgraded row names no environment rather than a
+// guessed one.
+export const epicListTasksV19 = defineRpcContract({
+  method: "epic.listTasks",
+  schemaVersion: { major: 1, minor: 9 } as const,
+  requestSchema: listTasksRequestSchema,
+  responseSchema: listTasksResponseSchema,
+});
+
+export const epicListTasksUpgradeV18ToV19 = defineUpgradePath<
+  typeof epicListTasksV18,
+  typeof epicListTasksV19
+>({
+  from: epicListTasksV18.schemaVersion,
+  to: epicListTasksV19.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+// Personal cloud preference. Optional/non-floor so clients retain the released
+// unary handshake against older hosts and receive E_HOST_UNSUPPORTED only when
+// they try to change a pin.
+export const epicSetPinnedV10 = defineRpcContract({
+  method: "epic.setPinned",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: setEpicPinnedRequestSchema,
+  responseSchema: setEpicPinnedResponseSchemaPre11,
+});
+
+// `epic.setPinned@1.1` states the durability `home` of the epic it just
+// pinned. Request is unchanged from 1.0.
+//
+// The released line is cloud-only by CONSTRUCTION, not by declaration: the
+// host's only arm writes to the cloud, so a local-homed epic 404s. A host that
+// grows a local arm therefore changes what a success MEANS, and a `@1.0`
+// response has no room to say so. The client gating its pin control on this
+// minor is what keeps the two facts - "this host can pin a local-homed epic"
+// and "this response tells me which store took it" - from being negotiated
+// separately and disagreeing.
+export const epicSetPinnedV11 = defineRpcContract({
+  method: "epic.setPinned",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: setEpicPinnedRequestSchema,
+  responseSchema: setEpicPinnedResponseSchema,
+});
+
+export const epicSetPinnedUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicSetPinnedV10,
+  typeof epicSetPinnedV11
+>({
+  from: epicSetPinnedV10.schemaVersion,
+  to: epicSetPinnedV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  // `home` stays ABSENT rather than becoming `"cloud"`. A `@1.0` host's
+  // success does happen to be a cloud write today, but synthesizing the marker
+  // here would hand a client the same unearned certainty the minor exists to
+  // remove, and it would survive a host that later serves the pin locally on a
+  // still-`@1.0`-negotiated connection.
+  upgradeResponse: (response) => response,
+});
+
+// Personal cloud recency. Optional/non-floor so older hosts remain compatible;
+// route activation silently skips the write when the capability is absent.
+export const epicRecordViewedV10 = defineRpcContract({
+  method: "epic.recordViewed",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: recordEpicViewedRequestSchema,
+  responseSchema: recordEpicViewedResponseSchema,
+});
+
+// Batch resolve task ids → list-row shapes (titles/context). Optional/non-floor
+// so clients retain the released unary handshake; old hosts return
+// E_HOST_UNSUPPORTED for this call only.
+export const epicGetTaskContextsV10 = defineRpcContract({
+  method: "epic.getTaskContexts",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: getTaskContextsRequestSchema,
+  responseSchema: getTaskContextsResponseSchemaV10,
+});
+
+// v1.1 replaces v1.0's ambiguous nullable row with an explicit resolution
+// outcome. The request is unchanged. A v1.0 response upgrades every legacy
+// null to `unknown` because an old host could not establish why it was absent.
+export const epicGetTaskContextsV11 = defineRpcContract({
+  method: "epic.getTaskContexts",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: getTaskContextsRequestSchema,
+  responseSchema: getTaskContextsResponseSchemaPre12,
+});
+
+export const epicGetTaskContextsUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicGetTaskContextsV10,
+  typeof epicGetTaskContextsV11
+>({
+  from: epicGetTaskContextsV10.schemaVersion,
+  to: epicGetTaskContextsV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => ({
+    tasks: Object.fromEntries(
+      Object.entries(response.tasks).map(([taskId, task]) => [
+        taskId,
+        task === null
+          ? { status: "unknown" as const, reason: "legacy" as const }
+          : { status: "found" as const, task },
+      ]),
+    ),
+  }),
+});
+
+// `epic.getTaskContexts@1.2` carries `chatHostIds` on the found row, matching
+// `epic.listTasks@1.3`. These rows are fetched BY ID and so never pass through
+// the list filter; without the field a client cannot tell whether an id-fetched
+// task belongs to a selected host, and has to choose between showing it
+// unfiltered or dropping it entirely. Both are wrong answers.
+export const epicGetTaskContextsV12 = defineRpcContract({
+  method: "epic.getTaskContexts",
+  schemaVersion: { major: 1, minor: 2 } as const,
+  requestSchema: getTaskContextsRequestSchema,
+  responseSchema: getTaskContextsResponseSchemaPre13,
+});
+
+export const epicGetTaskContextsUpgradeV11ToV12 = defineUpgradePath<
+  typeof epicGetTaskContextsV11,
+  typeof epicGetTaskContextsV12
+>({
+  from: epicGetTaskContextsV11.schemaVersion,
+  to: epicGetTaskContextsV12.schemaVersion,
+  upgradeRequest: (request) => request,
+  // `chatHostIds` stays ABSENT on an upgraded v1.1 row rather than becoming
+  // `[]`. An old host did not report no visible chat hosts; it reported
+  // nothing, and only absence lets the local predicate abstain instead of
+  // filtering the row out.
+  upgradeResponse: (response) => response,
+});
+
+// `epic.getTaskContexts@1.3` adds the optional sibling `localHomedTaskIds` id
+// list (see `unary-schemas.ts` for why it is a sibling rather than the per-row
+// `home` marker `epic.listTasks@1.4` carries), so the tab strip can tell a
+// local epic from a cloud one on the only method it uses (`s5-parity-gaps`
+// gap 4). Request unchanged; `@1.0`-`@1.2` stay frozen and simply strip the
+// key.
+export const epicGetTaskContextsV13 = defineRpcContract({
+  method: "epic.getTaskContexts",
+  schemaVersion: { major: 1, minor: 3 } as const,
+  requestSchema: getTaskContextsRequestSchema,
+  responseSchema: getTaskContextsResponseSchemaPre14,
+});
+
+export const epicGetTaskContextsUpgradeV12ToV13 = defineUpgradePath<
+  typeof epicGetTaskContextsV12,
+  typeof epicGetTaskContextsV13
+>({
+  from: epicGetTaskContextsV12.schemaVersion,
+  to: epicGetTaskContextsV13.schemaVersion,
+  upgradeRequest: (request) => request,
+  // No synthesized `localHomedTaskIds`. An older host did not answer the
+  // question, and absence already means "cloud or unknown" - which is the
+  // reading that keeps the pin action enabled, so inventing an id list here
+  // would be indistinguishable from the defect.
+  upgradeResponse: (response) => response,
+});
+
+// `@1.4` adds a sibling activity map. The `tasks` record value remains the
+// frozen @1.2 shape; a negotiated older peer strips the new sibling.
+export const epicGetTaskContextsV14 = defineRpcContract({
+  method: "epic.getTaskContexts",
+  schemaVersion: { major: 1, minor: 4 } as const,
+  requestSchema: getTaskContextsRequestSchema,
+  responseSchema: getTaskContextsResponseSchema,
+});
+
+export const epicGetTaskContextsUpgradeV13ToV14 = defineUpgradePath<
+  typeof epicGetTaskContextsV13,
+  typeof epicGetTaskContextsV14
+>({
+  from: epicGetTaskContextsV13.schemaVersion,
+  to: epicGetTaskContextsV14.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+/**
+ * A v1.0 caller cannot represent the v1.1 row union. Host dispatch uses this
+ * at the negotiated-version boundary, preserving its released nullable wire
+ * shape while the canonical resolver continues to return the latest contract.
+ * (The v1.2 sibling key needs no projection of its own: a v1.0 body drops it
+ * here, and a v1.1 peer's frozen schema strips it at parse time.)
+ */
+export function projectEpicGetTaskContextsResponseToV10(
+  response: GetTaskContextsResponse,
+): GetTaskContextsResponseV10 {
+  return {
+    tasks: Object.fromEntries(
+      Object.entries(response.tasks).map(([taskId, resolution]) => [
+        taskId,
+        isFoundTaskContext(resolution) ? resolution.task : null,
+      ]),
+    ),
+  };
+}
+
+// `epic.create@1.0` - host-side entry point for the CloudData epic create
+// mutation. The host request accepts local workspace paths before they are
+// stamped with the persisted device ID; the resolver normalizes those before
+// calling the stricter CloudData HTTP contract.
+export const epicCreateV10 = defineRpcContract({
+  method: "epic.create",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: createEpicRequestSchema,
+  responseSchema: createEpicResponseSchemaPre11,
+});
+
+/**
+ * `epic.create@1.1` - the create refusal, carried as data.
+ *
+ * The host's local-store create refusal was THROWN and flattened to an
+ * `RPC_ERROR` string. `LOCAL_STORE_UNAVAILABLE` is not an `RPC_ERROR_CODES`
+ * member, so the client could not recover the remedy from prose and could only
+ * surface the sentence - no Repair action, no branch on the cause. This minor
+ * gives the refusal the same treatment the open path already gives it
+ * (`SnapshotFetchError.localStoreRemedy`) and `host.rebindLocalStore` already
+ * gives its own refusal.
+ *
+ * The response grows by an optional key rather than gaining a `status` union
+ * arm; `createEpicResponseSchema`'s own note has the reasoning, and the short
+ * version is that a shape change on a floor method costs a major whose
+ * downgrade could not represent a refusal anyway.
+ */
+export const epicCreateV11 = defineRpcContract({
+  method: "epic.create",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: createEpicRequestSchema,
+  responseSchema: createEpicResponseSchema,
+});
+
+export const epicCreateUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicCreateV10,
+  typeof epicCreateV11
+>({
+  from: epicCreateV10.schemaVersion,
+  to: epicCreateV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  // No synthesized `refusal`. A `@1.0` host that could not create THREW, and
+  // that error is already travelling its own path; manufacturing a refusal
+  // here would invent a `kind` and a `remedy` this host never said, and the
+  // client would offer a Repair action on a guess.
+  upgradeResponse: (response) => response,
+});
+
+/**
+ * `epic.create@1.2` - images by reference, and the worktree off the response
+ * path.
+ *
+ * Two optional REQUEST fields, both on new instances forked down to the
+ * initial-message leaf (`createEpicRequestSchemaV12`, and the freeze argument
+ * in `unary-schemas.ts`) - but they are not the same KIND of field, and the
+ * distinction matters to anyone setting them.
+ *
+ * `chat.initialMessage.attachmentsByHash` STATES A PROPERTY OF THE DOCUMENT:
+ * that its `imageAttachment` nodes are hash-only, so the host must resolve
+ * them from the requester's draft blob tier before the commit point. Both
+ * create surfaces derive it from the content they are dispatching rather than
+ * electing it, so it is never a caller-chosen mode.
+ *
+ * `chat.deferWorktreeProvisioning` IS the caller-chosen one: a caller that
+ * owns a resend and a setup card opts out of a synchronous `git worktree add`
+ * inside the response.
+ *
+ * One RESPONSE change: `refusal` is re-typed onto `epicCreateRefusalKindSchemaV12`,
+ * which adds `missing-attachment-bytes`. A value added to the released enum
+ * would be a BLOCKING same-version change on a host→client slot - every `@1.1`
+ * client fails the whole response parse on a kind it does not know - so the
+ * kind arrives with this minor, on this minor's own instances, and the host
+ * emits it only at a negotiated minor that can carry it.
+ */
+export const epicCreateV12 = defineRpcContract({
+  method: "epic.create",
+  schemaVersion: { major: 1, minor: 2 } as const,
+  requestSchema: createEpicRequestSchemaV12,
+  responseSchema: createEpicResponseSchemaV12,
+});
+
+// Both `@1.2` request fields are ADDITIVE OPTIONALS, so a `@1.1` request
+// already satisfies the `@1.2` schema and the request upgrade is the identity -
+// absence reads as `false`, which is exactly what a `@1.1` caller meant: it
+// uploaded nothing by hash and it expects a worktree the response waited for.
+//
+// The response upgrade is the identity too, and deliberately so: the only
+// difference is the WIDER refusal enum, and every `@1.1` refusal kind is a
+// `@1.2` refusal kind. Nothing to synthesize in either direction.
+//
+// One exception since the `@1.2` initial message grew `sentFromHostId`: a
+// `@1.1` caller's folded chat names no machine, so the upgrade fills the
+// honest `null` on its initial message and leaves everything else as sent.
+export const epicCreateUpgradeV11ToV12 = defineUpgradePath<
+  typeof epicCreateV11,
+  typeof epicCreateV12
+>({
+  from: epicCreateV11.schemaVersion,
+  to: epicCreateV12.schemaVersion,
+  upgradeRequest: (request) => ({
+    ...request,
+    chat:
+      request.chat === null || request.chat === undefined
+        ? request.chat
+        : {
+            ...request.chat,
+            initialMessage:
+              request.chat.initialMessage === null
+                ? null
+                : { ...request.chat.initialMessage, sentFromHostId: null },
+          },
+  }),
+  upgradeResponse: (response) => response,
+});
+
+/**
+ * `epic.create@1.3` - the epic's owner: `owner` names the person
+ * or one of their teams, `null` the person. The request is a stripping object,
+ * so the field is additive and rides a minor; the response is `@1.2`'s,
+ * unchanged.
+ */
+export const epicCreateV13 = defineRpcContract({
+  method: "epic.create",
+  schemaVersion: { major: 1, minor: 3 } as const,
+  requestSchema: createEpicRequestSchemaV13,
+  responseSchema: createEpicResponseSchemaV12,
+});
+
+// A `@1.2` caller named no owner, which is the person: the upgrade fills the
+// honest `null`. The response is the same instance both sides.
+export const epicCreateUpgradeV12ToV13 = defineUpgradePath<
+  typeof epicCreateV12,
+  typeof epicCreateV13
+>({
+  from: epicCreateV12.schemaVersion,
+  to: epicCreateV13.schemaVersion,
+  upgradeRequest: (request) => ({ ...request, owner: null }),
+  upgradeResponse: (response) => response,
+});
+
+// `epic.batchDelete@1.0` - host-side entry point for the CloudData
+// task batch-delete mutation (POST /api/tasks/batch-delete). Accepts a
+// mixed list of epic and phase ids; returns per-id success/error details.
+// Single-row deletions reuse this contract by passing a one-element `ids`
+// array, so there is no parallel single-id host RPC.
+export const epicBatchDeleteV10 = defineRpcContract({
+  method: "epic.batchDelete",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: batchDeleteRequestSchema,
+  responseSchema: batchDeleteResponseSchemaPre11,
+});
+
+// `@1.1` states the durability `home` each deletion landed in, per id. The
+// request is unchanged. See `unary-schemas.ts` for why the tombstone SCOPE is
+// unanswerable without it, and why a batch needs the marker per row rather
+// than per response.
+export const epicBatchDeleteV11 = defineRpcContract({
+  method: "epic.batchDelete",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: batchDeleteRequestSchema,
+  responseSchema: batchDeleteResponseSchema,
+});
+
+export const epicBatchDeleteUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicBatchDeleteV10,
+  typeof epicBatchDeleteV11
+>({
+  from: epicBatchDeleteV10.schemaVersion,
+  to: epicBatchDeleteV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  // `home` stays ABSENT on every upgraded row. The marker licenses an
+  // ACCOUNT-WIDE tombstone, which is the destructive direction, and a `@1.0`
+  // host produced no evidence for it - so absence must keep meaning "scope
+  // this to the host that issued the delete", exactly as a released client
+  // already reads it.
+  upgradeResponse: (response) => ({
+    results: response.results.map((result) => ({ ...result })),
+  }),
+});
+
+export const epicRemoveRepoV10 = defineRpcContract({
+  method: "epic.removeRepo",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: removeEpicRepoRequestSchema,
+  responseSchema: removeEpicRepoResponseSchema,
+});
+
+export const epicMentionEpicsV10 = defineRpcContract({
+  method: "epic.mentionEpics",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: epicMentionEpicsRequestSchema,
+  responseSchema: epicMentionEpicsResponseSchema,
+});
+
+export const epicMentionSpecsV10 = defineRpcContract({
+  method: "epic.mentionSpecs",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: epicMentionArtifactsRequestSchema,
+  responseSchema: epicMentionSpecsResponseSchema,
+});
+
+export const epicMentionTicketsV10 = defineRpcContract({
+  method: "epic.mentionTickets",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: epicMentionArtifactsRequestSchema,
+  responseSchema: epicMentionTicketsResponseSchema,
+});
+
+export const epicMentionStoriesV10 = defineRpcContract({
+  method: "epic.mentionStories",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: epicMentionArtifactsRequestSchema,
+  responseSchema: epicMentionStoriesResponseSchema,
+});
+
+export const epicMentionReviewsV10 = defineRpcContract({
+  method: "epic.mentionReviews",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: epicMentionArtifactsRequestSchema,
+  responseSchema: epicMentionReviewsResponseSchema,
+});
+
+/**
+ * HTML artifacts, canvases and files joined the `@` picker after the released
+ * floor was frozen, so they ride one optional method (registered with
+ * `degrade: { kind: "unsupported" }`): a host that predates it simply lists
+ * none, and the picker still shows the four markdown kinds.
+ */
+export const epicMentionArtifactsV10 = defineRpcContract({
+  method: "epic.mentionArtifacts",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: epicMentionArtifactsRequestSchema,
+  responseSchema: epicMentionArtifactsResponseSchema,
+});
+
+/**
+ * The task's hosts, each with its owner principal and whether the reading
+ * host's principal reaches it: a pass-through of traycer-server's task host
+ * list with the request's own credential. Optional (non-floor): a host without
+ * it degrades `unsupported`, and the client shows no host list.
+ */
+export const epicListTaskHostsV10 = defineRpcContract({
+  method: "epic.listTaskHosts",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: listTaskHostsRequestSchema,
+  responseSchema: listTaskHostsResponseSchema,
+});
+
+// `epic.listCollaborators@1.0` - host-side entry point for the
+// CloudData epic-collaborators query, on the hand-frozen released row.
+export const epicListCollaboratorsV10 = defineRpcContract({
+  method: "epic.listCollaborators",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: listEpicCollaboratorsRequestSchema,
+  responseSchema: listEpicCollaboratorsResponseSchemaPre11,
+});
+
+// `epic.listCollaborators@1.1` adds `environmentId` to each row (Tracy Bots):
+// the environment whose principal owns the task, on that Owner row only.
+export const epicListCollaboratorsV11 = defineRpcContract({
+  method: "epic.listCollaborators",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: listEpicCollaboratorsRequestSchema,
+  responseSchema: listEpicCollaboratorsResponseSchema,
+});
+
+/**
+ * A 1.0 host knows no environment owner: each of its rows upgrades with
+ * `environmentId: null`, which renders as today's plain team share.
+ */
+function upgradeCollaboratorListV10ToV11(
+  response: ListEpicCollaboratorsResponsePre11,
+): ListEpicCollaboratorsResponse {
+  return {
+    ...response,
+    collaborators: response.collaborators.map((entry) => ({
+      ...entry,
+      environmentId: null,
+    })),
+  };
+}
+
+export const epicListCollaboratorsUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicListCollaboratorsV10,
+  typeof epicListCollaboratorsV11
+>({
+  from: epicListCollaboratorsV10.schemaVersion,
+  to: epicListCollaboratorsV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: upgradeCollaboratorListV10ToV11,
+});
+
+// Artifact mutations - resolver bodies added in subsequent tickets.
+export const epicCreateArtifactV10 = defineRpcContract({
+  method: "epic.createArtifact",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: createArtifactRequestSchemaPreHtml,
+  responseSchema: createArtifactResponseSchema,
+});
+
+/** 1.1 adds the new artifact kinds; 1.0 keeps its frozen schemas. */
+export const epicCreateArtifactV11 = defineRpcContract({
+  method: "epic.createArtifact",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: createArtifactRequestSchema,
+  responseSchema: createArtifactResponseSchema,
+});
+export const epicCreateArtifactUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicCreateArtifactV10,
+  typeof epicCreateArtifactV11
+>({
+  from: epicCreateArtifactV10.schemaVersion,
+  to: epicCreateArtifactV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+export const epicDeleteArtifactV10 = defineRpcContract({
+  method: "epic.deleteArtifact",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: deleteArtifactRequestSchema,
+  responseSchema: deleteArtifactResponseSchema,
+});
+
+export const epicUpdateArtifactStatusV10 = defineRpcContract({
+  method: "epic.updateArtifactStatus",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: updateArtifactStatusRequestSchema,
+  responseSchema: updateArtifactStatusResponseSchema,
+});
+
+export const epicRenameArtifactV10 = defineRpcContract({
+  method: "epic.renameArtifact",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: renameArtifactRequestSchema,
+  responseSchema: renameArtifactResponseSchema,
+});
+
+export const epicReparentArtifactV10 = defineRpcContract({
+  method: "epic.reparentArtifact",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: reparentArtifactRequestSchema,
+  responseSchema: reparentArtifactResponseSchema,
+});
+
+// Chat mutations - resolver bodies added in subsequent tickets.
+export const epicCreateChatV10 = defineRpcContract({
+  method: "epic.createChat",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: createChatRequestSchema,
+  responseSchema: createChatResponseSchema,
+});
+
+// v1.1 widens `forkSource` to a discriminated union (chat-sync-v2 ticket 34B1):
+// the existing precise-boundary shape, tagged `boundary: "assistantMessage"`,
+// beside a new `boundary: "latest"` variant that names only the source chat -
+// the host resolves the boundary itself via `buildLatestCheckpointForkSeed`.
+// This is a NEW MINOR, not an in-place edit of `epicCreateChatV10`: unlike
+// the cloud-chat-read methods introduced on this same train (whose {1,0}
+// never shipped), `epic.createChat@1.0` is already in released hosts, so its
+// shape is frozen. See `createChatForkSourceSchemaV11`'s doc in
+// `unary-schemas.ts`.
+export const epicCreateChatV11 = defineRpcContract({
+  method: "epic.createChat",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: createChatRequestSchemaV11,
+  responseSchema: createChatResponseSchema,
+});
+
+// A v1.0 request's `forkSource` (when present) is always the precise-boundary
+// shape - it is the ONLY shape v1.0 could ever send - so the upgrade tags it
+// `boundary: "assistantMessage"` and leaves every other field untouched.
+// `null`/`undefined` pass through unchanged (no fork requested). The response
+// is identical between the two minors.
+//
+// `sourceOwnerUserId` is filled with the honest `null` - "the client genuinely
+// does not know who owns this" - which the host reads as "no hint" and falls
+// back to its own registry facts exactly as before. A v1.0 caller has no owner
+// hint to give: the field did not exist on its fork source at all.
+export const epicCreateChatUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicCreateChatV10,
+  typeof epicCreateChatV11
+>({
+  from: epicCreateChatV10.schemaVersion,
+  to: epicCreateChatV11.schemaVersion,
+  upgradeRequest: (request) => ({
+    ...request,
+    forkSource:
+      request.forkSource === null || request.forkSource === undefined
+        ? request.forkSource
+        : // Named fields, not `{boundary, ...request.forkSource}`: a spread
+          // AFTER the tag is only safe because a v1.0 request's `forkSource`
+          // never carries its own `boundary` key today, a fact that requires
+          // reading `unary-schemas.ts` to know - constructed explicitly here
+          // so it stays correct even if that stops being true.
+          {
+            boundary: "assistantMessage" as const,
+            sourceChatId: request.forkSource.sourceChatId,
+            assistantMessageId: request.forkSource.assistantMessageId,
+            interviewBlockId: request.forkSource.interviewBlockId,
+            carriedInterviews: request.forkSource.carriedInterviews,
+            sourceOwnerUserId: null,
+          },
+  }),
+  upgradeResponse: (response) => response,
+});
+
+/**
+ * `epic.createChat@1.2` - the `epic.create@1.2` pair of request fields, and the
+ * first `refusal` this method has ever carried.
+ *
+ * The request is `createChatRequestSchemaV11` extended (never the `@1.0` base,
+ * or `@1.1`'s widened `forkSource` would be silently re-narrowed); the response
+ * grows an optional `refusal` over the same `@1.2` refusal instance
+ * `epic.create@1.2` uses, because the two methods now share the failure mode
+ * that produces it.
+ *
+ * A `refusal` on THIS method needs the emission gate even more than
+ * `epic.create`'s did: `@1.0` and `@1.1` have no such key, so a stripped
+ * refusal leaves `{ chatId }` - a body that reads as a chat that exists. The
+ * host emits it only at a negotiated minor >= 2 and throws below that.
+ */
+export const epicCreateChatV12 = defineRpcContract({
+  method: "epic.createChat",
+  schemaVersion: { major: 1, minor: 2 } as const,
+  requestSchema: createChatRequestSchemaV12,
+  responseSchema: createChatResponseSchemaV12,
+});
+
+// The response upgrade is the identity, for the same reason as
+// `epicCreateUpgradeV11ToV12`'s: it only GAINS an optional key a `@1.1` host
+// never set. The request upgrade fills the one `@1.2` key that is not an
+// additive optional: a `@1.1` caller's initial message names no machine, so
+// its `sentFromHostId` is the honest `null`. `attachmentsByHash` and
+// `deferWorktreeProvisioning` stay absent, which already means `false`.
+export const epicCreateChatV13 = defineRpcContract({
+  method: "epic.createChat",
+  schemaVersion: { major: 1, minor: 3 } as const,
+  requestSchema: createChatRequestSchemaV13,
+  responseSchema: createChatResponseSchemaV12,
+});
+
+// Both upgrades are the identity: `@1.3` only gains an optional request key a
+// `@1.2` caller never sends, and its response is `@1.2`'s.
+export const epicCreateChatUpgradeV12ToV13 = defineUpgradePath<
+  typeof epicCreateChatV12,
+  typeof epicCreateChatV13
+>({
+  from: epicCreateChatV12.schemaVersion,
+  to: epicCreateChatV13.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+export const epicCreateChatUpgradeV11ToV12 = defineUpgradePath<
+  typeof epicCreateChatV11,
+  typeof epicCreateChatV12
+>({
+  from: epicCreateChatV11.schemaVersion,
+  to: epicCreateChatV12.schemaVersion,
+  upgradeRequest: (request) => ({
+    ...request,
+    initialMessage:
+      request.initialMessage === null || request.initialMessage === undefined
+        ? request.initialMessage
+        : { ...request.initialMessage, sentFromHostId: null },
+  }),
+  upgradeResponse: (response) => response,
+});
+
+export const epicRenameChatV10 = defineRpcContract({
+  method: "epic.renameChat",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: renameChatRequestSchema,
+  responseSchema: renameChatResponseSchema,
+});
+
+// Optional (non-floor) capability: persists a chat's run settings without a
+// send. See the schema doc in `unary-schemas.ts`.
+export const epicUpdateChatRunSettingsV10 = defineRpcContract({
+  method: "epic.updateChatRunSettings",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: updateChatRunSettingsRequestSchema,
+  responseSchema: updateChatRunSettingsResponseSchema,
+});
+
+// v1.1 tightens `settings` to the wire-strict tuple (no zod-default
+// backstops): a subset-field patch is a validation error at the canonical
+// minor instead of a silent null-clobber. Shipped as a minor so the loose
+// v1.0 shape stays an explicitly bridged legacy line rather than the live
+// contract. See `updateChatRunSettingsRequestSchemaV11`.
+export const epicUpdateChatRunSettingsV11 = defineRpcContract({
+  method: "epic.updateChatRunSettings",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: updateChatRunSettingsRequestSchemaV11,
+  responseSchema: updateChatRunSettingsResponseSchema,
+});
+
+// A parsed v1.0 request has already materialized the loose schema's defaults
+// (serviceTier/profileId -> null), so it satisfies the strict tuple as-is;
+// the request upgrade is the identity. The response is unchanged.
+export const epicUpdateChatRunSettingsUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicUpdateChatRunSettingsV10,
+  typeof epicUpdateChatRunSettingsV11
+>({
+  from: epicUpdateChatRunSettingsV10.schemaVersion,
+  to: epicUpdateChatRunSettingsV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+// Optional (non-floor) capability: narrow profile-only settings update - the
+// host patches its own authoritative persisted tuple. See the schema doc in
+// `unary-schemas.ts` for why no sibling model/harness update exists.
+export const epicUpdateChatProfileV10 = defineRpcContract({
+  method: "epic.updateChatProfile",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: updateChatProfileRequestSchema,
+  responseSchema: updateChatProfileResponseSchema,
+});
+
+export const epicDeleteChatV10 = defineRpcContract({
+  method: "epic.deleteChat",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: deleteChatRequestSchema,
+  responseSchema: deleteChatResponseSchemaV10,
+});
+
+export const epicDeleteChatV11 = defineRpcContract({
+  method: "epic.deleteChat",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: deleteChatRequestSchema,
+  responseSchema: deleteChatResponseSchemaV11,
+});
+
+// v1.2 adds `outcome`: whether the receiving host enacted the delete on its own
+// record (`applied`) or, not being the owner, wrote it to the cloud row for the
+// owner to finish (`requested`). See `agentRecordWriteOutcomeSchema`.
+export const epicDeleteChatV12 = defineRpcContract({
+  method: "epic.deleteChat",
+  schemaVersion: { major: 1, minor: 2 } as const,
+  requestSchema: deleteChatRequestSchema,
+  responseSchema: deleteChatResponseSchema,
+});
+
+export const epicDeleteChatUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicDeleteChatV10,
+  typeof epicDeleteChatV11
+>({
+  from: epicDeleteChatV10.schemaVersion,
+  to: epicDeleteChatV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => ({ ...response, publicationChatId: null }),
+});
+
+// A peer on 1.1 or earlier has no non-owner branch: it only ever enacts the
+// delete on its own record, so its answer is `applied`.
+export const epicDeleteChatUpgradeV11ToV12 = defineUpgradePath<
+  typeof epicDeleteChatV11,
+  typeof epicDeleteChatV12
+>({
+  from: epicDeleteChatV11.schemaVersion,
+  to: epicDeleteChatV12.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => ({ ...response, outcome: "applied" }),
+});
+
+export const epicReparentChatV10 = defineRpcContract({
+  method: "epic.reparentChat",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: reparentChatRequestSchema,
+  responseSchema: reparentChatResponseSchema,
+});
+
+// Optional (non-floor) capability: durable host-backed archive toggle for a
+// chat or terminal-agent record. Registered with a `degrade: unsupported`
+// strategy (see registry.ts) so an old host that lacks it fails only this
+// call - it must never enter the released floor, which would be
+// handshake-fatal for existing peers. See the schema doc in `unary-schemas.ts`.
+export const epicSetChatArchivedV10 = defineRpcContract({
+  method: "epic.setChatArchived",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: setChatArchivedRequestSchema,
+  responseSchema: setChatArchivedResponseSchemaV10,
+});
+
+// v1.1 adds `outcome` (see `agentRecordWriteOutcomeSchema`). Still optional:
+// the method keeps its `degrade: unsupported` registration.
+export const epicSetChatArchivedV11 = defineRpcContract({
+  method: "epic.setChatArchived",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: setChatArchivedRequestSchema,
+  responseSchema: setChatArchivedResponseSchema,
+});
+
+// A 1.0 peer only ever enacts the archive on its own record.
+export const epicSetChatArchivedUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicSetChatArchivedV10,
+  typeof epicSetChatArchivedV11
+>({
+  from: epicSetChatArchivedV10.schemaVersion,
+  to: epicSetChatArchivedV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => ({ ...response, outcome: "applied" }),
+});
+
+/**
+ * Optional (non-floor) capability - see the registry entry for why a new method
+ * NAME may only ride the optional channel. Old source hosts simply do not
+ * advertise it, the caller gets `E_HOST_UNSUPPORTED` for this call alone, and
+ * the fork dialog treats that as "unknown" rather than as "unpublished".
+ */
+export const epicChatPublicationStateV10 = defineRpcContract({
+  method: "epic.chatPublicationState",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: chatPublicationStateRequestSchema,
+  responseSchema: chatPublicationStateResponseSchema,
+});
+
+/**
+ * Optional (non-floor) capability: a new method NAME rides the optional
+ * channel, so a host that predates it answers `E_HOST_UNSUPPORTED` for this
+ * call alone and the handshake is untouched.
+ */
+export const epicAttachEnvironmentV10 = defineRpcContract({
+  method: "epic.attachEnvironment",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: attachEnvironmentRequestSchema,
+  responseSchema: attachEnvironmentResponseSchema,
+});
+
+/**
+ * Optional (non-floor): the host's local History contribution, read with no
+ * cloud call. See `local-history.ts`.
+ */
+export const epicLocalHistoryReadV10 = defineRpcContract({
+  method: "epic.localHistory.read",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: localHistoryReadRequestSchema,
+  responseSchema: localHistoryReadResponseSchema,
+});
+
+export const epicPrepareArtifactImageV10 = defineRpcContract({
+  method: "epic.prepareArtifactImage",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: prepareArtifactImageRequestSchema,
+  responseSchema: prepareArtifactImageResponseSchema,
+});
+
+export const epicFinishArtifactImageV10 = defineRpcContract({
+  method: "epic.finishArtifactImage",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: finishArtifactImageRequestSchema,
+  responseSchema: finishArtifactImageResponseSchema,
+});
+
+export const epicCreateTuiAgentV10 = defineRpcContract({
+  method: "epic.createTuiAgent",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  // Frozen: `host-v1.1.10` shipped this line. It pointed at the live request
+  // schema until then, which is how `forkSourceHarnessSessionId` grew an
+  // already-released contract.
+  requestSchema: createTuiAgentRequestSchemaV10,
+  responseSchema: createTuiAgentResponseSchema,
+});
+
+// v1.1 adds `forkSourceHarnessSessionId`: the upstream session a forked TUI
+// agent was minted from, persisted verbatim so a provider failure between PTY
+// spawn and destination-transcript establishment still has durable provenance
+// to retry the fork from. Folded onto this method as a minor rather than a new
+// method name, which would fatally fail the equal-set handshake against an
+// already-shipped host. See the RPC backward-compat decision log.
+export const epicCreateTuiAgentV11 = defineRpcContract({
+  method: "epic.createTuiAgent",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: createTuiAgentRequestSchema,
+  responseSchema: createTuiAgentResponseSchema,
+});
+
+export const epicDeleteTuiAgentV10 = defineRpcContract({
+  method: "epic.deleteTuiAgent",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: deleteTuiAgentRequestSchema,
+  responseSchema: deleteTuiAgentResponseSchemaV10,
+});
+
+// v1.1 adds `outcome` (see `agentRecordWriteOutcomeSchema`).
+export const epicDeleteTuiAgentV11 = defineRpcContract({
+  method: "epic.deleteTuiAgent",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: deleteTuiAgentRequestSchema,
+  responseSchema: deleteTuiAgentResponseSchema,
+});
+
+// A 1.0 peer only ever enacts the delete on its own record.
+export const epicDeleteTuiAgentUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicDeleteTuiAgentV10,
+  typeof epicDeleteTuiAgentV11
+>({
+  from: epicDeleteTuiAgentV10.schemaVersion,
+  to: epicDeleteTuiAgentV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => ({ ...response, outcome: "applied" }),
+});
+
+export const epicRenameTuiAgentV10 = defineRpcContract({
+  method: "epic.renameTuiAgent",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: renameTuiAgentRequestSchema,
+  responseSchema: renameTuiAgentResponseSchema,
+});
+
+// `epic.updateTitle@1.0` - uses the same updateEpicRequestSchema /
+// updateEpicResponseSchema instances as cloudDataRpcRegistry["epic.update"]
+// (enforced by epic-update-title-instance-identity.test.ts).
+export const epicUpdateTitleV10 = defineRpcContract({
+  method: "epic.updateTitle",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: updateEpicRequestSchema,
+  responseSchema: updateEpicResponseSchema,
+});
+
+// Collaborator mutations. Each answers the collaborator list after the
+// write; 1.1 carries the same `environmentId` row as
+// `epic.listCollaborators@1.1`, so a client that writes the answer into its
+// list cache keeps the Owner row. 1.0 answers the hand-frozen released row.
+export const epicGrantAccessV10 = defineRpcContract({
+  method: "epic.grantAccess",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: grantEpicAccessRequestSchema,
+  responseSchema: listEpicCollaboratorsResponseSchemaPre11,
+});
+
+export const epicGrantAccessV11 = defineRpcContract({
+  method: "epic.grantAccess",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: grantEpicAccessRequestSchema,
+  responseSchema: grantEpicAccessResponseSchema,
+});
+
+export const epicGrantAccessUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicGrantAccessV10,
+  typeof epicGrantAccessV11
+>({
+  from: epicGrantAccessV10.schemaVersion,
+  to: epicGrantAccessV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: upgradeCollaboratorListV10ToV11,
+});
+
+export const epicBatchUpdateRolesV10 = defineRpcContract({
+  method: "epic.batchUpdateRoles",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: batchUpdateEpicRolesRequestSchema,
+  responseSchema: listEpicCollaboratorsResponseSchemaPre11,
+});
+
+export const epicBatchUpdateRolesV11 = defineRpcContract({
+  method: "epic.batchUpdateRoles",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: batchUpdateEpicRolesRequestSchema,
+  responseSchema: batchUpdateEpicRolesResponseSchema,
+});
+
+export const epicBatchUpdateRolesUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicBatchUpdateRolesV10,
+  typeof epicBatchUpdateRolesV11
+>({
+  from: epicBatchUpdateRolesV10.schemaVersion,
+  to: epicBatchUpdateRolesV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: upgradeCollaboratorListV10ToV11,
+});
+
+export const epicRevokeCollaboratorV10 = defineRpcContract({
+  method: "epic.revokeCollaborator",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: revokeEpicCollaboratorRequestSchema,
+  responseSchema: listEpicCollaboratorsResponseSchemaPre11,
+});
+
+export const epicRevokeCollaboratorV11 = defineRpcContract({
+  method: "epic.revokeCollaborator",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: revokeEpicCollaboratorRequestSchema,
+  responseSchema: revokeEpicCollaboratorResponseSchema,
+});
+
+export const epicRevokeCollaboratorUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicRevokeCollaboratorV10,
+  typeof epicRevokeCollaboratorV11
+>({
+  from: epicRevokeCollaboratorV10.schemaVersion,
+  to: epicRevokeCollaboratorV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: upgradeCollaboratorListV10ToV11,
+});
+
+// Comment-thread mutations - gui-app authors threads against the same Y.Doc
+// the host's TiptapCollabProvider owns. Resolvers wrap the existing
+// `CommentThreadManager` mutation surface and return synchronous acks.
+
+export const epicCreateCommentThreadV10 = defineRpcContract({
+  method: "epic.createCommentThread",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: createCommentThreadRequestSchemaPreHtml,
+  responseSchema: createCommentThreadResponseSchema,
+});
+
+/** 1.1 adds the new artifact kinds; 1.0 keeps its frozen schemas. */
+export const epicCreateCommentThreadV11 = defineRpcContract({
+  method: "epic.createCommentThread",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: createCommentThreadRequestSchemaPreAnchor,
+  responseSchema: createCommentThreadResponseSchema,
+});
+export const epicCreateCommentThreadUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicCreateCommentThreadV10,
+  typeof epicCreateCommentThreadV11
+>({
+  from: epicCreateCommentThreadV10.schemaVersion,
+  to: epicCreateCommentThreadV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+/** 1.2 adds the element/text anchors; 1.1 keeps its frozen schemas. */
+export const epicCreateCommentThreadV12 = defineRpcContract({
+  method: "epic.createCommentThread",
+  schemaVersion: { major: 1, minor: 2 } as const,
+  requestSchema: createCommentThreadRequestSchemaPreCanvasPoint,
+  responseSchema: createCommentThreadResponseSchema,
+});
+export const epicCreateCommentThreadUpgradeV11ToV12 = defineUpgradePath<
+  typeof epicCreateCommentThreadV11,
+  typeof epicCreateCommentThreadV12
+>({
+  from: epicCreateCommentThreadV11.schemaVersion,
+  to: epicCreateCommentThreadV12.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+/**
+ * 1.3 adds the canvas-point anchor; 1.2 keeps its frozen union. The GUI
+ * refuses a point draft below 1.3 instead of sending a request the host's
+ * discriminated union rejects.
+ */
+export const epicCreateCommentThreadV13 = defineRpcContract({
+  method: "epic.createCommentThread",
+  schemaVersion: { major: 1, minor: 3 } as const,
+  requestSchema: createCommentThreadRequestSchema,
+  responseSchema: createCommentThreadResponseSchema,
+});
+export const epicCreateCommentThreadUpgradeV12ToV13 = defineUpgradePath<
+  typeof epicCreateCommentThreadV12,
+  typeof epicCreateCommentThreadV13
+>({
+  from: epicCreateCommentThreadV12.schemaVersion,
+  to: epicCreateCommentThreadV13.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+export const epicReplyToCommentThreadV10 = defineRpcContract({
+  method: "epic.replyToCommentThread",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: replyToCommentThreadRequestSchemaPreHtml,
+  responseSchema: replyToCommentThreadResponseSchema,
+});
+
+/** 1.1 adds the new artifact kinds; 1.0 keeps its frozen schemas. */
+export const epicReplyToCommentThreadV11 = defineRpcContract({
+  method: "epic.replyToCommentThread",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: replyToCommentThreadRequestSchema,
+  responseSchema: replyToCommentThreadResponseSchema,
+});
+export const epicReplyToCommentThreadUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicReplyToCommentThreadV10,
+  typeof epicReplyToCommentThreadV11
+>({
+  from: epicReplyToCommentThreadV10.schemaVersion,
+  to: epicReplyToCommentThreadV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+export const epicEditCommentV10 = defineRpcContract({
+  method: "epic.editComment",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: editCommentRequestSchemaPreHtml,
+  responseSchema: editCommentResponseSchema,
+});
+
+/** 1.1 adds the new artifact kinds; 1.0 keeps its frozen schemas. */
+export const epicEditCommentV11 = defineRpcContract({
+  method: "epic.editComment",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: editCommentRequestSchema,
+  responseSchema: editCommentResponseSchema,
+});
+export const epicEditCommentUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicEditCommentV10,
+  typeof epicEditCommentV11
+>({
+  from: epicEditCommentV10.schemaVersion,
+  to: epicEditCommentV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+export const epicDeleteCommentV10 = defineRpcContract({
+  method: "epic.deleteComment",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: deleteCommentRequestSchemaPreHtml,
+  responseSchema: deleteCommentResponseSchema,
+});
+
+/** 1.1 adds the new artifact kinds; 1.0 keeps its frozen schemas. */
+export const epicDeleteCommentV11 = defineRpcContract({
+  method: "epic.deleteComment",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: deleteCommentRequestSchema,
+  responseSchema: deleteCommentResponseSchema,
+});
+export const epicDeleteCommentUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicDeleteCommentV10,
+  typeof epicDeleteCommentV11
+>({
+  from: epicDeleteCommentV10.schemaVersion,
+  to: epicDeleteCommentV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+export const epicSetCommentThreadResolvedV10 = defineRpcContract({
+  method: "epic.setCommentThreadResolved",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: setCommentThreadResolvedRequestSchemaPreHtml,
+  responseSchema: setCommentThreadResolvedResponseSchema,
+});
+
+/** 1.1 adds the new artifact kinds; 1.0 keeps its frozen schemas. */
+export const epicSetCommentThreadResolvedV11 = defineRpcContract({
+  method: "epic.setCommentThreadResolved",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: setCommentThreadResolvedRequestSchema,
+  responseSchema: setCommentThreadResolvedResponseSchema,
+});
+export const epicSetCommentThreadResolvedUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicSetCommentThreadResolvedV10,
+  typeof epicSetCommentThreadResolvedV11
+>({
+  from: epicSetCommentThreadResolvedV10.schemaVersion,
+  to: epicSetCommentThreadResolvedV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+export const epicDeleteCommentThreadV10 = defineRpcContract({
+  method: "epic.deleteCommentThread",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: deleteCommentThreadRequestSchemaPreHtml,
+  responseSchema: deleteCommentThreadResponseSchema,
+});
+
+/** 1.1 adds the new artifact kinds; 1.0 keeps its frozen schemas. */
+export const epicDeleteCommentThreadV11 = defineRpcContract({
+  method: "epic.deleteCommentThread",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: deleteCommentThreadRequestSchema,
+  responseSchema: deleteCommentThreadResponseSchema,
+});
+export const epicDeleteCommentThreadUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicDeleteCommentThreadV10,
+  typeof epicDeleteCommentThreadV11
+>({
+  from: epicDeleteCommentThreadV10.schemaVersion,
+  to: epicDeleteCommentThreadV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+export const epicListCommentThreadsV10 = defineRpcContract({
+  method: "epic.listCommentThreads",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: listCommentThreadsRequestSchemaPreHtml,
+  responseSchema: listCommentThreadsResponseSchemaPreAnchor,
+});
+
+/** 1.1 adds the new artifact kinds; 1.0 keeps its frozen schemas. */
+export const epicListCommentThreadsV11 = defineRpcContract({
+  method: "epic.listCommentThreads",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: listCommentThreadsRequestSchema,
+  responseSchema: listCommentThreadsResponseSchemaPreAnchor,
+});
+export const epicListCommentThreadsUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicListCommentThreadsV10,
+  typeof epicListCommentThreadsV11
+>({
+  from: epicListCommentThreadsV10.schemaVersion,
+  to: epicListCommentThreadsV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+/** 1.2 adds the anchor data fields; 1.1 keeps its frozen schemas. */
+export const epicListCommentThreadsV12 = defineRpcContract({
+  method: "epic.listCommentThreads",
+  schemaVersion: { major: 1, minor: 2 } as const,
+  requestSchema: listCommentThreadsRequestSchema,
+  responseSchema: listCommentThreadsResponseSchemaPreCanvasPoint,
+});
+export const epicListCommentThreadsUpgradeV11ToV12 = defineUpgradePath<
+  typeof epicListCommentThreadsV11,
+  typeof epicListCommentThreadsV12
+>({
+  from: epicListCommentThreadsV11.schemaVersion,
+  to: epicListCommentThreadsV12.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+/**
+ * 1.3 adds the canvas-point anchor kind, which is response VALUE growth
+ * over 1.2's frozen enum: the host projects a point thread to a
+ * whole-artifact anchor for pre-1.3 callers.
+ */
+export const epicListCommentThreadsV13 = defineRpcContract({
+  method: "epic.listCommentThreads",
+  schemaVersion: { major: 1, minor: 3 } as const,
+  requestSchema: listCommentThreadsRequestSchema,
+  responseSchema: listCommentThreadsResponseSchema,
+});
+export const epicListCommentThreadsUpgradeV12ToV13 = defineUpgradePath<
+  typeof epicListCommentThreadsV12,
+  typeof epicListCommentThreadsV13
+>({
+  from: epicListCommentThreadsV12.schemaVersion,
+  to: epicListCommentThreadsV13.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+// `epic.resolveArtifactByPath@1.0` - read-only local Y.Doc index walk mapping an
+// artifact `index.md` path to `{ artifactId, kind }` (root-prefix-agnostic, so
+// cross-machine links resolve). No editor gate - viewers may read.
+export const epicResolveArtifactByPathV10 = defineRpcContract({
+  method: "epic.resolveArtifactByPath",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: resolveArtifactByPathRequestSchema,
+  responseSchema: resolveArtifactByPathResponseSchemaPreHtml,
+});
+
+/** 1.1 adds the new artifact kinds; 1.0 keeps its frozen schemas. */
+export const epicResolveArtifactByPathV11 = defineRpcContract({
+  method: "epic.resolveArtifactByPath",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: resolveArtifactByPathRequestSchema,
+  responseSchema: resolveArtifactByPathResponseSchema,
+});
+export const epicResolveArtifactByPathUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicResolveArtifactByPathV10,
+  typeof epicResolveArtifactByPathV11
+>({
+  from: epicResolveArtifactByPathV10.schemaVersion,
+  to: epicResolveArtifactByPathV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+// `epic.searchArtifacts@1.0` - Epic-scoped artifact title/path/body search over
+// the epic's on-disk Markdown mirror + authoritative Y.Doc metadata. Optional
+// (non-floor): an old host lacks it in its optional manifest and returns
+// E_HOST_UNSUPPORTED for this call only, so the sidebar degrades to no search.
+export const epicSearchArtifactsV10 = defineRpcContract({
+  method: "epic.searchArtifacts",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: searchArtifactsRequestSchemaPreHtml,
+  responseSchema: searchArtifactsResponseSchemaPreHtml,
+});
+
+/** 1.1 adds the new artifact kinds; 1.0 keeps its frozen schemas. */
+export const epicSearchArtifactsV11 = defineRpcContract({
+  method: "epic.searchArtifacts",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: searchArtifactsRequestSchema,
+  responseSchema: searchArtifactsResponseSchema,
+});
+export const epicSearchArtifactsUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicSearchArtifactsV10,
+  typeof epicSearchArtifactsV11
+>({
+  from: epicSearchArtifactsV10.schemaVersion,
+  to: epicSearchArtifactsV11.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+// ---- Cloud chat reads (host as byte pipe) ------------------------------ //
+//
+// Five brand-new v1.0 methods, none on `RELEASED_FLOOR_METHOD_NAMES`, all
+// registered with `degrade: { kind: "unsupported" }` in `registry.ts` - a new
+// method NAME is handshake-fatal against a released peer, so the whole surface
+// rides the optional-capability channel.
+//
+// Missing-peer behavior is a designed state rather than a backstop: a host
+// without these answers `E_HOST_UNSUPPORTED`, and the client's contract is to
+// HIDE the cloud-chat surface (an absent list section, a dialog that states the
+// refusal in place) instead of rendering a failure. "This host cannot reach
+// cloud chats" is not an error a user can act on except by updating the host,
+// which is what the surface says.
+//
+// The split into five is the read pipeline itself, and each call is one step a
+// client cannot do for itself: list the rows, get the opaque head, pull ONE part
+// by digest, learn which payloads are fetchable, pull one payload. Everything
+// between those steps - gating on the head's version, checking each part's
+// length and digest, assembling in head order, presenting - happens in the
+// client, on bytes the host moved without reading. See `cloud-chat.ts`.
+
+export const epicListCloudChatsV10 = defineRpcContract({
+  method: "epic.listCloudChats",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: listCloudChatsRequestSchema,
+  responseSchema: listCloudChatsResponseSchema,
+});
+
+export const epicResolveCloudChatHeadV10 = defineRpcContract({
+  method: "epic.resolveCloudChatHead",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: resolveCloudChatHeadRequestSchema,
+  responseSchema: resolveCloudChatHeadResponseSchema,
+});
+
+export const epicReadCloudChatPartV10 = defineRpcContract({
+  method: "epic.readCloudChatPart",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: readCloudChatPartRequestSchema,
+  responseSchema: readCloudChatPartResponseSchema,
+});
+
+export const epicListCloudChatPayloadsV10 = defineRpcContract({
+  method: "epic.listCloudChatPayloads",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: listCloudChatPayloadsRequestSchema,
+  responseSchema: listCloudChatPayloadsResponseSchema,
+});
+
+export const epicReadCloudChatPayloadV10 = defineRpcContract({
+  method: "epic.readCloudChatPayload",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: readCloudChatPayloadRequestSchema,
+  responseSchema: readCloudChatPayloadResponseSchema,
+});
+
+// Visibility mutations sit beside the five cloud-chat reads. Same channel:
+// brand-new names, `{major:1, minor:0}`, `degrade: unsupported`. The five
+// reads plus these two freeze together at the next release. Request keys
+// use `taskId` (cloud-chat convention), not `epicId`.
+
+export const epicSetCloudChatVisibilityV10 = defineRpcContract({
+  method: "epic.setCloudChatVisibility",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: setCloudChatVisibilityRequestSchema,
+  responseSchema: setCloudChatVisibilityResponseSchema,
+});
+
+export const epicSetChatSharingDefaultV10 = defineRpcContract({
+  method: "epic.setChatSharingDefault",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: setChatSharingDefaultRequestSchema,
+  responseSchema: setChatSharingDefaultResponseSchema,
+});
+
+// ---- Publication identity (a host-LOCAL read, not a cloud read) -------- //
+//
+// Deliberately not one of the five above. Those forward cloud bytes the host
+// may not interpret and are registered unconditionally; this answers from the
+// host's own fork-redirect rows and exists only where a chat-sync publisher is
+// installed, so it degrades independently. See `chat-publication-identity.ts`
+// for what the mapping is and why folding a cloud list on `chatId` equality is
+// wrong exactly once - at a fork - in both directions at the same time.
+export const epicListChatPublicationTargetsV10 = defineRpcContract({
+  method: "epic.listChatPublicationTargets",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: listChatPublicationTargetsRequestSchema,
+  responseSchema: listChatPublicationTargetsResponseSchema,
+});
+
+export const epicChatBackupStatusV10 = defineRpcContract({
+  method: "epic.chatBackupStatus",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: chatBackupStatusRequestSchema,
+  responseSchema: chatBackupStatusResponseSchema,
+});
+
+// Doc-replica fallback for a chat with no cloud publication and an
+// unreachable owner. Optional, like the publication-identity read above: an
+// older host answers `E_HOST_UNSUPPORTED` and the client keeps today's
+// "Not published yet" notice.
+export const epicChatReplicaReadV10 = defineRpcContract({
+  method: "epic.chatReplicaRead",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: chatReplicaReadRequestSchema,
+  responseSchema: chatReplicaReadResponseSchema,
+});
+
+// The store-backed chat RECORD channel (chat-sync-v2 ticket 49). Optional, and
+// local like the two reads above it: it answers out of the host's own chat
+// registry, so a host that predates it has no second place to serve it from.
+// A client without it runs DOC-ONLY - exactly the record table that host's own
+// document produces - which is why the degrade arm needs no surface of its own.
+export const epicListChatRecordsV10 = defineRpcContract({
+  method: "epic.listChatRecords",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: listChatRecordsRequestSchema,
+  responseSchema: listChatRecordsResponseSchema,
+});
+
+// `@1.1` - the doc-remainder union, gated on the CALLER'S declaration that it
+// no longer holds an epic-doc replica. Mirrors `epic.listTuiAgents@1.1` field
+// for field; the reasoning lives beside the schemas in `chat-records.ts`.
+export const epicListChatRecordsV11 = defineRpcContract({
+  method: "epic.listChatRecords",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: listChatRecordsRequestV11Schema,
+  responseSchema: listChatRecordsResponseV11Schema,
+});
+
+/**
+ * Both fills are FACTS about a `@1.0` peer, not defaults - which is what makes
+ * the upgraded value safe to ACT on rather than merely well-typed.
+ *
+ * REQUEST, `hasDocReplica: true`: a caller speaking only `@1.0` predates the
+ * lane surface entirely - `@1.1` and `epic.state.subscribe` ship in the same
+ * `@traycer/protocol`, so there is no build that has one without the other. It
+ * therefore holds a doc replica, and the host must serve it registry rows only.
+ * A wrong guess here would hand the oldest clients in the fleet the
+ * duplicate-row conflict this whole minor exists to avoid.
+ *
+ * RESPONSE, `docResident: false`: a host serving `@1.0` returns REGISTRY ROWS
+ * ONLY by construction, so every row an older host can produce is
+ * registry-backed. A `@1.1` client reading an older host still has to union
+ * that host's doc map itself - the upgrade path cannot invent rows the wire
+ * never carried, and must not pretend it did.
+ */
+export const epicListChatRecordsUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicListChatRecordsV10,
+  typeof epicListChatRecordsV11
+>({
+  from: epicListChatRecordsV10.schemaVersion,
+  to: epicListChatRecordsV11.schemaVersion,
+  upgradeRequest: (request) => ({ ...request, hasDocReplica: true }),
+  upgradeResponse: (response) => ({
+    ...response,
+    chats: response.chats.map((row) => ({ ...row, docResident: false })),
+  }),
+});
+
+// `@1.2` puts the chat's cloud publication head on each row, so the poll that
+// repairs a lost stream delta carries the same freshness fact the delta does.
+// Request unchanged from `@1.1`; the addition is one optional nested key under
+// `chats[]`, which an older peer's schema strips - the `epic.listTasks@1.1`
+// shape exactly.
+export const epicListChatRecordsV12 = defineRpcContract({
+  method: "epic.listChatRecords",
+  schemaVersion: { major: 1, minor: 2 } as const,
+  requestSchema: listChatRecordsRequestV11Schema,
+  responseSchema: listChatRecordsResponseV12Schema,
+});
+
+/**
+ * The IDENTITY, in both directions.
+ *
+ * REQUEST: `@1.2` takes `@1.1`'s request unchanged, so there is nothing to
+ * fill.
+ *
+ * RESPONSE: a `@1.1` host never reported a head, so the upgrade leaves the key
+ * ABSENT rather than writing `null`. `null` is the newer wire's affirmative
+ * "this row has no publication", and an upgrade must not put an affirmative
+ * claim in an old peer's mouth - the `host.getInstallationInfo` convention.
+ * Absent says the only true thing: that host was never asked. Consumers read
+ * `head ?? null` and see no difference, which is why the distinction costs
+ * them nothing.
+ */
+export const epicListChatRecordsUpgradeV11ToV12 = defineUpgradePath<
+  typeof epicListChatRecordsV11,
+  typeof epicListChatRecordsV12
+>({
+  from: epicListChatRecordsV11.schemaVersion,
+  to: epicListChatRecordsV12.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+// `@1.3` gates the whole answer on a list revision the caller sends back: the
+// 20s poll re-encodes the entire registry today, and on a large epic that is a
+// multi-MB body per open tab per tick that is almost always identical to the
+// last one. Request grows by the stamp; response becomes `snapshot` (the
+// `@1.2` body plus the new keys) or `unchanged` (the stamp plus recency
+// patches). The reasoning lives beside the schemas in `chat-records.ts`.
+export const epicListChatRecordsV13 = defineRpcContract({
+  method: "epic.listChatRecords",
+  schemaVersion: { major: 1, minor: 3 } as const,
+  requestSchema: listChatRecordsRequestV13Schema,
+  responseSchema: listChatRecordsResponseV13Schema,
+});
+
+/**
+ * REQUEST, `knownRevision: null`: a `@1.2` caller holds no stamp because a
+ * `@1.2` host never issued one. The only value that is true, not a default.
+ *
+ * RESPONSE: a `@1.2` host can only ever have produced a snapshot, so `kind` is
+ * a FACT about that peer rather than a choice - the same shape as
+ * `epicListTuiAgentsUpgradeV11ToV12`'s `origin` derivation. `unchanged` is
+ * unreachable through this path by construction: the arm answers a question
+ * the older host was never asked.
+ *
+ * `listStamp: null` says that host issued no gating fact. Inventing an epoch
+ * would be worse than a null in a way the `head` convention does not cover:
+ * the client sends the stamp BACK, so a fabricated one would be
+ * indistinguishable from a real one at the next poll.
+ */
+export const epicListChatRecordsUpgradeV12ToV13 = defineUpgradePath<
+  typeof epicListChatRecordsV12,
+  typeof epicListChatRecordsV13
+>({
+  from: epicListChatRecordsV12.schemaVersion,
+  to: epicListChatRecordsV13.schemaVersion,
+  upgradeRequest: (request) => ({ ...request, knownRevision: null }),
+  upgradeResponse: (response) => ({
+    kind: "snapshot" as const,
+    listStamp: null,
+    chats: response.chats,
+  }),
+});
+
+// `@1.4` says on each row whether the serving host has dropped the chat's
+// records (`evicted`), so a client routes the chat's tile to the server pool
+// without a witness round trip. Request unchanged from `@1.3`; the row gains
+// one key, which an older peer's schema strips.
+export const epicListChatRecordsV14 = defineRpcContract({
+  method: "epic.listChatRecords",
+  schemaVersion: { major: 1, minor: 4 } as const,
+  requestSchema: listChatRecordsRequestV13Schema,
+  responseSchema: listChatRecordsResponseV14Schema,
+});
+
+/**
+ * REQUEST: the identity; `@1.4` takes `@1.3`'s request unchanged.
+ *
+ * RESPONSE, `evicted: false` on every snapshot row: a FACT about a `@1.3`
+ * host, which predates eviction and holds every chat it lists. The
+ * `unchanged` arm carries no rows and passes through.
+ */
+export const epicListChatRecordsUpgradeV13ToV14 = defineUpgradePath<
+  typeof epicListChatRecordsV13,
+  typeof epicListChatRecordsV14
+>({
+  from: epicListChatRecordsV13.schemaVersion,
+  to: epicListChatRecordsV14.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) =>
+    response.kind === "unchanged"
+      ? response
+      : {
+          ...response,
+          chats: response.chats.map((row) => ({ ...row, evicted: false })),
+        },
+});
+
+// Brings an evicted chat's records back onto its host before a message is
+// sent to it (`chat-hydration.ts`). Optional and off the released floor: a
+// host that predates it does not evict chats.
+export const epicHydrateChatV10 = defineRpcContract({
+  method: "epic.hydrateChat",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: hydrateChatRequestSchema,
+  responseSchema: hydrateChatResponseSchema,
+});
+
+// One chat image attachment's bytes, resolved by the VIEWER's tab host (local
+// disk store first, cloud blob pass-through second). Optional and off the
+// released floor like every other read above it: a host that predates it
+// answers `E_HOST_UNSUPPORTED` and the client falls back to the epic
+// doc-replica read, which is that host's only byte source anyway - so the
+// degrade arm is today's behavior, not a degraded one. See
+// `chat-attachment.ts` for why `chatId` is a required request field.
+export const epicReadChatAttachmentV10 = defineRpcContract({
+  method: "epic.readChatAttachment",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: readChatAttachmentRequestSchemaPre11,
+  responseSchema: readChatAttachmentResponseSchema,
+});
+
+// `@1.1` adds the `plane: "local-only"` request selector so a caller holding
+// no cloud verdict can ask for the DISK leg alone instead of having to skip
+// the whole read. Response is unchanged: a disk miss is already `missing`,
+// and that is the truthful answer for "not obtainable on the plane you asked
+// about" as much as for "not obtainable at all".
+export const epicReadChatAttachmentV11 = defineRpcContract({
+  method: "epic.readChatAttachment",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  requestSchema: readChatAttachmentRequestSchema,
+  responseSchema: readChatAttachmentResponseSchema,
+});
+
+// Host-local artifact history. Every method is optional/non-floor: a client
+// connected to a host that predates this family hides the History surfaces,
+// while the rest of the Epic remains fully usable.
+export const epicArtifactVersionsListV10 = defineRpcContract({
+  method: "epic.artifactVersions.list",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: artifactVersionsListRequestSchema,
+  responseSchema: artifactVersionsListResponseSchema,
+});
+
+export const epicArtifactVersionsGetBlobV10 = defineRpcContract({
+  method: "epic.artifactVersions.getBlob",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: artifactVersionsGetBlobRequestSchema,
+  responseSchema: artifactVersionsGetBlobResponseSchema,
+});
+
+export const epicArtifactVersionsRestoreV10 = defineRpcContract({
+  method: "epic.artifactVersions.restore",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: artifactVersionsRestoreRequestSchema,
+  responseSchema: artifactVersionsRestoreResponseSchema,
+});
+
+export const epicDeletedArtifactsListV10 = defineRpcContract({
+  method: "epic.deletedArtifacts.list",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: deletedArtifactsListRequestSchema,
+  responseSchema: deletedArtifactsListResponseSchema,
+});
+
+export const epicDeletedArtifactsReviveV10 = defineRpcContract({
+  method: "epic.deletedArtifacts.revive",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: deletedArtifactsReviveRequestSchema,
+  responseSchema: deletedArtifactsReviveResponseSchema,
+});
+
+export const epicArtifactVersionSettingsGetV10 = defineRpcContract({
+  method: "epic.artifactVersionSettings.get",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: artifactVersionSettingsGetRequestSchema,
+  responseSchema: artifactVersionSettingsGetResponseSchema,
+});
+
+export const epicArtifactVersionSettingsSetEnabledV10 = defineRpcContract({
+  method: "epic.artifactVersionSettings.setEnabled",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: artifactVersionSettingsSetEnabledRequestSchema,
+  responseSchema: artifactVersionSettingsCommandResponseSchema,
+});
+
+export const epicArtifactVersionSettingsSetRetentionPolicyV10 =
+  defineRpcContract({
+    method: "epic.artifactVersionSettings.setRetentionPolicy",
+    schemaVersion: { major: 1, minor: 0 } as const,
+    requestSchema: artifactVersionSettingsSetRetentionPolicyRequestSchema,
+    responseSchema: artifactVersionSettingsCommandResponseSchema,
+  });
+
+export const epicArtifactVersionSettingsClearHistoryV10 = defineRpcContract({
+  method: "epic.artifactVersionSettings.clearHistory",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: artifactVersionSettingsClearHistoryRequestSchema,
+  responseSchema: artifactVersionSettingsCommandResponseSchema,
+});
+
+export const epicReadChatAttachmentUpgradeV10ToV11 = defineUpgradePath<
+  typeof epicReadChatAttachmentV10,
+  typeof epicReadChatAttachmentV11
+>({
+  from: epicReadChatAttachmentV10.schemaVersion,
+  to: epicReadChatAttachmentV11.schemaVersion,
+  // No synthesized `plane`. An upgraded `@1.0` request asked for the released
+  // two-leg chain, and narrowing it here would silently withhold the cloud
+  // leg from a caller entitled to it - a blank image where one used to load.
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+// Artifact attachment bytes remain canonical in the root document during the
+// @2 rollout, but no longer travel on `epic.subscribe`. The artifact id is the
+// authorization subject; the hash is only a content address.
+export const epicFetchArtifactAttachmentV10 = defineRpcContract({
+  method: "epic.fetchArtifactAttachment",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: fetchArtifactAttachmentRequestSchema,
+  responseSchema: fetchArtifactAttachmentResponseSchema,
+});
+
+// The per-chat run-settings tuple the row above deliberately does not carry.
+// Optional and host-local for the same reason as the list: it answers out of
+// this host's own chat store. A client without it renders the harness mark the
+// row already gave it, which is exactly what such a host's client showed
+// before this method existed.
+export const epicGetChatRunSettingsV10 = defineRpcContract({
+  method: "epic.getChatRunSettings",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: getChatRunSettingsRequestSchema,
+  // Frozen at the harness id set the v1.2.0 tags shipped. Until Reasonix this
+  // pointed at the live response, whose `settings.harnessId` is the PERSISTED
+  // `guiHarnessIdSchema` - a second copy of the harness enum, on a method whose
+  // name gives no hint that it carries a catalog id. It is `degrade:
+  // unsupported` and off the released floor, so only the tag-based
+  // `protocol-compat` gate could see the growth; a plain `bun run test` stayed
+  // green. Grep RESPONSES for id enums when adding a harness, not just the
+  // three canonical catalog methods.
+  responseSchema: getChatRunSettingsResponseSchemaV10,
+});
+
+export const epicGetChatRunSettingsV20 = defineRpcContract({
+  method: "epic.getChatRunSettings",
+  schemaVersion: { major: 2, minor: 0 } as const,
+  requestSchema: getChatRunSettingsRequestSchema,
+  // Frozen at the harness id set the `1.3.0` tags shipped. v2.0 was opened to
+  // carry what v1.0 froze off and then bound the live persisted enum - the
+  // same trap one line up, one release later. v3.0 is the head line.
+  responseSchema: getChatRunSettingsResponseSchemaV20,
+});
+
+export const epicGetChatRunSettingsV30 = defineRpcContract({
+  method: "epic.getChatRunSettings",
+  schemaVersion: { major: 3, minor: 0 } as const,
+  requestSchema: getChatRunSettingsRequestSchema,
+  // Frozen at the harness id set the 1.5.0 tags shipped - the same trap a
+  // third time. v4.0 is the head line.
+  responseSchema: getChatRunSettingsResponseSchemaV30,
+});
+
+// The LIVE line. The moment a tag ships `4`, freeze it against a snapshot
+// tuple and open `5`.
+export const epicGetChatRunSettingsV40 = defineRpcContract({
+  method: "epic.getChatRunSettings",
+  schemaVersion: { major: 4, minor: 0 } as const,
+  requestSchema: getChatRunSettingsRequestSchema,
+  responseSchema: getChatRunSettingsResponseSchema,
+});
+
+export const epicGetChatRunSettingsUpgradeV30ToV40 = defineUpgradePath<
+  typeof epicGetChatRunSettingsV30,
+  typeof epicGetChatRunSettingsV40
+>({
+  from: { major: 3, minor: 0 },
+  to: { major: 4, minor: 0 },
+  // Request shape is identical; a v3.0 settings tuple is a valid v4.0 one
+  // (only the `harnessId` enum grows), so both upgrades are identity.
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+export const epicGetChatRunSettingsDowngradeV40ToV30 = defineDowngradePath<
+  typeof epicGetChatRunSettingsV40,
+  typeof epicGetChatRunSettingsV30
+>({
+  from: { major: 4, minor: 0 },
+  to: { major: 3, minor: 0 },
+  downgradeRequest: (request) => ({ ok: true, value: request }),
+  downgradeResponse: (response) => {
+    // Refuse rather than answering `{ settings: null }` - see the v2->v1
+    // bridge below for why that arm would be a false claim, not a degrade.
+    const parsed = getChatRunSettingsResponseSchemaV30.safeParse(response);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        error: {
+          code: "DOWNGRADE_UNSUPPORTED",
+          message:
+            "Reading this chat's run settings requires a newer Traycer client.",
+        },
+      };
+    }
+    return { ok: true, value: parsed.data };
+  },
+});
+
+export const epicGetChatRunSettingsDowngradeV40ToV20 = defineDowngradePath<
+  typeof epicGetChatRunSettingsV40,
+  typeof epicGetChatRunSettingsV20
+>({
+  from: { major: 4, minor: 0 },
+  to: { major: 2, minor: 0 },
+  downgradeRequest: (request) => ({ ok: true, value: request }),
+  downgradeResponse: (response) => {
+    const parsed = getChatRunSettingsResponseSchemaV20.safeParse(response);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        error: {
+          code: "DOWNGRADE_UNSUPPORTED",
+          message:
+            "Reading this chat's run settings requires a newer Traycer client.",
+        },
+      };
+    }
+    return { ok: true, value: parsed.data };
+  },
+});
+
+export const epicGetChatRunSettingsDowngradeV40ToV10 = defineDowngradePath<
+  typeof epicGetChatRunSettingsV40,
+  typeof epicGetChatRunSettingsV10
+>({
+  from: { major: 4, minor: 0 },
+  to: { major: 1, minor: 0 },
+  downgradeRequest: (request) => ({ ok: true, value: request }),
+  downgradeResponse: (response) => {
+    const parsed = getChatRunSettingsResponseSchemaV10.safeParse(response);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        error: {
+          code: "DOWNGRADE_UNSUPPORTED",
+          message:
+            "Reading this chat's run settings requires a newer Traycer client.",
+        },
+      };
+    }
+    return { ok: true, value: parsed.data };
+  },
+});
+
+export const epicGetChatRunSettingsUpgradeV20ToV30 = defineUpgradePath<
+  typeof epicGetChatRunSettingsV20,
+  typeof epicGetChatRunSettingsV30
+>({
+  from: { major: 2, minor: 0 },
+  to: { major: 3, minor: 0 },
+  // Request shape is identical; a v2.0 settings tuple is a valid v3.0 one
+  // (only the `harnessId` enum grows), so both upgrades are identity.
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+export const epicGetChatRunSettingsDowngradeV30ToV20 = defineDowngradePath<
+  typeof epicGetChatRunSettingsV30,
+  typeof epicGetChatRunSettingsV20
+>({
+  from: { major: 3, minor: 0 },
+  to: { major: 2, minor: 0 },
+  downgradeRequest: (request) => ({ ok: true, value: request }),
+  downgradeResponse: (response) => {
+    // Refuse rather than answering `{ settings: null }` - see the v2->v1
+    // bridge below for why that arm would be a false claim, not a degrade.
+    const parsed = getChatRunSettingsResponseSchemaV20.safeParse(response);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        error: {
+          code: "DOWNGRADE_UNSUPPORTED",
+          message:
+            "Reading this chat's run settings requires a newer Traycer client.",
+        },
+      };
+    }
+    return { ok: true, value: parsed.data };
+  },
+});
+
+export const epicGetChatRunSettingsDowngradeV30ToV10 = defineDowngradePath<
+  typeof epicGetChatRunSettingsV30,
+  typeof epicGetChatRunSettingsV10
+>({
+  from: { major: 3, minor: 0 },
+  to: { major: 1, minor: 0 },
+  downgradeRequest: (request) => ({ ok: true, value: request }),
+  downgradeResponse: (response) => {
+    const parsed = getChatRunSettingsResponseSchemaV10.safeParse(response);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        error: {
+          code: "DOWNGRADE_UNSUPPORTED",
+          message:
+            "Reading this chat's run settings requires a newer Traycer client.",
+        },
+      };
+    }
+    return { ok: true, value: parsed.data };
+  },
+});
+
+export const epicGetChatRunSettingsUpgradeV10ToV20 = defineUpgradePath<
+  typeof epicGetChatRunSettingsV10,
+  typeof epicGetChatRunSettingsV20
+>({
+  from: { major: 1, minor: 0 },
+  to: { major: 2, minor: 0 },
+  // Request shape is identical; a v1.0 settings tuple is a valid v2.0 one
+  // (only the `harnessId` enum grows), so both upgrades are identity.
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+export const epicGetChatRunSettingsDowngradeV20ToV10 = defineDowngradePath<
+  typeof epicGetChatRunSettingsV20,
+  typeof epicGetChatRunSettingsV10
+>({
+  from: { major: 2, minor: 0 },
+  to: { major: 1, minor: 0 },
+  downgradeRequest: (request) => ({ ok: true, value: request }),
+  downgradeResponse: (response) => {
+    // A v1.0 caller only ever asks about a chat on a harness it knows, so the
+    // common case reparses cleanly. This response carries exactly ONE settings
+    // tuple, so - like the `agent.*ProviderProfile*` bridges - there is nothing
+    // to filter and the only honest options are pass-through or refuse.
+    //
+    // Refuse, deliberately, rather than answering `{ settings: null }`. That
+    // arm is in-contract and renders as "nothing to show", which makes it a
+    // tempting degrade - but it is a claim ("this chat has no persisted
+    // settings") that would be FALSE for a Reasonix chat, and the caller has no
+    // way to tell the lie from the truth. The hover card that reads this
+    // already renders the record row's harness mark when the read fails, which
+    // is exactly the documented degrade for a host that predates the method.
+    //
+    // The message names no harness, so it stays honest as the enum grows -
+    // and it has since had to, in a second dimension: `permissionMode` on the
+    // frozen 1.0 tuple is pinned pre-`auto`, so an `auto` chat refuses here on
+    // exactly the same path a Reasonix chat does, with no code change. That is
+    // the intended behaviour, not a gap: projecting `auto` down to
+    // `auto_accept_edits` for a 1.0 reader would be the same false claim in a
+    // quieter form.
+    const parsed = getChatRunSettingsResponseSchemaV10.safeParse(response);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        error: {
+          code: "DOWNGRADE_UNSUPPORTED",
+          message:
+            "Reading this chat's run settings requires a newer Traycer client.",
+        },
+      };
+    }
+    return { ok: true, value: parsed.data };
+  },
+});
+
+export const epicGetChatRunSettingsBatchV10 = defineRpcContract({
+  method: "epic.getChatRunSettingsBatch",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: getChatRunSettingsBatchRequestSchema,
+  // Frozen at the settings tuple the 1.5.0 tags shipped, the same body as
+  // `epic.getChatRunSettings@3.0`. Optional; an old host answers
+  // `E_HOST_UNSUPPORTED` and the client falls back to N singles.
+  responseSchema: getChatRunSettingsBatchResponseSchemaV10,
+});
+
+// The LIVE line: the live settings tuple, same head body as
+// `epic.getChatRunSettings@4.0`.
+export const epicGetChatRunSettingsBatchV20 = defineRpcContract({
+  method: "epic.getChatRunSettingsBatch",
+  schemaVersion: { major: 2, minor: 0 } as const,
+  requestSchema: getChatRunSettingsBatchRequestSchema,
+  responseSchema: getChatRunSettingsBatchResponseSchema,
+});
+
+export const epicGetChatRunSettingsBatchUpgradeV10ToV20 = defineUpgradePath<
+  typeof epicGetChatRunSettingsBatchV10,
+  typeof epicGetChatRunSettingsBatchV20
+>({
+  from: { major: 1, minor: 0 },
+  to: { major: 2, minor: 0 },
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) => response,
+});
+
+export const epicGetChatRunSettingsBatchDowngradeV20ToV10 = defineDowngradePath<
+  typeof epicGetChatRunSettingsBatchV20,
+  typeof epicGetChatRunSettingsBatchV10
+>({
+  from: { major: 2, minor: 0 },
+  to: { major: 1, minor: 0 },
+  downgradeRequest: (request) => ({ ok: true, value: request }),
+  // Omits each entry the 1.0 line cannot represent and keeps the rest. The
+  // unary read refuses for such a chat because it has one tuple and nothing
+  // else to answer with; here refusing would withhold up to forty-nine
+  // readable siblings for one that is not. An omitted entry asserts nothing
+  // about its chat - unlike `settings: null`, which would claim the chat has
+  // no stored settings - and the caller already treats a chat with no entry
+  // as unresolved and renders the record row's harness mark for it.
+  downgradeResponse: (response) => ({
+    ok: true,
+    value: {
+      entries: response.entries.flatMap((entry) => {
+        const parsed = getChatRunSettingsBatchEntrySchemaV10.safeParse(entry);
+        return parsed.success ? [parsed.data] : [];
+      }),
+    },
+  }),
+});
+
+// The terminal-agent RECORD read (`epic.listTuiAgents@1.0`) lives in
+// `tui-agent-records.ts` beside its schemas - the TUI eviction's sibling of
+// the chat record channel above, optional and host-local for the same
+// reason, and owner-rows-only always (terminal agents are private by user
+// ruling). Exported from there via the epic index, not re-exported here,
+// so `export *` consumers see exactly one binding.
+
+// The three LANE stream contracts (`epic.state.subscribe`,
+// `epic.status.subscribe`, `artifact.subscribe`) and the two lane unaries
+// (`epic.getWorkspaceContext`, `epic.retryMigration`) live beside their schemas
+// in `state-subscribe.ts` / `status-subscribe.ts` / `artifact-subscribe.ts` /
+// `lane-unaries.ts` - the `tui-agent-records.ts` and `communication-graph.ts`
+// arrangement, not this file's. They are exported through the epic index, not
+// re-exported here, so `export *` consumers see exactly one binding.
+
+// A native subagent's conversation carried on as its own chat, through
+// session import (see `continueSubagentRequestSchema`). New method, first
+// minor: nothing released carries it, so there is nothing to upgrade from.
+export const epicContinueSubagentV10 = defineRpcContract({
+  method: "epic.continueSubagent",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: continueSubagentRequestSchema,
+  responseSchema: continueSubagentResponseSchema,
+});
+
+export {
+  epicSubscribeV10,
+  epicSubscribeV11,
+  epicSubscribeV12,
+  epicSubscribeV13,
+  epicSubscribeV14,
+  epicSubscribeV15,
+  epicSubscribeV16,
+};
+
+export const epicCreateV14 = defineRpcContract({
+  method: "epic.create",
+  schemaVersion: { major: 1, minor: 4 } as const,
+  requestSchema: createEpicRequestSchemaV14,
+  responseSchema: createEpicResponseSchemaV12,
+});
+export const epicCreateUpgradeV13ToV14 = defineUpgradePath<
+  typeof epicCreateV13,
+  typeof epicCreateV14
+>({
+  from: epicCreateV13.schemaVersion,
+  to: epicCreateV14.schemaVersion,
+  upgradeRequest: (request) => createEpicRequestSchemaV14.parse(request),
+  upgradeResponse: (response) => response,
+});
+export const epicCreateChatV14 = defineRpcContract({
+  method: "epic.createChat",
+  schemaVersion: { major: 1, minor: 4 } as const,
+  requestSchema: createChatRequestSchemaV14,
+  responseSchema: createChatResponseSchemaV12,
+});
+export const epicCreateChatUpgradeV13ToV14 = defineUpgradePath<
+  typeof epicCreateChatV13,
+  typeof epicCreateChatV14
+>({
+  from: epicCreateChatV13.schemaVersion,
+  to: epicCreateChatV14.schemaVersion,
+  upgradeRequest: (request) => createChatRequestSchemaV14.parse(request),
+  upgradeResponse: (response) => response,
+});
+
+/**
+ * `@1.5` of both creates: the first message carries the composer's
+ * browser-annotation sidecar, as a `chat.subscribe` `send` frame does, so a
+ * selection sent to a NEW chat arrives with the same card a send would carry.
+ * The upgrades parse through the `@1.5` schema. The sidecar key stays absent
+ * for a `@1.4` caller, which the host reads as no sidecar; the responses are
+ * unchanged.
+ */
+export const epicCreateV15 = defineRpcContract({
+  method: "epic.create",
+  schemaVersion: { major: 1, minor: 5 } as const,
+  requestSchema: createEpicRequestSchemaV15,
+  responseSchema: createEpicResponseSchemaV12,
+});
+export const epicCreateUpgradeV14ToV15 = defineUpgradePath<
+  typeof epicCreateV14,
+  typeof epicCreateV15
+>({
+  from: epicCreateV14.schemaVersion,
+  to: epicCreateV15.schemaVersion,
+  upgradeRequest: (request) => createEpicRequestSchemaV15.parse(request),
+  upgradeResponse: (response) => response,
+});
+export const epicCreateChatV15 = defineRpcContract({
+  method: "epic.createChat",
+  schemaVersion: { major: 1, minor: 5 } as const,
+  requestSchema: createChatRequestSchemaV15,
+  responseSchema: createChatResponseSchemaV12,
+});
+export const epicCreateChatUpgradeV14ToV15 = defineUpgradePath<
+  typeof epicCreateChatV14,
+  typeof epicCreateChatV15
+>({
+  from: epicCreateChatV14.schemaVersion,
+  to: epicCreateChatV15.schemaVersion,
+  upgradeRequest: (request) => createChatRequestSchemaV15.parse(request),
+  upgradeResponse: (response) => response,
+});
+export const epicUpdateChatRunSettingsV12 = defineRpcContract({
+  method: "epic.updateChatRunSettings",
+  schemaVersion: { major: 1, minor: 2 } as const,
+  requestSchema: updateChatRunSettingsRequestSchemaV12,
+  responseSchema: updateChatRunSettingsResponseSchema,
+});
+export const epicUpdateChatRunSettingsUpgradeV11ToV12 = defineUpgradePath<
+  typeof epicUpdateChatRunSettingsV11,
+  typeof epicUpdateChatRunSettingsV12
+>({
+  from: epicUpdateChatRunSettingsV11.schemaVersion,
+  to: epicUpdateChatRunSettingsV12.schemaVersion,
+  upgradeRequest: (request) => ({
+    ...request,
+    settings: { ...request.settings, ultracode: false },
+  }),
+  upgradeResponse: (response) => response,
+});
+export const epicGetChatRunSettingsV41 = defineRpcContract({
+  method: "epic.getChatRunSettings",
+  schemaVersion: { major: 4, minor: 1 } as const,
+  requestSchema: getChatRunSettingsRequestSchema,
+  responseSchema: getChatRunSettingsResponseSchemaV41,
+});
+export const epicGetChatRunSettingsUpgradeV40ToV41 = defineUpgradePath<
+  typeof epicGetChatRunSettingsV40,
+  typeof epicGetChatRunSettingsV41
+>({
+  from: epicGetChatRunSettingsV40.schemaVersion,
+  to: epicGetChatRunSettingsV41.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) =>
+    getChatRunSettingsResponseSchemaV41.parse(response),
+});
+export const epicGetChatRunSettingsBatchV21 = defineRpcContract({
+  method: "epic.getChatRunSettingsBatch",
+  schemaVersion: { major: 2, minor: 1 } as const,
+  requestSchema: getChatRunSettingsBatchRequestSchema,
+  responseSchema: getChatRunSettingsBatchResponseSchemaV21,
+});
+export const epicGetChatRunSettingsBatchUpgradeV20ToV21 = defineUpgradePath<
+  typeof epicGetChatRunSettingsBatchV20,
+  typeof epicGetChatRunSettingsBatchV21
+>({
+  from: epicGetChatRunSettingsBatchV20.schemaVersion,
+  to: epicGetChatRunSettingsBatchV21.schemaVersion,
+  upgradeRequest: (request) => request,
+  upgradeResponse: (response) =>
+    getChatRunSettingsBatchResponseSchemaV21.parse(response),
+});
+
+export const epicGetChatRunSettingsDowngradeV41ToV30 = defineDowngradePath<
+  typeof epicGetChatRunSettingsV41,
+  typeof epicGetChatRunSettingsV30
+>({
+  from: { major: 4, minor: 1 },
+  to: { major: 3, minor: 0 },
+  downgradeRequest: (request) => ({ ok: true, value: request }),
+  downgradeResponse: (response) => {
+    // Refuse rather than answering `{ settings: null }` - see the v2->v1
+    // bridge below for why that arm would be a false claim, not a degrade.
+    const parsed = getChatRunSettingsResponseSchemaV30.safeParse(response);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        error: {
+          code: "DOWNGRADE_UNSUPPORTED",
+          message:
+            "Reading this chat's run settings requires a newer Traycer client.",
+        },
+      };
+    }
+    return { ok: true, value: parsed.data };
+  },
+});
+
+export const epicGetChatRunSettingsDowngradeV41ToV20 = defineDowngradePath<
+  typeof epicGetChatRunSettingsV41,
+  typeof epicGetChatRunSettingsV20
+>({
+  from: { major: 4, minor: 1 },
+  to: { major: 2, minor: 0 },
+  downgradeRequest: (request) => ({ ok: true, value: request }),
+  downgradeResponse: (response) => {
+    const parsed = getChatRunSettingsResponseSchemaV20.safeParse(response);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        error: {
+          code: "DOWNGRADE_UNSUPPORTED",
+          message:
+            "Reading this chat's run settings requires a newer Traycer client.",
+        },
+      };
+    }
+    return { ok: true, value: parsed.data };
+  },
+});
+
+export const epicGetChatRunSettingsDowngradeV41ToV10 = defineDowngradePath<
+  typeof epicGetChatRunSettingsV41,
+  typeof epicGetChatRunSettingsV10
+>({
+  from: { major: 4, minor: 1 },
+  to: { major: 1, minor: 0 },
+  downgradeRequest: (request) => ({ ok: true, value: request }),
+  downgradeResponse: (response) => {
+    const parsed = getChatRunSettingsResponseSchemaV10.safeParse(response);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        error: {
+          code: "DOWNGRADE_UNSUPPORTED",
+          message:
+            "Reading this chat's run settings requires a newer Traycer client.",
+        },
+      };
+    }
+    return { ok: true, value: parsed.data };
+  },
+});
+
+export const epicGetChatRunSettingsBatchDowngradeV21ToV10 = defineDowngradePath<
+  typeof epicGetChatRunSettingsBatchV21,
+  typeof epicGetChatRunSettingsBatchV10
+>({
+  from: { major: 2, minor: 1 },
+  to: { major: 1, minor: 0 },
+  downgradeRequest: (request) => ({ ok: true, value: request }),
+  // Omits each entry the 1.0 line cannot represent and keeps the rest. The
+  // unary read refuses for such a chat because it has one tuple and nothing
+  // else to answer with; here refusing would withhold up to forty-nine
+  // readable siblings for one that is not. An omitted entry asserts nothing
+  // about its chat - unlike `settings: null`, which would claim the chat has
+  // no stored settings - and the caller already treats a chat with no entry
+  // as unresolved and renders the record row's harness mark for it.
+  downgradeResponse: (response) => ({
+    ok: true,
+    value: {
+      entries: response.entries.flatMap((entry) => {
+        const parsed = getChatRunSettingsBatchEntrySchemaV10.safeParse(entry);
+        return parsed.success ? [parsed.data] : [];
+      }),
+    },
+  }),
+});

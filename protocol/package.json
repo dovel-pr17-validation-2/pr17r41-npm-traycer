@@ -1,0 +1,242 @@
+{
+  "name": "@traycer/protocol",
+  "version": "0.3.0",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./agent/*": "./src/agent/*.ts",
+    "./auth": "./src/auth/index.ts",
+    "./auth/*": "./src/auth/*.ts",
+    "./comments/*": "./src/comments/*.ts",
+    "./common/*": "./src/common/*.ts",
+    "./crypto/noise": "./src/crypto/noise/index.ts",
+    "./config": "./src/config/index.ts",
+    "./config/*": "./src/config/*.ts",
+    "./host": "./src/host/index.ts",
+    "./host/lifecycle": "./src/host/lifecycle/index.ts",
+    "./host/*": "./src/host/*.ts",
+    "./host-transport/mux": "./src/host-transport/mux.ts",
+    "./host-transport/resume-ledger": "./src/host-transport/resume-ledger.ts",
+    "./host-transport/chunking": "./src/host-transport/chunking.ts",
+    "./host-transport/backoff": "./src/host-transport/backoff.ts",
+    "./host-transport/dial-priority": "./src/host-transport/dial-priority.ts",
+    "./host-transport/relay-attach-url": "./src/host-transport/relay-attach-url.ts",
+    "./host-transport/stream-session": "./src/host-transport/stream-session.ts",
+    "./host-transport/stream-websocket": "./src/host-transport/stream-websocket.ts",
+    "./host-transport/timers": "./src/host-transport/timers.ts",
+    "./host-transport/websocket": "./src/host-transport/websocket.ts",
+    "./host-transport/remote": "./src/host-transport/remote/index.ts",
+    "./host-transport/remote/*": "./src/host-transport/remote/*.ts",
+    "./host-transport/__tests__/chunk-reassembler-conformance": "./src/host-transport/__tests__/chunk-reassembler-conformance.ts",
+    "./framework": "./src/framework/index.ts",
+    "./framework/*": "./src/framework/*.ts",
+    "./environment/*": "./src/environment/*.ts",
+    "./notifications/*": "./src/notifications/*.ts",
+    "./persistence/*": "./src/persistence/*.ts",
+    "./utils/yjs-utils": "./utils/yjs-utils/index.ts",
+    "./utils/yjs-utils/*": "./utils/yjs-utils/*.ts",
+    "./utils/text/*": "./utils/text/*.ts",
+    "./host-transport/relay-liveness": "./src/host-transport/relay-liveness.ts",
+    "./host-transport/rtt-deadlines": "./src/host-transport/rtt-deadlines.ts",
+    "./host-transport/vantage": "./src/host-transport/vantage.ts",
+    "./worktree/*": "./src/worktree/*.ts"
+  },
+  "publishConfig": {
+    "types": "./dist/src/index.d.ts",
+    "exports": {
+      ".": {
+        "types": "./dist/src/index.d.ts",
+        "import": "./dist/src/index.js"
+      },
+      "./agent/*": {
+        "types": "./dist/src/agent/*.d.ts",
+        "import": "./dist/src/agent/*.js"
+      },
+      "./auth": {
+        "types": "./dist/src/auth/index.d.ts",
+        "import": "./dist/src/auth/index.js"
+      },
+      "./auth/*": {
+        "types": "./dist/src/auth/*.d.ts",
+        "import": "./dist/src/auth/*.js"
+      },
+      "./comments/*": {
+        "types": "./dist/src/comments/*.d.ts",
+        "import": "./dist/src/comments/*.js"
+      },
+      "./common/*": {
+        "types": "./dist/src/common/*.d.ts",
+        "import": "./dist/src/common/*.js"
+      },
+      "./crypto/noise": {
+        "types": "./dist/src/crypto/noise/index.d.ts",
+        "import": "./dist/src/crypto/noise/index.js"
+      },
+      "./config": {
+        "types": "./dist/src/config/index.d.ts",
+        "import": "./dist/src/config/index.js"
+      },
+      "./config/*": {
+        "types": "./dist/src/config/*.d.ts",
+        "import": "./dist/src/config/*.js"
+      },
+      "./host": {
+        "types": "./dist/src/host/index.d.ts",
+        "import": "./dist/src/host/index.js"
+      },
+      "./host/lifecycle": {
+        "types": "./dist/src/host/lifecycle/index.d.ts",
+        "import": "./dist/src/host/lifecycle/index.js"
+      },
+      "./host/*": {
+        "types": "./dist/src/host/*.d.ts",
+        "import": "./dist/src/host/*.js"
+      },
+      "./host-transport/mux": {
+        "types": "./dist/src/host-transport/mux.d.ts",
+        "import": "./dist/src/host-transport/mux.js"
+      },
+      "./host-transport/resume-ledger": {
+        "types": "./dist/src/host-transport/resume-ledger.d.ts",
+        "import": "./dist/src/host-transport/resume-ledger.js"
+      },
+      "./host-transport/chunking": {
+        "types": "./dist/src/host-transport/chunking.d.ts",
+        "import": "./dist/src/host-transport/chunking.js"
+      },
+      "./host-transport/backoff": {
+        "types": "./dist/src/host-transport/backoff.d.ts",
+        "import": "./dist/src/host-transport/backoff.js"
+      },
+      "./host-transport/dial-priority": {
+        "types": "./dist/src/host-transport/dial-priority.d.ts",
+        "import": "./dist/src/host-transport/dial-priority.js"
+      },
+      "./host-transport/relay-attach-url": {
+        "types": "./dist/src/host-transport/relay-attach-url.d.ts",
+        "import": "./dist/src/host-transport/relay-attach-url.js"
+      },
+      "./host-transport/stream-session": {
+        "types": "./dist/src/host-transport/stream-session.d.ts",
+        "import": "./dist/src/host-transport/stream-session.js"
+      },
+      "./host-transport/stream-websocket": {
+        "types": "./dist/src/host-transport/stream-websocket.d.ts",
+        "import": "./dist/src/host-transport/stream-websocket.js"
+      },
+      "./host-transport/timers": {
+        "types": "./dist/src/host-transport/timers.d.ts",
+        "import": "./dist/src/host-transport/timers.js"
+      },
+      "./host-transport/websocket": {
+        "types": "./dist/src/host-transport/websocket.d.ts",
+        "import": "./dist/src/host-transport/websocket.js"
+      },
+      "./host-transport/remote": {
+        "types": "./dist/src/host-transport/remote/index.d.ts",
+        "import": "./dist/src/host-transport/remote/index.js"
+      },
+      "./host-transport/remote/*": {
+        "types": "./dist/src/host-transport/remote/*.d.ts",
+        "import": "./dist/src/host-transport/remote/*.js"
+      },
+      "./framework": {
+        "types": "./dist/src/framework/index.d.ts",
+        "import": "./dist/src/framework/index.js"
+      },
+      "./framework/*": {
+        "types": "./dist/src/framework/*.d.ts",
+        "import": "./dist/src/framework/*.js"
+      },
+      "./environment/*": {
+        "types": "./dist/src/environment/*.d.ts",
+        "import": "./dist/src/environment/*.js"
+      },
+      "./notifications/*": {
+        "types": "./dist/src/notifications/*.d.ts",
+        "import": "./dist/src/notifications/*.js"
+      },
+      "./persistence/*": {
+        "types": "./dist/src/persistence/*.d.ts",
+        "import": "./dist/src/persistence/*.js"
+      },
+      "./utils/yjs-utils": {
+        "types": "./dist/utils/yjs-utils/index.d.ts",
+        "import": "./dist/utils/yjs-utils/index.js"
+      },
+      "./utils/yjs-utils/*": {
+        "types": "./dist/utils/yjs-utils/*.d.ts",
+        "import": "./dist/utils/yjs-utils/*.js"
+      },
+      "./utils/text/*": {
+        "types": "./dist/utils/text/*.d.ts",
+        "import": "./dist/utils/text/*.js"
+      },
+      "./host-transport/relay-liveness": {
+        "types": "./dist/src/host-transport/relay-liveness.d.ts",
+        "import": "./dist/src/host-transport/relay-liveness.js"
+      },
+      "./host-transport/rtt-deadlines": {
+        "types": "./dist/src/host-transport/rtt-deadlines.d.ts",
+        "import": "./dist/src/host-transport/rtt-deadlines.js"
+      },
+      "./host-transport/vantage": {
+        "types": "./dist/src/host-transport/vantage.d.ts",
+        "import": "./dist/src/host-transport/vantage.js"
+      },
+      "./worktree/*": {
+        "types": "./dist/src/worktree/*.d.ts",
+        "import": "./dist/src/worktree/*.js"
+      }
+    },
+    "access": "public"
+  },
+  "scripts": {
+    "build": "node ../scripts/tsrs.mjs -p tsconfig.build.json --singleThreaded && node scripts/patch-dist-esm-imports.cjs && bun run validate:registries",
+    "validate:registries": "bun scripts/compat/validate-static-registries.ts",
+    "compile": "node ../scripts/tsrs.mjs --noEmit --singleThreaded --incremental --tsBuildInfoFile node_modules/.tmp/compile.tsbuildinfo",
+    "prepack": "bun run build",
+    "test": "vitest run",
+    "lint": "bun run lint:files .",
+    "lint:files": "eslint --cache --cache-strategy content --fix --max-warnings 0 --no-warn-ignored"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.4.0",
+    "async-mutex": "^0.5.0",
+    "fflate": "^0.8.3",
+    "tldts": "7.4.10",
+    "y-utility": "^0.1.4",
+    "yjs": "^13.6.32",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "@typescript-eslint/eslint-plugin": "catalog:",
+    "@typescript-eslint/parser": "catalog:",
+    "eslint": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "nx": {
+    "targets": {
+      "test": {
+        "outputs": [
+          "{projectRoot}/test-results/junit.xml"
+        ],
+        "inputs": [
+          "{workspaceRoot}/scripts/test-worker-environment.ts",
+          "default",
+          "^production",
+          "sharedGlobals",
+          "{workspaceRoot}/clients/**/*.ts",
+          "{workspaceRoot}/clients/**/*.tsx"
+        ]
+      }
+    }
+  }
+}

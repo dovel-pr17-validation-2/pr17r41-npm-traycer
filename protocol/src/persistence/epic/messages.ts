@@ -1,0 +1,1416 @@
+import { commonRecordRegistry } from "@traycer/protocol/common/registry";
+import { getRecordSchema } from "@traycer/protocol/framework/versioned-record";
+import {
+  contentBlockSchema,
+  contentBlockSchemaPreHtml,
+  contentBlockSchemaPreFallback,
+  contentBlockSchemaPreBrowser,
+  contentBlockSchemaPreMcpApp,
+  contentBlockSchemaPreReceipt,
+  contentBlockSchemaV18,
+  contentBlockSchemaPreImage,
+  contentBlockSchemaPreReasonix,
+  contentBlockSchemaPreSettlement,
+  contentBlockSchemaPreShellHost,
+} from "@traycer/protocol/persistence/epic/content-blocks";
+import { tokenUsageSchema } from "@traycer/protocol/persistence/epic/foundation";
+import {
+  imageDimensionSchema,
+  imageSha256HexSchema,
+  supportedImageMediaTypeSchema,
+} from "@traycer/protocol/persistence/epic/images";
+import {
+  agentSenderSchema,
+  agentSenderSchemaPreInReplyTo,
+  agentSenderSchemaPreReasonix,
+  chatSessionAnchorSchema,
+  chatSessionAnchorSchemaPreReasonix,
+  userMessageSenderSchema,
+  userMessageSenderSchemaPreInReplyTo,
+  userMessageSenderSchemaPreReasonix,
+} from "@traycer/protocol/persistence/epic/senders";
+import { z } from "zod";
+import { lazySchema } from "@traycer/protocol/framework/lazy-schema";
+
+/**
+ * Materialized chat-message shapes. The on-disk Y.Array of messages is
+ * versioned as the plain-JSON projection used here.
+ */
+
+const jsonContentSchema = getRecordSchema(
+  commonRecordRegistry,
+  "json-content",
+  "latest",
+);
+
+/**
+ * One annotation bundle: structured fields only (no pixels). Browser crops
+ * ride the existing `imageAttachment` atom. Canvas selections (1.32) may have
+ * no crop and carry their artifact identity in `source`. The carrier name
+ * stays `browserAnnotations` for compatibility with existing records.
+ *
+ * Lives on its own array (`browserAnnotations`) rather than folded into
+ * `content`. Adding a new content-block kind would be a breaking persist
+ * change and would leak onto every frozen `chat.subscribe` send/snapshot
+ * line.
+ */
+export const browserAnnotationCountsSchema = lazySchema(() =>
+  z.object({
+    elements: z.number().int().nonnegative(),
+    regions: z.number().int().nonnegative(),
+    strokes: z.number().int().nonnegative(),
+  }),
+);
+export type BrowserAnnotationCounts = z.infer<
+  typeof browserAnnotationCountsSchema
+>;
+
+export const browserViewElementBoundingBoxSchema = lazySchema(() =>
+  z.object({
+    x: z.number(),
+    y: z.number(),
+    width: z.number(),
+    height: z.number(),
+    top: z.number(),
+    right: z.number(),
+    bottom: z.number(),
+    left: z.number(),
+  }),
+);
+export type BrowserViewElementBoundingBox = z.infer<
+  typeof browserViewElementBoundingBoxSchema
+>;
+
+export const browserViewElementStyleSchema = lazySchema(() =>
+  z.object({
+    property: z.string(),
+    value: z.string(),
+  }),
+);
+export type BrowserViewElementStyle = z.infer<
+  typeof browserViewElementStyleSchema
+>;
+
+/**
+ * One annotated element as PERSISTED: how to find it, what it says, where it
+ * sits - never the markup.
+ *
+ * `outerHtml` and a verbatim `attributes` list used to ride here too, which
+ * put page content (a filled-in form, a `value=` on an input, a token in a
+ * `data-` attribute) into collaborator-readable chat persistence and into the
+ * model prompt. `textPreview` is the bounded, markup-free snippet that
+ * replaces both; the picker no longer captures either field, and a record
+ * written before this change still parses because Zod strips the keys it no
+ * longer declares.
+ */
+export const browserViewElementCaptureSchema = lazySchema(() =>
+  z.object({
+    selector: z.string(),
+    tagName: z.string(),
+    elementId: z.string().nullable(),
+    classNames: z.array(z.string()),
+    textPreview: z.string().nullable(),
+    ariaRole: z.string().nullable(),
+    accessibleName: z.string().nullable(),
+    boundingBox: browserViewElementBoundingBoxSchema,
+    computedStyles: z.array(browserViewElementStyleSchema),
+  }),
+);
+export type BrowserViewElementCapture = z.infer<
+  typeof browserViewElementCaptureSchema
+>;
+
+export const browserAnnotationRecordSchemaPreCanvas = lazySchema(() =>
+  z.object({
+    kind: z.literal("browser-annotation"),
+    annotationId: z.string().min(1),
+    tabId: z.string().min(1),
+    sessionId: z.string().min(1),
+    origin: z.string(),
+    pageUrl: z.string(),
+    pageTitle: z.string(),
+    capturedAt: z.number(),
+    comment: z.string(),
+    counts: browserAnnotationCountsSchema,
+    elements: z.array(browserViewElementCaptureSchema),
+    imageFileName: z.string().min(1),
+    imageHash: z.string().min(1),
+    // Element marks outlined on the crop that did not survive capture-budget
+    // trim. 0 when every marked element was delivered. Live 1.7 only.
+    // `.default(0)` so records written before this field parse cleanly.
+    droppedElementCount: z.number().int().nonnegative().default(0),
+  }),
+);
+/** Canvas stays in chat.db/chat-sync; legacy epic and draft records bind the
+ * browser-only copy above. Browser source is inferred only for legacy inputs. */
+export const browserAnnotationSourceSchema = lazySchema(() =>
+  z.object({
+    kind: z.literal("browser"),
+    tabId: z.string().min(1),
+    sessionId: z.string().min(1),
+    origin: z.string(),
+    pageUrl: z.string(),
+    pageTitle: z.string(),
+  }),
+);
+export type BrowserAnnotationSource = z.infer<
+  typeof browserAnnotationSourceSchema
+>;
+
+export const canvasAnnotationSourceSchema = lazySchema(() =>
+  z.object({
+    kind: z.literal("canvas"),
+    artifactId: z.string().min(1),
+    boardPath: z.string().min(1),
+    canvasPage: z.string().nullable(),
+    artifactTitle: z.string(),
+  }),
+);
+export type CanvasAnnotationSource = z.infer<
+  typeof canvasAnnotationSourceSchema
+>;
+
+export const canvasElementCaptureSchema = lazySchema(() =>
+  browserViewElementCaptureSchema.extend({
+    sourceRange: z
+      .object({
+        start: z.number().int().nonnegative(),
+        end: z.number().int().nonnegative(),
+        line: z.number().int().positive(),
+      })
+      .nullable()
+      .default(null),
+    tid: z.string().nullable().default(null),
+    textRange: z
+      .object({
+        start: z.number().int().nonnegative(),
+        end: z.number().int().nonnegative(),
+        quote: z.string(),
+      })
+      .nullable()
+      .default(null),
+  }),
+);
+export type CanvasElementCapture = z.infer<typeof canvasElementCaptureSchema>;
+
+const sourcedBrowserAnnotationRecordSchema = lazySchema(() =>
+  browserAnnotationRecordSchemaPreCanvas.extend({
+    source: browserAnnotationSourceSchema,
+  }),
+);
+const legacyBrowserAnnotationInputSchema = lazySchema(() =>
+  browserAnnotationRecordSchemaPreCanvas.extend({
+    source: browserAnnotationSourceSchema.optional(),
+  }),
+);
+const browserAnnotationWithSourceSchema = lazySchema(() =>
+  z.codec(
+    legacyBrowserAnnotationInputSchema,
+    sourcedBrowserAnnotationRecordSchema,
+    {
+      decode: (record) => ({
+        ...record,
+        source: record.source ?? {
+          kind: "browser" as const,
+          tabId: record.tabId,
+          sessionId: record.sessionId,
+          origin: record.origin,
+          pageUrl: record.pageUrl,
+          pageTitle: record.pageTitle,
+        },
+      }),
+      encode: (record) => ({
+        ...record,
+        droppedElementCount: record.droppedElementCount ?? 0,
+      }),
+    },
+  ),
+);
+
+export const canvasAnnotationRecordSchema = lazySchema(() =>
+  z.object({
+    kind: z.literal("browser-annotation"),
+    annotationId: z.string().min(1),
+    source: canvasAnnotationSourceSchema,
+    capturedAt: z.number(),
+    comment: z.string(),
+    counts: browserAnnotationCountsSchema,
+    elements: z.array(canvasElementCaptureSchema),
+    imageFileName: z.string().min(1).nullable(),
+    imageHash: z.string().min(1).nullable(),
+    droppedElementCount: z.number().int().nonnegative().default(0),
+  }),
+);
+export type CanvasAnnotationRecord = z.infer<
+  typeof canvasAnnotationRecordSchema
+>;
+
+/** The live 1.32 annotation carrier. Canvas needs no fabricated browser identity. */
+export const browserAnnotationRecordSchema = lazySchema(() =>
+  z.union([browserAnnotationWithSourceSchema, canvasAnnotationRecordSchema]),
+);
+export type BrowserAnnotationRecord = z.infer<
+  typeof browserAnnotationRecordSchema
+>;
+
+export const agentUserMessageSchema = lazySchema(() =>
+  z.object({
+    kind: z.literal("agent"),
+    content: jsonContentSchema,
+    fromAgentId: z.string(),
+    senderTitle: z.string().nullable(),
+    senderHarnessId: z.string().nullable(),
+    reply: z.discriminatedUnion("expectsReply", [
+      z.object({
+        expectsReply: z.literal(true),
+        responseId: z.string(),
+      }),
+      z.object({
+        expectsReply: z.literal(false),
+      }),
+    ]),
+  }),
+);
+
+/** How a Slack message reached its bot: a mention, a reply in a thread the bot is in, a DM. */
+export const slackMessageTriggerSchema = lazySchema(() =>
+  z.enum(["mention", "thread", "dm"]),
+);
+export type SlackMessageTrigger = z.infer<typeof slackMessageTriggerSchema>;
+
+/** Why a file a Slack message carried did not reach the session. */
+export const slackFileOmissionReasonSchema = lazySchema(() =>
+  z.enum([
+    "unsupported_type",
+    "too_large",
+    "missing_scope",
+    "download_failed",
+    "not_retrieved",
+  ]),
+);
+export type SlackFileOmissionReason = z.infer<
+  typeof slackFileOmissionReasonSchema
+>;
+
+/**
+ * A Slack message, delivered to the bot session running its thread or DM
+ * (Tracy Bots, Slack attachments). `content` is the person's text as Slack
+ * sent it, then one `imageAttachment` node per image the message carried, in
+ * the bot's attachment store. The rest is what the session and the
+ * transcript read about it: who wrote it (Slack's display name, the Slack
+ * user, and the Traycer member that user maps to, when one does), its Slack
+ * `ts`, how it reached the bot, and each file it did not carry with the
+ * reason. `followUp` is a message's images that arrived after its text was
+ * delivered: the same `ts`, no text of its own.
+ *
+ * Its row's sender is the bot's own `user` sender: the person is Slack's,
+ * not a Traycer sender, and is named here.
+ */
+export const slackUserMessageSchema = lazySchema(() =>
+  z.object({
+    kind: z.literal("slack"),
+    content: jsonContentSchema,
+    author: z.object({
+      displayName: z.string().nullable(),
+      slackUserId: z.string().min(1),
+      traycerUserId: z.string().min(1).nullable(),
+    }),
+    ts: z.string().min(1),
+    trigger: slackMessageTriggerSchema,
+    followUp: z.boolean(),
+    omitted: z.array(
+      z.object({
+        fileName: z.string(),
+        reason: slackFileOmissionReasonSchema,
+      }),
+    ),
+  }),
+);
+export type SlackUserMessage = z.infer<typeof slackUserMessageSchema>;
+
+const userAuthoredMessagePreTicket13Fields = {
+  kind: lazySchema(() => z.literal("user")),
+  content: jsonContentSchema,
+} as const;
+
+/**
+ * Frozen user-authored payload as shipped on `chat.subscribe@1.0–1.6`
+ * (main's 1.6 freeze). Ticket 05's `browserAnnotations` is live-1.7-only: it
+ * must not leak onto a released snapshot / `messageAccepted` / queue item.
+ */
+export const userAuthoredMessageSchemaPreAnnotation = lazySchema(() =>
+  z.object(userAuthoredMessagePreTicket13Fields),
+);
+
+export const userAuthoredMessageSchemaPreCanvas = lazySchema(() =>
+  z.object({
+    ...userAuthoredMessagePreTicket13Fields,
+    /**
+     * Browser-annotations ticket 05. Empty for every message before this
+     * shipped and for one with no annotation attached. `.default([])` so
+     * already-persisted records parse cleanly.
+     *
+     * Persisted here rather than kept as transient send-time state (contrast
+     * `worktreeIntent`, a wire-only "send" field the host consumes and
+     * discards): a queued send re-derives its prompt from THIS persisted
+     * message at drain time, not from the original `send` frame, so dropping
+     * the field here would silently lose the user's annotation for any
+     * message that sits in the queue before its turn starts.
+     *
+     * Wire: browser-only on `chat.subscribe@1.7–1.31`. The live 1.32
+     * payload below rebinds the annotation union; 1.0–1.6 omit it.
+     */
+    browserAnnotations: z
+      .array(browserAnnotationRecordSchemaPreCanvas)
+      .default([]),
+  }),
+);
+
+export const userAuthoredMessageSchema = lazySchema(() =>
+  userAuthoredMessageSchemaPreCanvas.extend({
+    browserAnnotations: z.array(browserAnnotationRecordSchema).default([]),
+  }),
+);
+export const userMessagePayloadSchemaPreCanvas = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    userAuthoredMessageSchemaPreCanvas,
+    agentUserMessageSchema,
+  ]),
+);
+
+export const userMessagePayloadSchemaPreAnnotation = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    userAuthoredMessageSchemaPreAnnotation,
+    agentUserMessageSchema,
+  ]),
+);
+
+/**
+ * The payload union every `chat.subscribe` line through `1.42` ships, which
+ * the `1.43` `slack` arm must not reach: their decoders reject a kind they do
+ * not name.
+ */
+export const userMessagePayloadSchemaPreSlack = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    userAuthoredMessageSchema,
+    agentUserMessageSchema,
+  ]),
+);
+
+export const userMessagePayloadSchema = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    userAuthoredMessageSchema,
+    agentUserMessageSchema,
+    slackUserMessageSchema,
+  ]),
+);
+export type UserMessagePayload = z.infer<typeof userMessagePayloadSchema>;
+export type AgentUserMessage = z.infer<typeof agentUserMessageSchema>;
+
+/**
+ * A user row's sender names its message's kind, except a Slack message's,
+ * which the bot's own `user` sender carries (see `slackUserMessageSchema`).
+ */
+export function userMessageSenderTypeFor(kind: string): string {
+  return kind === "slack" ? "user" : kind;
+}
+
+const userMessageSenderKindRefine = (
+  message: { sender: { type: string }; message: { kind: string } },
+  ctx: z.RefinementCtx,
+): void => {
+  if (message.sender.type === userMessageSenderTypeFor(message.message.kind))
+    return;
+  ctx.addIssue({
+    code: z.ZodIssueCode.custom,
+    path: ["message", "kind"],
+    message: "User message sender.type must match message.kind.",
+  });
+};
+
+// Fixed field set for chat.subscribe 1.7/1.8. Extend the live export below
+// when adding message fields, leaving the historical definition unchanged.
+export const userMessageSchemaV18 = lazySchema(() =>
+  z
+    .object({
+      role: z.literal("user"),
+      messageId: z.string(),
+      sender: userMessageSenderSchema,
+      message: userMessagePayloadSchemaPreCanvas,
+      timestamp: z.number(),
+      sessionAnchor: chatSessionAnchorSchema.nullable(),
+    })
+    .superRefine(userMessageSenderKindRefine),
+);
+// A negative history fact, independent of the host's live execution record.
+// Forks preserve it while discarding runnable obligations: an accepted but
+// unsubmitted prompt must never become fake provider context in a new chat.
+// Absence retains legacy semantics. Only the host's atomic execution claim
+// removes this marker; a client edit cannot decide that a message was sent.
+//
+// Wire-freeze copy of the user row as `chat.subscribe@1.15` through `@1.24`
+// ship it: the `1.7`/`1.8` field set plus `providerHistory`, without the
+// `conversationRequest` that `1.25` added. Bound by `messageSchemaPreReceipt`
+// (`1.15`-`1.17`), `messageSchemaPreMcpApp` (`1.18`-`1.21`), the `1.15`-`1.21`
+// common frames, and - through `openUserMessageSchemaPreConversation` - the
+// `1.22`-`1.24` open-harness lines. A later key must not reach them through it.
+export const userMessageSchemaPreConversation = lazySchema(() =>
+  userMessageSchemaV18.safeExtend({
+    providerHistory: z.literal("excluded").optional(),
+  }),
+);
+
+/**
+ * The request a human's message in a bot conversation opened (Tracy Bots,
+ * `chat.subscribe@1.25`). Present on EVERY user row of a conversation record
+ * and on no other row: the host mints `requestId` when it writes the row, and
+ * the bot's trunk resolves it through its `traycer_reply` /
+ * `traycer_resolve_request` tools, which set `resolvedAt` (and, for a reply,
+ * the `messageId` of the bot's reply row). `resolvedAt: null` is an OPEN
+ * request: what the trunk's per-turn digest counts and what Home shows.
+ *
+ * Carried on the row rather than as an event so a claim's cloud rebuild keeps
+ * the request state with the message that opened it, and so a reader with the
+ * conversation's user rows alone can list what is still open.
+ */
+export const conversationRequestSchema = lazySchema(() =>
+  z.object({
+    requestId: z.string().min(1),
+    resolvedAt: z.number().nullable(),
+    resolvedByMessageId: z.string().nullable(),
+    /**
+     * `true` on a top-level post its bot answers itself, at the channel's
+     * top level (reply mode `direct`): no thread opens for it, and a member
+     * may open one by replying under it. Absent on every other row, a post
+     * whose thread opened with it included.
+     */
+    direct: z.literal(true).optional(),
+  }),
+);
+export type ConversationRequest = z.infer<typeof conversationRequestSchema>;
+
+/**
+ * The user row's id for a conversation request: derived, so the request id
+ * a sender holds names the row without an index, and a redelivery of the
+ * same request lands on the same row.
+ */
+const CONVERSATION_REQUEST_MESSAGE_ID_PREFIX = "conversation-request:";
+
+export function conversationRequestMessageId(requestId: string): string {
+  return `${CONVERSATION_REQUEST_MESSAGE_ID_PREFIX}${requestId}`;
+}
+
+/**
+ * Who settled one of a bot's questions: a member, by their answer or Skip
+ * from the card, or the bot, with the default it named.
+ */
+export const botQuestionSettlerSchema = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("person"), userId: z.string().min(1) }),
+    z.object({ kind: z.literal("bot") }),
+  ]),
+);
+export type BotQuestionSettler = z.infer<typeof botQuestionSettlerSchema>;
+
+/**
+ * How one of a bot's questions was settled, once: the answer (`null` for a
+ * Skip), who settled it and when. The host writes it with the first answer
+ * that lands and refuses every later one.
+ */
+export const botQuestionSettlementSchema = lazySchema(() =>
+  z.object({
+    answer: z.string().min(1).nullable(),
+    skipped: z.boolean(),
+    by: botQuestionSettlerSchema,
+    at: z.number(),
+  }),
+);
+export type BotQuestionSettlement = z.infer<typeof botQuestionSettlementSchema>;
+
+export const botQuestionItemSchema = lazySchema(() =>
+  z.object({
+    text: z.string().min(1),
+    /** Choices shown as buttons; empty for a question answered in words only. */
+    options: z.array(z.string().min(1)),
+    allowFreeText: z.boolean(),
+    /** `null` while the question is open. */
+    settlement: botQuestionSettlementSchema.nullable(),
+  }),
+);
+export type BotQuestionItem = z.infer<typeof botQuestionItemSchema>;
+
+/**
+ * The questions a bot's row asks (Tracy Bots, decision 121): asked without
+ * waiting, each settled once by a member's answer or Skip, or by the bot
+ * with the default it named. `requestId` is the question's request, which
+ * the bot settles with `traycer_resolve_request`; the question is open while
+ * any of its questions is.
+ */
+export const botQuestionSchema = lazySchema(() =>
+  z.object({
+    requestId: z.string().min(1),
+    questions: z.array(botQuestionItemSchema).min(1),
+  }),
+);
+export type BotQuestion = z.infer<typeof botQuestionSchema>;
+
+/**
+ * The text a question row carries when the asker wrote nothing above its
+ * questions: a reader that draws the card shows any other text above it.
+ */
+export function botQuestionsText(
+  questions: ReadonlyArray<{ readonly text: string }>,
+): string {
+  if (questions.length === 1) return questions[0]?.text ?? "";
+  return questions
+    .map((question, index) => `${index + 1}. ${question.text}`)
+    .join("\n");
+}
+
+/**
+ * Which question a member's message answers: the bot's row by its message
+ * id, the question's index on it, and whether the member skipped it (the
+ * message's text is then not an answer).
+ */
+export const botQuestionAnswerSchema = lazySchema(() =>
+  z.object({
+    questionMessageId: z.string().min(1),
+    questionIndex: z.number().int().nonnegative(),
+    skipped: z.boolean(),
+  }),
+);
+export type BotQuestionAnswer = z.infer<typeof botQuestionAnswerSchema>;
+
+/**
+ * How a surface a bot's post points at stopped waiting, once its task's host
+ * reported it: a question answered or skipped, an approval allowed or
+ * denied, a parked browser session resumed, or the wait ended with its
+ * turn, chat or session. `by` is the member who settled it, `null` when no
+ * person did (the agent's runtime, the judge or the mode) or the task's host
+ * did not say.
+ */
+export const botSurfaceResolutionSchema = lazySchema(() =>
+  z.object({
+    state: z.enum([
+      "answered",
+      "skipped",
+      "allowed",
+      "denied",
+      "resumed",
+      "ended",
+    ]),
+    by: z
+      .object({ kind: z.literal("person"), userId: z.string().min(1) })
+      .nullable(),
+    at: z.number(),
+  }),
+);
+export type BotSurfaceResolution = z.infer<typeof botSurfaceResolutionSchema>;
+
+const botSurfaceIdSchema = lazySchema(() => z.string().min(1).max(255));
+
+/**
+ * What in a task a bot's post points at (Tracy Bots T89, decision 120): a
+ * question or a tool approval an agent of the task waits on, a browser
+ * session (parked for a person, or any of the task's), or an artifact. One
+ * per post. `hostId` is the host that runs the task's agent (or serves the
+ * artifact); `epicId` the task. `resolution` is written by the bot's bound
+ * host when the task's host reports the surface settled; `null` while it is
+ * open, and always for an artifact.
+ */
+export const botSurfaceReferenceSchema = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("question"),
+      epicId: botSurfaceIdSchema,
+      hostId: botSurfaceIdSchema,
+      chatId: botSurfaceIdSchema,
+      blockId: botSurfaceIdSchema,
+      resolution: botSurfaceResolutionSchema.nullable(),
+    }),
+    z.object({
+      kind: z.literal("approval"),
+      epicId: botSurfaceIdSchema,
+      hostId: botSurfaceIdSchema,
+      chatId: botSurfaceIdSchema,
+      approvalId: botSurfaceIdSchema,
+      resolution: botSurfaceResolutionSchema.nullable(),
+    }),
+    z.object({
+      kind: z.literal("browser"),
+      epicId: botSurfaceIdSchema,
+      hostId: botSurfaceIdSchema,
+      chatId: botSurfaceIdSchema.nullable(),
+      sessionId: botSurfaceIdSchema,
+      /** The park the post names: a session parked again is another surface. */
+      parkId: botSurfaceIdSchema,
+      tabId: botSurfaceIdSchema.nullable(),
+      resolution: botSurfaceResolutionSchema.nullable(),
+    }),
+    z.object({
+      kind: z.literal("artifact"),
+      epicId: botSurfaceIdSchema,
+      hostId: botSurfaceIdSchema,
+      /** The artifact's path inside its task, as the bot named it. */
+      artifactPath: z.string().min(1).max(4096),
+      resolution: z.null(),
+    }),
+  ]),
+);
+export type BotSurfaceReference = z.infer<typeof botSurfaceReferenceSchema>;
+export type BotSurfaceKind = BotSurfaceReference["kind"];
+
+/**
+ * The live user row (`chat.subscribe@1.25`): the frozen pre-conversation
+ * shape with the bot-conversation request. ABSENT means "not a conversation
+ * request" - every row outside a bot conversation, and every row written
+ * before the key - so it is `.optional()` for the reason `turnProfile` is: a
+ * defaulted key would be required on the type at the hundreds of sites that
+ * build a user row with no request to state.
+ *
+ * Tolerance, not projection: every line below `1.25` binds the frozen copy
+ * above and strips the key on decode, and such a peer renders the row as the
+ * plain user message it is.
+ */
+export const userMessageSchemaPreCanvas = lazySchema(() =>
+  userMessageSchemaPreConversation.safeExtend({
+    conversationRequest: conversationRequestSchema.optional(),
+    /**
+     * The bot's question this message answers (Tracy Bots, decision 121):
+     * a member's answer or Skip from the question card, written as their
+     * message on the record the question is on. Absent on every other row,
+     * and optional for `conversationRequest`'s reason.
+     */
+    questionAnswer: botQuestionAnswerSchema.optional(),
+  }),
+);
+/** The user row every `chat.subscribe` line through `1.42` ships: no `slack` payload. */
+export const userMessageSchemaPreSlack = lazySchema(() =>
+  z
+    .object({
+      ...userMessageSchemaPreCanvas.shape,
+      message: userMessagePayloadSchemaPreSlack,
+    })
+    .superRefine(userMessageSenderKindRefine),
+);
+export const userMessageSchema = lazySchema(() =>
+  z
+    .object({
+      ...userMessageSchemaPreCanvas.shape,
+      message: userMessagePayloadSchema,
+      /**
+       * `true` on a member's message whose words were spoken on a call
+       * (`chat.subscribe@1.43`). Absent on every other row, and optional for
+       * `conversationRequest`'s reason.
+       */
+      spoken: z.literal(true).optional(),
+    })
+    .superRefine(userMessageSenderKindRefine),
+);
+export type UserMessage = z.infer<typeof userMessageSchema>;
+
+/**
+ * Live sender/anchor, pre-annotation payload. Bound to
+ * `chat.subscribe@1.4–1.5` `messageAccepted` / common frames so those
+ * released lines never declare `browserAnnotations`.
+ */
+export const userMessageSchemaPreAnnotation = lazySchema(() =>
+  z
+    .object({
+      role: z.literal("user"),
+      messageId: z.string(),
+      sender: userMessageSenderSchema,
+      message: userMessagePayloadSchemaPreAnnotation,
+      timestamp: z.number(),
+      sessionAnchor: chatSessionAnchorSchema.nullable(),
+    })
+    .superRefine(userMessageSenderKindRefine),
+);
+
+// Terminal outcome of one markdown-referenced image the host tried to
+// resolve. `resolved` ⇒ `attachmentHash`/`mediaType` are present; every other
+// state renders a chip (consent/error) and carries no attachment.
+export const imageResolutionStateSchema = lazySchema(() =>
+  z.enum(["resolved", "blocked", "consent-required", "oversized", "not-found"]),
+);
+export type ImageResolutionState = z.infer<typeof imageResolutionStateSchema>;
+
+const imageResolutionEntryBaseFields = {
+  source: lazySchema(() => z.string()),
+  canonicalSource: lazySchema(() => z.string()),
+  width: lazySchema(() => imageDimensionSchema.default(null)),
+  height: lazySchema(() => imageDimensionSchema.default(null)),
+} as const;
+
+const nonResolvedImageResolutionStateSchema = lazySchema(() =>
+  z.enum(["blocked", "consent-required", "oversized", "not-found"]),
+);
+
+/**
+ * One entry in an assistant message's durable image resolution record - the
+ * host's authoritative answer for one markdown-referenced image (`![alt](src)`
+ * in the assistant's text) found while streaming/persisting that message. The
+ * GUI renders purely from this record (hash present ⇒ blob-cache render;
+ * any non-resolved state ⇒ terminal failure text) rather than re-deriving
+ * resolution client-side, so background
+ * turns, re-opened chats, and multi-window rendering stay deterministic.
+ * `canonicalSource` is the normalized identity; `source` is the raw markdown
+ * reference as authored.
+ *
+ * State-discriminated so the invariant is structural, not just documented:
+ * `resolved` REQUIRES a non-null `attachmentHash`/`mediaType` (there is
+ * nothing to render otherwise), and every other state FORCES them to `null`
+ * (a blocked/consent-required/error entry must never carry renderable
+ * attachment data).
+ */
+export const imageResolutionEntrySchema = lazySchema(() =>
+  z.discriminatedUnion("state", [
+    z.object({
+      ...imageResolutionEntryBaseFields,
+      state: z.literal("resolved"),
+      attachmentHash: imageSha256HexSchema,
+      mediaType: supportedImageMediaTypeSchema,
+    }),
+    z.object({
+      ...imageResolutionEntryBaseFields,
+      state: nonResolvedImageResolutionStateSchema,
+      attachmentHash: z.null().default(null),
+      mediaType: z.null().default(null),
+    }),
+  ]),
+);
+export type ImageResolutionEntry = z.infer<typeof imageResolutionEntrySchema>;
+
+/**
+ * Which account ONE assistant attempt ran on, snapshotted onto that attempt's
+ * own row.
+ *
+ * Recorded, not derived - the same argument `envCredentialVar` makes a few
+ * fields below, for the same reason it has to. "Which account produced this
+ * turn?" is knowable only while the turn is being dispatched: a provider
+ * fallback hop re-dispatches ONE user message onto a different profile and
+ * rewrites that user row's `sessionAnchor` to the replacement's, so a renderer
+ * that re-derives the answer from the rows around the one it is drawing reads
+ * today's account onto yesterday's attempt. That is the mislabel this exists to
+ * prevent, and no amount of looking at neighbours fixes it - the evidence is
+ * gone by then.
+ *
+ * It differs from `envCredentialVar` in WHEN it is stamped, and the difference
+ * is load-bearing rather than incidental. `envCredentialVar` is stamped from
+ * the adapter's `turn.started`; a provider that errors before its first event -
+ * a rate limit, a billing stop, a signed-out account - emits none. A failed
+ * attempt is exactly the row a fallback hop leaves behind and mislabels, so a
+ * `turn.started`-stamped field would be absent on precisely the row that needs
+ * it. This is stamped where the assistant row is CREATED, before any adapter
+ * event.
+ *
+ * `labelSnapshot` is the profile's display name captured at that instant, not a
+ * name to resolve later: a profile can be renamed or tombstoned, and history
+ * must keep reading as it did. `profileId: null` INSIDE a recorded snapshot is
+ * the positive claim "this attempt ran on the ambient/host login" - distinct
+ * from the whole snapshot being absent, which is the claim that nothing was
+ * recorded at all. Never the account email: this record replicates cross-host
+ * (same scope rule as the session anchor's own profile snapshot).
+ */
+export const assistantTurnProfileSchema = lazySchema(() =>
+  z.object({
+    profileId: z.string().nullable(),
+    labelSnapshot: z.string().nullable(),
+  }),
+);
+export type AssistantTurnProfile = z.infer<typeof assistantTurnProfileSchema>;
+
+/**
+ * What a bot announces at its channel's top level (Tracy Bots, decision 41).
+ * An announcement only informs: a bot asks a person with a question card
+ * (`traycer_ask`), never an announcement. `question` stays a member the
+ * reader accepts because released lines carry it (cli-v1.5.2 serves it on
+ * `chat.subscribe` 1.23 to 1.32, and a released host may still send such a
+ * row); no current host writes it and no tool offers it.
+ */
+export const botAnnouncementKindSchema = lazySchema(() =>
+  z.enum(["proposal", "automation", "bot-created", "policy", "question"]),
+);
+export type BotAnnouncementKind = z.infer<typeof botAnnouncementKindSchema>;
+
+/**
+ * A channel bot row's announcement: its kind, and the one thing it points
+ * at - an http(s) URL or an epic-relative path - or `null`. The host's
+ * writer bounds and checks `link`; a reader renders it as a link.
+ */
+export const botAnnouncementSchema = lazySchema(() =>
+  z.object({
+    kind: botAnnouncementKindSchema,
+    link: z.string().min(1).nullable(),
+  }),
+);
+export type BotAnnouncement = z.infer<typeof botAnnouncementSchema>;
+
+// Historical message fields; newer blocks are selected only by the live
+// extension below. Unchanged nested leaves follow the existing freeze pattern.
+export const assistantMessageSchemaV18 = lazySchema(() =>
+  z.object({
+    role: z.literal("assistant"),
+    /**
+     * Stable, unique id for this assistant row, minted once at creation and never
+     * changed. The flat chat storage keys on it directly (`a:{messageId}`), so it
+     * must be unique per row - unlike `startedAt`/`turnId`, which two distinct
+     * assistant rows can share (a safe-point steering continuation reuses the
+     * turn's `startedAt`/`turnId`; a multi-message provider turn shares one
+     * `turnId`). Live turns mint a UUID; reconciled rows carry the provider
+     * message id; migrated legacy rows are assigned one.
+     */
+    messageId: z.string().min(1),
+    sender: agentSenderSchema,
+    blocks: z.array(contentBlockSchemaV18),
+    /**
+     * Wall-clock the turn began (ms). Set once at turn-start and never
+     * overwritten; distinct from `timestamp` which the host rewrites on every
+     * streaming delta. Nullable + default-null so already-persisted records
+     * written before this field existed parse cleanly (missing key → null)
+     * instead of rejecting the whole snapshot.
+     */
+    startedAt: z.number().nullable().default(null),
+    blocksVersion: z.number().int().nonnegative().optional(),
+    timestamp: z.number(),
+    turnId: z.string().nullable(),
+    usage: tokenUsageSchema.nullable(),
+    /**
+     * Reasoning/thinking effort the turn ran with (harness-specific id, e.g.
+     * "high"). `null` when the harness/model exposes no effort control.
+     */
+    reasoningEffort: z.string().nullable().default(null),
+    /**
+     * Service / speed tier the turn ran with (e.g. Codex `"priority"` for the
+     * Fast upgrade). `null` when the run used the harness default tier.
+     */
+    serviceTier: z.string().nullable().default(null),
+    /**
+     * NAME of the environment variable whose credential authenticated this turn
+     * (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`); `null` when the turn ran
+     * on the profile the user signed into.
+     *
+     * Recorded, not derived. The provider CLI prefers an env key/token over its
+     * own signed-in store, so "which account did this turn actually run on?" has
+     * an answer the displayed profile label alone gets WRONG - and the answer is
+     * knowable only at spawn time. It is stamped from the adapter's `turn.started`
+     * and never recomputed; a renderer that re-derived it at display time would
+     * answer for today's environment, not this turn's.
+     *
+     * `null` IS the claim "the profile sign-in was used", so the field carries
+     * meaning in both states. Defaulted so turns persisted before it existed parse
+     * cleanly - those legacy rows read as `null` and therefore make that claim
+     * without evidence, which is why the renderer shows the annotation only on a
+     * POSITIVE value and never renders a "signed in normally" badge from absence.
+     *
+     * The name only, never the value: this record replicates cross-host.
+     */
+    envCredentialVar: z.string().nullable().default(null),
+    /**
+     * Durable image resolution record for this message's markdown-referenced
+     * images (`chat.subscribe@1.6`), one entry per distinct `canonicalSource`.
+     * Defaulted so messages persisted before image support existed parse
+     * cleanly - a pre-1.6 message has no record, and its images render as
+     * consent chips (see `imageResolutionEntrySchema`).
+     */
+    imageResolutions: z.array(imageResolutionEntrySchema).default([]),
+  }),
+);
+export const assistantMessageSchema = lazySchema(() =>
+  assistantMessageSchemaV18.extend({
+    blocks: z.array(contentBlockSchema),
+    /**
+     * This attempt's own profile snapshot - see {@link assistantTurnProfileSchema}
+     * for what it records and why it is stamped at row creation.
+     *
+     * ABSENT means NOT RECORDED: a row written by a host predating this field, or
+     * an import/migration that has no such fact to state. It never means "no
+     * profile" - a turn that ran on the ambient login records
+     * `{ profileId: null, labelSnapshot: null }` and says so positively. A reader
+     * must not read a value into the silence; see
+     * `profileLabelsByTurnKeyFromMessages` (gui-app `rendered-messages.ts`) for
+     * the one narrow shape in which falling back to the surrounding anchor walk
+     * is still provably correct, and why every other shape refuses instead.
+     *
+     * Spelled `.optional()` rather than this file's usual additive
+     * `.nullable().default(null)`. The defaulted form makes the key REQUIRED on
+     * the inferred type, and `AssistantMessage` is written as an object literal
+     * at ~150 sites across the host, the GUI and their suites - none of which has
+     * a profile fact to state. Absence already carries the exact meaning needed
+     * here, and it is how `transcriptRowContextSchema` next door spells "the
+     * producer declines to speak".
+     *
+     * LIVE LINE ONLY. Every frozen `assistantMessageSchemaPre*` copy must stay
+     * without it - and so must `assistantMessageSchemaV18`, which is not a
+     * historical base class but the frozen `chat.subscribe@1.7`/`@1.8` field set
+     * this schema happens to extend.
+     */
+    turnProfile: assistantTurnProfileSchema.optional(),
+    /**
+     * The bot's announcement this row is (Tracy Bots, decision 41). Present
+     * only on a bot row at a bot channel's top level, where it is the only
+     * kind of bot row; absent on every other assistant row. Optional for the
+     * `turnProfile` reason above, and live line only for the same reason.
+     */
+    announcement: botAnnouncementSchema.optional(),
+    /**
+     * The choices a bot reply offers the person (Tracy Bots,
+     * decision 56), shown as clickable choices; a chosen one is posted as an
+     * ordinary message on that surface. Present only on a bot reply that asks;
+     * absent everywhere else. Optional and live line only, as `turnProfile`.
+     */
+    options: z.array(z.string().min(1)).min(1).optional(),
+    /**
+     * The member's post a bot's direct reply answers, by its message id
+     * (Tracy Bots, reply mode `direct`). Present only on a bot reply at a
+     * channel's top level; absent everywhere else. Optional and live line
+     * only, as `turnProfile`. Not the agent sender's `inReplyTo`, which
+     * names an agent-to-agent message.
+     */
+    repliesTo: z.string().min(1).optional(),
+    /**
+     * The questions this bot row asks without waiting (Tracy Bots, decision
+     * 121), with each one's settlement; the host rewrites it as each settles.
+     * The row's text and `options` (the first question's) stand alone for a
+     * reader that does not draw the card. Optional and live line only, as
+     * `turnProfile`.
+     */
+    question: botQuestionSchema.optional(),
+    /**
+     * What in a task this bot post points at (Tracy Bots T89), drawn as a
+     * card under the post's text; the bound host rewrites its `resolution`
+     * when the task's host reports it settled. The text stands alone for a
+     * reader that does not draw the card. Optional and live line only, as
+     * `turnProfile`.
+     */
+    surface: botSurfaceReferenceSchema.optional(),
+  }),
+);
+export type AssistantMessage = z.infer<typeof assistantMessageSchema>;
+
+export const messageSchema = lazySchema(() =>
+  z.discriminatedUnion("role", [userMessageSchema, assistantMessageSchema]),
+);
+/** The message union of `chat.subscribe` lines through `1.42`: the user arm without `slack`. */
+export const messageSchemaPreSlack = lazySchema(() =>
+  z.discriminatedUnion("role", [
+    userMessageSchemaPreSlack,
+    assistantMessageSchema,
+  ]),
+);
+/** Epic records and released chat lines retain the four-kind operation block. */
+export const assistantMessageSchemaPreHtml = lazySchema(() =>
+  assistantMessageSchema.extend({ blocks: z.array(contentBlockSchemaPreHtml) }),
+);
+export const messageSchemaPreHtml = lazySchema(() =>
+  z.discriminatedUnion("role", [
+    userMessageSchemaPreCanvas,
+    assistantMessageSchemaPreHtml,
+  ]),
+);
+export type Message = z.infer<typeof messageSchema>;
+
+/**
+ * The message union shipped on chat.subscribe through 1.14. Its assistant arm
+ * is the pre-receipt freeze, not the live one: `1.13`/`1.14` predate `1.18`.
+ */
+export const messageSchemaPreMessageDelivery = lazySchema(() =>
+  z.discriminatedUnion("role", [
+    userMessageSchemaV18,
+    assistantMessageSchemaPreReceipt,
+  ]),
+);
+
+// ── Wire-freeze variants (pre-Reasonix, LIVE shape) ─────────────────────────
+// Hand-frozen copies of the LIVE message schemas — every field the live shapes
+// carry, including `imageResolutions` and the `turnTailUuid`-bearing anchor —
+// with only the harness-bearing leaves swapped for their pre-Reasonix copies.
+// Bound to `chat.subscribe@1.6`, which shipped that whole shape at 19 harness
+// ids. The `1.0–1.5` copies above additionally freeze shape; these freeze the
+// enum alone. Field-for-field hand copies, NOT `.extend()` off the live shape.
+export const userMessageSchemaPreReasonix = lazySchema(() =>
+  z
+    .object({
+      role: z.literal("user"),
+      messageId: z.string(),
+      sender: userMessageSenderSchemaPreReasonix,
+      // Pre-annotation payload: `browserAnnotations` is live-1.7-only, minted
+      // after these lines shipped, so a released peer's wire never carries it.
+      // This freeze now also serves the `1.4`/`1.5` chat trees that the removed
+      // pre-turnTailUuid copy used to, and those are host->client slots - a
+      // consumer reading the key there would find it undefined.
+      message: userMessagePayloadSchemaPreAnnotation,
+      timestamp: z.number(),
+      sessionAnchor: chatSessionAnchorSchemaPreReasonix.nullable(),
+    })
+    .superRefine((message, ctx) => {
+      if (message.sender.type === message.message.kind) return;
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["message", "kind"],
+        message: "User message sender.type must match message.kind.",
+      });
+    }),
+);
+
+/**
+ * Exact user-message branch released on `chat.subscribe@1.6`: live session
+ * anchors, but neither Reasonix sender ids nor browser payload fields.
+ */
+export const userMessageSchemaV16 = lazySchema(() =>
+  z
+    .object({
+      role: z.literal("user"),
+      messageId: z.string(),
+      sender: userMessageSenderSchemaPreReasonix,
+      message: userMessagePayloadSchemaPreAnnotation,
+      timestamp: z.number(),
+      sessionAnchor: chatSessionAnchorSchemaPreReasonix.nullable(),
+    })
+    .superRefine(userMessageSenderKindRefine),
+);
+
+export const assistantMessageSchemaPreReasonix = lazySchema(() =>
+  z.object({
+    role: z.literal("assistant"),
+    messageId: z.string().min(1),
+    sender: agentSenderSchemaPreReasonix,
+    blocks: z.array(contentBlockSchemaPreReasonix),
+    startedAt: z.number().nullable().default(null),
+    blocksVersion: z.number().int().nonnegative().optional(),
+    timestamp: z.number(),
+    turnId: z.string().nullable(),
+    usage: tokenUsageSchema.nullable(),
+    reasoningEffort: z.string().nullable().default(null),
+    serviceTier: z.string().nullable().default(null),
+    imageResolutions: z.array(imageResolutionEntrySchema).default([]),
+  }),
+);
+
+export const messageSchemaPreReasonix = lazySchema(() =>
+  z.discriminatedUnion("role", [
+    userMessageSchemaPreReasonix,
+    assistantMessageSchemaPreReasonix,
+  ]),
+);
+
+// ── Wire-freeze variants (pre-inReplyTo) ────────────────────────────────────
+// Hand-frozen copies of the message schemas with the sender leaf swapped for
+// its pre-`inReplyTo` freeze (see `agentSenderSchemaPreInReplyTo`). Bound to the
+// released `chat.subscribe@1.0–1.3` serverFrames so those lines structurally
+// match the shipped wire and strip `inReplyTo` for older peers. Field-for-field
+// hand copies, NOT `.omit()`/`.extend()` off the live shape — a future message
+// field must not silently leak onto the frozen wire. Non-sender fields reuse the
+// live sub-schemas except the session anchor: released peers must also stay on
+// the pre-Reasonix anchor union, otherwise a new host can emit a discriminant
+// their installed schema does not know.
+export const userMessageSchemaPreInReplyTo = lazySchema(() =>
+  z
+    .object({
+      role: z.literal("user"),
+      messageId: z.string(),
+      sender: userMessageSenderSchemaPreInReplyTo,
+      message: userMessagePayloadSchemaPreAnnotation,
+      timestamp: z.number(),
+      // Pre-Reasonix, NOT a pre-`turnTailUuid` copy: the released baseline
+      // proves `1.0–1.3` SHIPPED the Claude anchor's `turnTailUuid` (the minors
+      // composed the then-live union at release), so a transcription without it
+      // is a retroactive narrowing - the exact silent field-strip the
+      // released-line-narrowing test exists to catch.
+      sessionAnchor: chatSessionAnchorSchemaPreReasonix.nullable(),
+    })
+    .superRefine(userMessageSenderKindRefine),
+);
+
+export const assistantMessageSchemaPreInReplyTo = lazySchema(() =>
+  z.object({
+    role: z.literal("assistant"),
+    messageId: z.string().min(1),
+    sender: agentSenderSchemaPreInReplyTo,
+    // Pre-Reasonix block union: `plan`, `text.providerNotice` and `steer.sender`
+    // all carry a harness id onto this released line.
+    blocks: z.array(contentBlockSchemaPreImage),
+    startedAt: z.number().nullable().default(null),
+    blocksVersion: z.number().int().nonnegative().optional(),
+    timestamp: z.number(),
+    turnId: z.string().nullable(),
+    usage: tokenUsageSchema.nullable(),
+    reasoningEffort: z.string().nullable().default(null),
+    serviceTier: z.string().nullable().default(null),
+  }),
+);
+
+export const messageSchemaPreInReplyTo = lazySchema(() =>
+  z.discriminatedUnion("role", [
+    userMessageSchemaPreInReplyTo,
+    assistantMessageSchemaPreInReplyTo,
+  ]),
+);
+
+// ── Wire-freeze variant (pre-image) ─────────────────────────────────────────
+// Hand-frozen copy of `assistantMessageSchema` from before image support
+// existed, with `blocks` swapped for the frozen `contentBlockSchemaPreImage`
+// union. Bound to every released `chat.subscribe@1.0-1.5` minor (via the
+// frozen chat-tree schemas) so those lines structurally match the shipped
+// wire and can never observe `imageResults`/the image resolution record.
+// `sender` reuses the LIVE (`inReplyTo`-bearing) shape - `1.4` is the minor
+// that introduced it, and every minor this freeze binds (1.0-1.5) already
+// shipped after that point except 1.0-1.3, which bind their own
+// `assistantMessageSchemaPreInReplyTo` above instead. Field-for-field hand
+// copy, NOT `.omit()`, so a future message field cannot silently leak onto a
+// released wire line.
+export const assistantMessageSchemaPreImage = lazySchema(() =>
+  z.object({
+    role: z.literal("assistant"),
+    messageId: z.string().min(1),
+    // Pre-Reasonix sender + block union. `1.4`/`1.5` shipped `inReplyTo`, so the
+    // sender keeps that field and freezes only the harness enum.
+    sender: agentSenderSchemaPreReasonix,
+    blocks: z.array(contentBlockSchemaPreImage),
+    startedAt: z.number().nullable().default(null),
+    blocksVersion: z.number().int().nonnegative().optional(),
+    timestamp: z.number(),
+    turnId: z.string().nullable(),
+    usage: tokenUsageSchema.nullable(),
+    reasoningEffort: z.string().nullable().default(null),
+    serviceTier: z.string().nullable().default(null),
+  }),
+);
+
+// The user branch is the pre-Reasonix freeze, not the live `userMessageSchema`:
+// user messages carry no image fields (nothing changed for them at the
+// image-freeze point), but their sender/anchor harness ENUM must stay frozen
+// for the released `chatSchemaV14`/`chatSchemaV15` trees this union serves.
+// An earlier revision bound a hand-frozen "pre-turnTailUuid" anchor copy here
+// on the belief that `1.4`/`1.5` shipped before the field existed; the
+// released baseline disproved that (those minors composed the then-live
+// anchor union at release, `turnTailUuid` included), so the copy was a
+// retroactive narrowing and was removed.
+export const messageSchemaPreImage = lazySchema(() =>
+  z.discriminatedUnion("role", [
+    userMessageSchemaPreReasonix,
+    assistantMessageSchemaPreImage,
+  ]),
+);
+
+// ── Wire-freeze variant (pre-interview-settlement, `chat.subscribe@1.6`) ────
+// Hand-frozen copy of `assistantMessageSchema` as the `host-v1.2.0-rc.1` `1.6`
+// line shipped it: the image fields ARE present (that is the minor that added
+// them), and only `blocks` is swapped for the frozen
+// `contentBlockSchemaPreSettlement` union so a `1.6` peer never observes
+// canonical interview settlement or answer selection evidence.
+//
+// `sender` additionally takes its pre-Reasonix freeze: `1.6` is released with a
+// nineteen-id harness enum, so the assistant row's `harnessId` - stamped
+// per-turn off the chat's settings and never rewritten - must not carry an id
+// that cohort cannot decode.
+//
+// Field-for-field hand copy, NOT `.omit()`/`.extend()` - see
+// `assistantMessageSchemaPreImage` for why a released line must not follow the
+// live shape by reference.
+export const assistantMessageSchemaPreSettlement = lazySchema(() =>
+  z.object({
+    role: z.literal("assistant"),
+    messageId: z.string().min(1),
+    sender: agentSenderSchemaPreReasonix,
+    blocks: z.array(contentBlockSchemaPreSettlement),
+    startedAt: z.number().nullable().default(null),
+    blocksVersion: z.number().int().nonnegative().optional(),
+    timestamp: z.number(),
+    turnId: z.string().nullable(),
+    usage: tokenUsageSchema.nullable(),
+    reasoningEffort: z.string().nullable().default(null),
+    serviceTier: z.string().nullable().default(null),
+    imageResolutions: z.array(imageResolutionEntrySchema).default([]),
+  }),
+);
+
+// The user branch keeps every live field EXCEPT the harness enum: the Claude
+// anchor's `turnTailUuid` predates the `1.6` cut so a real `1.6` peer does
+// observe it, but that peer's `sessionAnchor` union has no Reasonix variant and
+// its A2A sender enum has no Reasonix id. Browser payload fields also arrived
+// after 1.6, so the user branch binds the exact combined freeze.
+export const messageSchemaPreSettlement = lazySchema(() =>
+  z.discriminatedUnion("role", [
+    userMessageSchemaV16,
+    assistantMessageSchemaPreSettlement,
+  ]),
+);
+
+// ── Wire-freeze variant (pre-fallback, `chat.subscribe@1.9`) ───────────────
+// Hand-frozen copy of `assistantMessageSchema` as the frozen `1.9` line ships
+// it: the complete live shape with `blocks` swapped for
+// `contentBlockSchemaPreFallback`, so that line can observe neither a
+// `providerNotice.noticeKind` nor an error `failure` that `1.10` added. `1.7`
+// and `1.8` bind `messageSchemaV18` below instead, which also holds back
+// delivery placement. The user branch needs no freeze - user messages carry
+// no provider notice - so the union binds the LIVE `userMessageSchema`, which
+// is what `1.9` actually ships (browser annotations included).
+//
+// Field-for-field hand copy, NOT `.extend()`: see
+// `assistantMessageSchemaPreImage` for why a released line must not follow the
+// live shape by reference.
+export const assistantMessageSchemaPreFallback = lazySchema(() =>
+  z.object({
+    role: z.literal("assistant"),
+    messageId: z.string().min(1),
+    sender: agentSenderSchema,
+    blocks: z.array(contentBlockSchemaPreFallback),
+    startedAt: z.number().nullable().default(null),
+    blocksVersion: z.number().int().nonnegative().optional(),
+    timestamp: z.number(),
+    turnId: z.string().nullable(),
+    usage: tokenUsageSchema.nullable(),
+    reasoningEffort: z.string().nullable().default(null),
+    serviceTier: z.string().nullable().default(null),
+    envCredentialVar: z.string().nullable().default(null),
+    imageResolutions: z.array(imageResolutionEntrySchema).default([]),
+  }),
+);
+
+export const messageSchemaPreFallback = lazySchema(() =>
+  z.discriminatedUnion("role", [
+    userMessageSchemaV18,
+    assistantMessageSchemaPreFallback,
+  ]),
+);
+
+// ── Wire-freeze variant (pre-shell-host, `chat.subscribe@1.10`) ─────────────
+// Hand-frozen copy of `assistantMessageSchema` as the frozen `1.10` line ships
+// it: the complete live shape - `turnProfile` included - with `blocks` swapped
+// for `contentBlockSchemaPreShellHost`, so that line never observes the host a
+// resume trigger's shell runs on, which `1.11` added. The user branch needs no
+// freeze for the same reason `1.9`'s does not.
+//
+// Field-for-field hand copy, NOT `.extend()`: see
+// `assistantMessageSchemaPreImage` for why a released line must not follow the
+// live shape by reference.
+export const assistantMessageSchemaPreShellHost = lazySchema(() =>
+  z.object({
+    role: z.literal("assistant"),
+    messageId: z.string().min(1),
+    sender: agentSenderSchema,
+    blocks: z.array(contentBlockSchemaPreShellHost),
+    startedAt: z.number().nullable().default(null),
+    blocksVersion: z.number().int().nonnegative().optional(),
+    timestamp: z.number(),
+    turnId: z.string().nullable(),
+    usage: tokenUsageSchema.nullable(),
+    reasoningEffort: z.string().nullable().default(null),
+    serviceTier: z.string().nullable().default(null),
+    envCredentialVar: z.string().nullable().default(null),
+    imageResolutions: z.array(imageResolutionEntrySchema).default([]),
+    turnProfile: assistantTurnProfileSchema.optional(),
+  }),
+);
+
+export const messageSchemaPreShellHost = lazySchema(() =>
+  z.discriminatedUnion("role", [
+    userMessageSchemaV18,
+    assistantMessageSchemaPreShellHost,
+  ]),
+);
+
+// ── Wire-freeze variant (pre-browser, `chat.subscribe@1.11`-`@1.12`) ───────
+// These lines include the shell-host fields but predate the browser-session
+// enrichment. Keep the assistant block union hand-bound to the pre-browser
+// copy so a live text block cannot widen either released line.
+export const assistantMessageSchemaPreBrowser = lazySchema(() =>
+  z.object({
+    role: z.literal("assistant"),
+    messageId: z.string().min(1),
+    sender: agentSenderSchema,
+    blocks: z.array(contentBlockSchemaPreBrowser),
+    startedAt: z.number().nullable().default(null),
+    blocksVersion: z.number().int().nonnegative().optional(),
+    timestamp: z.number(),
+    turnId: z.string().nullable(),
+    usage: tokenUsageSchema.nullable(),
+    reasoningEffort: z.string().nullable().default(null),
+    serviceTier: z.string().nullable().default(null),
+    envCredentialVar: z.string().nullable().default(null),
+    imageResolutions: z.array(imageResolutionEntrySchema).default([]),
+    turnProfile: assistantTurnProfileSchema.optional(),
+  }),
+);
+
+export const messageSchemaPreBrowser = lazySchema(() =>
+  z.discriminatedUnion("role", [
+    userMessageSchemaV18,
+    assistantMessageSchemaPreBrowser,
+  ]),
+);
+
+// ── Wire-freeze variant (pre-receipt, `chat.subscribe@1.13`-`@1.17`) ───────
+// Hand-frozen copy of `assistantMessageSchema` as those lines ship it: the
+// complete live shape, `turnProfile` included, with `blocks` swapped for
+// `contentBlockSchemaPreReceipt` so a settled notice's `receipt` (`1.18`)
+// cannot reach them. Same key order as the live `.extend()` result, because the
+// order is part of the captured digest. Bound by `messageSchemaPreReceipt`
+// (`1.15`-`1.17`) and `messageSchemaPreMessageDelivery` (`1.13`/`1.14`).
+export const assistantMessageSchemaPreReceipt = lazySchema(() =>
+  z.object({
+    role: z.literal("assistant"),
+    messageId: z.string().min(1),
+    sender: agentSenderSchema,
+    blocks: z.array(contentBlockSchemaPreReceipt),
+    startedAt: z.number().nullable().default(null),
+    blocksVersion: z.number().int().nonnegative().optional(),
+    timestamp: z.number(),
+    turnId: z.string().nullable(),
+    usage: tokenUsageSchema.nullable(),
+    reasoningEffort: z.string().nullable().default(null),
+    serviceTier: z.string().nullable().default(null),
+    envCredentialVar: z.string().nullable().default(null),
+    imageResolutions: z.array(imageResolutionEntrySchema).default([]),
+    turnProfile: assistantTurnProfileSchema.optional(),
+  }),
+);
+
+/** The message union shipped on chat.subscribe `1.15` through `1.17`. */
+export const messageSchemaPreReceipt = lazySchema(() =>
+  z.discriminatedUnion("role", [
+    userMessageSchemaPreConversation,
+    assistantMessageSchemaPreReceipt,
+  ]),
+);
+
+// ── Wire-freeze variant (pre-MCP-App, `chat.subscribe@1.18`-`@1.21`) ──────────
+// Hand-frozen copy of `assistantMessageSchema` as those lines ship it: the
+// complete live shape with `blocks` swapped for `contentBlockSchemaPreMcpApp`, so
+// a tool call's `mcpApp` stamp (`1.23`) cannot reach them. Same key
+// order as the live `.extend()` result, because the order is part of the
+// captured digest.
+export const assistantMessageSchemaPreMcpApp = lazySchema(() =>
+  z.object({
+    role: z.literal("assistant"),
+    messageId: z.string().min(1),
+    sender: agentSenderSchema,
+    blocks: z.array(contentBlockSchemaPreMcpApp),
+    startedAt: z.number().nullable().default(null),
+    blocksVersion: z.number().int().nonnegative().optional(),
+    timestamp: z.number(),
+    turnId: z.string().nullable(),
+    usage: tokenUsageSchema.nullable(),
+    reasoningEffort: z.string().nullable().default(null),
+    serviceTier: z.string().nullable().default(null),
+    envCredentialVar: z.string().nullable().default(null),
+    imageResolutions: z.array(imageResolutionEntrySchema).default([]),
+    turnProfile: assistantTurnProfileSchema.optional(),
+  }),
+);
+
+/** The message union shipped on chat.subscribe `1.18` through `1.21`. */
+export const messageSchemaPreMcpApp = lazySchema(() =>
+  z.discriminatedUnion("role", [
+    userMessageSchemaPreConversation,
+    assistantMessageSchemaPreMcpApp,
+  ]),
+);
+
+export const messageSchemaV18 = lazySchema(() =>
+  z.discriminatedUnion("role", [
+    userMessageSchemaV18,
+    assistantMessageSchemaV18,
+  ]),
+);

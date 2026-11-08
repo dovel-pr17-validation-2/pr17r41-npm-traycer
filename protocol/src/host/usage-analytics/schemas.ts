@@ -1,0 +1,338 @@
+import { z } from "zod";
+import { lazySchema } from "@traycer/protocol/framework/lazy-schema";
+
+/**
+ * Wire mirror of `@traycerai/common`'s `UsageSummary` shapes (the shared
+ * aggregator's output) - `@traycer/protocol` is an OSS package and must not
+ * depend on the internal `@traycerai/common` package, so these are
+ * independently declared here, the same way `usageAnalyticsIngestFactV1Schema`
+ * mirrors the host's fact enums without importing them.
+ */
+
+export const usageSummaryOutcomeSchema = lazySchema(() =>
+  z.enum(["completed", "stopped", "interrupted", "abnormal_exit"]),
+);
+
+export const usageSummaryCompletenessSchema = lazySchema(() =>
+  z.enum(["measured", "partial", "absent"]),
+);
+
+/** Weakest-first ladder from the pricing artifact; `null` never rides the wire - the aggregator already folds a legacy-`null` fact into `unpriced`. */
+export const usageSummaryCostProvenanceSchema = lazySchema(() =>
+  z.enum(["unpriced", "modelPriced", "providerReported"]),
+);
+
+const nonNegativeIntSchema = lazySchema(() => z.number().int().nonnegative());
+
+export const usageSummaryTokenTotalsSchema = lazySchema(() =>
+  z.object({
+    uncachedInputTokens: nonNegativeIntSchema,
+    cacheReadInputTokens: nonNegativeIntSchema,
+    cacheCreationTokens: nonNegativeIntSchema,
+    outputTokens: nonNegativeIntSchema,
+  }),
+);
+
+/**
+ * The aggregator's grouping key: a local calendar day in the request's
+ * timezone, `YYYY-MM-DD` (what `en-CA` numeric formatting emits). Shaped
+ * rather than merely length-bounded because this key is parsed, sorted and
+ * decremented as a calendar date on the client - a `"2026-1-1"` would pass
+ * a length check and then mis-sort and mis-label.
+ */
+const usageDayKeySchema = lazySchema(() =>
+  z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+);
+
+export const usageSummaryBucketSchema = lazySchema(() =>
+  z.object({
+    day: usageDayKeySchema,
+    harnessId: z.string().min(1).max(64),
+    model: z.string().min(1).max(255),
+    factCount: nonNegativeIntSchema,
+    tokens: usageSummaryTokenTotalsSchema,
+    knownCostUsd: z.number().finite(),
+    /** Sum of every non-null `cacheSavingsUsd` in this bucket. */
+    knownCacheSavingsUsd: z.number().finite(),
+    /** Sum of every non-null `reasoningTokens` in this bucket - informational only, never folded into `tokens`. */
+    knownReasoningTokens: nonNegativeIntSchema,
+    costProvenance: usageSummaryCostProvenanceSchema,
+  }),
+);
+
+export const usageSummaryWindowBoundsSchema = lazySchema(() =>
+  z.object({
+    timezone: z.string().min(1).max(100),
+    windowDays: z.number().int().positive(),
+    startAtInclusive: nonNegativeIntSchema,
+    endAtExclusive: nonNegativeIntSchema,
+  }),
+);
+
+/** Cost + fact count + token count for one provenance rung - ticket 10's per-provenance cost split. */
+export const usageProvenanceSplitEntrySchema = lazySchema(() =>
+  z.object({
+    costUsd: z.number().finite(),
+    factCount: nonNegativeIntSchema,
+    tokenCount: nonNegativeIntSchema,
+  }),
+);
+
+export const usageProvenanceSplitSchema = lazySchema(() =>
+  z.object({
+    unpriced: usageProvenanceSplitEntrySchema,
+    modelPriced: usageProvenanceSplitEntrySchema,
+    providerReported: usageProvenanceSplitEntrySchema,
+  }),
+);
+
+export const usageSummaryTotalsSchema = lazySchema(() =>
+  z.object({
+    factCount: nonNegativeIntSchema,
+    tokens: usageSummaryTokenTotalsSchema,
+    knownCostUsd: z.number().finite(),
+    /** Sum of every non-null `cacheSavingsUsd` in the window. */
+    knownCacheSavingsUsd: z.number().finite(),
+    /** Sum of every non-null `reasoningTokens` in the window - informational only, never folded into `tokens`. */
+    knownReasoningTokens: nonNegativeIntSchema,
+    costProvenance: usageSummaryCostProvenanceSchema.nullable(),
+    /** Cost/fact-count/token-count split by the fact's OWN provenance (not the weakest-wins bucket label). */
+    provenanceSplit: usageProvenanceSplitSchema,
+  }),
+);
+
+/** One chat's totals within the window - the per-chat grouping alongside the day×harness×model `buckets`. */
+export const usageSummaryChatBucketSchema = lazySchema(() =>
+  z.object({
+    chatId: z.string().min(1).max(191),
+    epicId: z.string().min(1).max(191),
+    factCount: nonNegativeIntSchema,
+    tokens: usageSummaryTokenTotalsSchema,
+    knownCostUsd: z.number().finite(),
+    knownCacheSavingsUsd: z.number().finite(),
+    knownReasoningTokens: nonNegativeIntSchema,
+    costProvenance: usageSummaryCostProvenanceSchema,
+  }),
+);
+
+/**
+ * One host's totals within the window - the per-host grouping alongside
+ * `chatBuckets`, same shape discipline (identity key + the four "known" sums
+ * + weakest-wins provenance).
+ *
+ * No host NAME rides the wire. A display name is directory state that
+ * changes without the fact changing, and only the client holds the directory
+ * - so the client joins names by `hostId` and renders a truncated id for one
+ * it does not recognize, rather than the host guessing at a name.
+ */
+export const usageSummaryHostBucketSchema = lazySchema(() =>
+  z.object({
+    /** Matches `usageAnalyticsIngestFactV1Schema.hostId`'s bound, not the 191-char identifier bound. */
+    hostId: z.string().min(1).max(36),
+    factCount: nonNegativeIntSchema,
+    tokens: usageSummaryTokenTotalsSchema,
+    knownCostUsd: z.number().finite(),
+    knownCacheSavingsUsd: z.number().finite(),
+    knownReasoningTokens: nonNegativeIntSchema,
+    costProvenance: usageSummaryCostProvenanceSchema,
+  }),
+);
+
+/** One logical-execution fact, shaped for the chat-scoped per-turn drill-down. */
+export const usageTurnRowSchema = lazySchema(() =>
+  z.object({
+    factId: z.string().min(1).max(191),
+    occurredAt: nonNegativeIntSchema,
+    harnessId: z.string().min(1).max(64),
+    model: z.string().min(1).max(255),
+    outcome: usageSummaryOutcomeSchema,
+    usageCompleteness: usageSummaryCompletenessSchema,
+    tokens: usageSummaryTokenTotalsSchema,
+    reasoningTokens: nonNegativeIntSchema.nullable(),
+    costUsd: z.number().finite().nullable(),
+    costProvenance: usageSummaryCostProvenanceSchema.nullable(),
+    cacheSavingsUsd: z.number().finite().nullable(),
+    toolCallCount: nonNegativeIntSchema,
+    toolCallErrorCount: nonNegativeIntSchema,
+  }),
+);
+
+/** Newest-first-capped chat-scoped per-turn rows - see `USAGE_TURN_ROWS_MAX` on the host/server side. */
+export const USAGE_TURN_ROWS_MAX = 500;
+
+export const usageSummaryOutcomeBreakdownSchema = lazySchema(() =>
+  z.object({
+    completed: nonNegativeIntSchema,
+    stopped: nonNegativeIntSchema,
+    interrupted: nonNegativeIntSchema,
+    abnormal_exit: nonNegativeIntSchema,
+  }),
+);
+
+export const usageSummaryCompletenessBreakdownSchema = lazySchema(() =>
+  z.object({
+    measured: nonNegativeIntSchema,
+    partial: nonNegativeIntSchema,
+    absent: nonNegativeIntSchema,
+  }),
+);
+
+export const usageSummarySchema = lazySchema(() =>
+  z.object({
+    window: usageSummaryWindowBoundsSchema,
+    epicId: z.string().min(1).max(191).nullable(),
+    /** The requested `chatId` filter echoed back; `null` = no chat scoping. */
+    chatId: z.string().min(1).max(191).nullable(),
+    totals: usageSummaryTotalsSchema,
+    buckets: z.array(usageSummaryBucketSchema),
+    /**
+     * Sorted by `chatId`. The contract on every version of this line: it is
+     * guaranteed only for an epic- or chat-scoped read (`epicId` or `chatId`
+     * set), where it groups BY chat regardless of whether the request
+     * filtered to one chat. On an account-wide read (neither set) its content
+     * is unspecified and consumers must not read it: the cloud plane and
+     * current hosts return it empty, keeping no per-chat state there, while
+     * a host whose local plane predates that may still fill it. No released
+     * client reads it on such a read; the only renderer is the epic-scoped
+     * usage dialog. `distinctEpicCount`/`distinctChatCount` are filled on
+     * every read.
+     */
+    chatBuckets: z.array(usageSummaryChatBucketSchema),
+    /**
+     * Sorted by `hostId`. Groups BY host regardless of whether the request
+     * filtered to one, on every read. `servedBy: "local"` always
+     * answers with at most a single self-entry - that plane holds only its own
+     * host's facts.
+     */
+    hostBuckets: z.array(usageSummaryHostBucketSchema),
+    distinctEpicCount: nonNegativeIntSchema,
+    distinctChatCount: nonNegativeIntSchema,
+    outcomeBreakdown: usageSummaryOutcomeBreakdownSchema,
+    usageCompletenessBreakdown: usageSummaryCompletenessBreakdownSchema,
+    /**
+     * Chat-scoped per-turn drill-down rows - populated only when the request
+     * carried a `chatId` filter (chat-scope-only by design). The cap is part
+     * of the contract, not just host-side policy: `turnRowsTruncated` is how
+     * an over-cap window is meant to be reported, so an uncapped array is a
+     * host bug the wire should catch rather than an unbounded list for the
+     * drill-down to render.
+     */
+    turnRows: z.array(usageTurnRowSchema).max(USAGE_TURN_ROWS_MAX).nullable(),
+    /** `true` when `turnRows` was capped and older turns were omitted. Always `false` when `turnRows` is `null`. */
+    turnRowsTruncated: z.boolean(),
+  }),
+);
+
+export const usageCostCoverageSchema = lazySchema(() =>
+  z.object({
+    pricedFactCount: nonNegativeIntSchema,
+    unpricedFactCount: nonNegativeIntSchema,
+    pricedTokenCount: nonNegativeIntSchema,
+    unpricedTokenCount: nonNegativeIntSchema,
+  }),
+);
+
+/**
+ * The `host.usage.summary` request FIELDS, before either line's `.strict()`.
+ *
+ * Factored out so `@2.0` can grow the request without restating `@1.0`'s
+ * shape - and so the two lines cannot drift, which on a `.strict()` schema
+ * is not a cosmetic risk: an unknown key here is REJECTED, not stripped.
+ *
+ * A MAJOR, not a minor, and the `.strict()` above is the whole reason: the
+ * additivity a new minor promises is exactly what a strict object refuses.
+ */
+const hostUsageSummaryRequestFields = lazySchema(() =>
+  z.object({
+    timezone: z.string().min(1).max(100),
+    windowDays: z.number().int().positive(),
+    epicId: z.string().min(1).max(191).nullable(),
+    /**
+     * Ticket 10 addition - `.optional()` (unlike the original fields above,
+     * which are required-but-nullable) so a client built against the
+     * original v1.0 shape (no chat filter) still validates: the key can be
+     * absent entirely, not merely `null`. Chat implies its epic - not
+     * required alongside `epicId`. Host-side, the chat must belong to the
+     * authenticated caller.
+     */
+    chatId: z.string().min(1).max(191).nullable().optional(),
+    /**
+     * Ticket 10 addition, same `.optional()` compatibility reasoning as
+     * `chatId`. Absent = the original `windowDays`-bounded behavior.
+     * `"epic"` is valid only alongside a non-null `epicId`/`chatId` -
+     * bounded by that epic/chat's own fact span, never a general unbounded
+     * query.
+     */
+    window: z.enum(["epic"]).optional(),
+    /**
+     * Ticket 13 addition, same `.optional()` compatibility reasoning as
+     * `chatId`. Absent or `null` = every host on the account - the global
+     * dashboard's "All hosts" default. Only ever a NARROWING: the host
+     * resolves the plane and the owner itself, so this cannot widen a read
+     * past the authenticated caller, and on the local plane a host id other
+     * than that host's own simply matches zero facts.
+     */
+    hostId: z.string().min(1).max(36).nullable().optional(),
+  }),
+);
+
+// `host.usage.summary@1.0` request - FROZEN.
+export const hostUsageSummaryRequestSchemaV10 = lazySchema(() =>
+  hostUsageSummaryRequestFields.strict(),
+);
+export type HostUsageSummaryRequestV10 = z.infer<
+  typeof hostUsageSummaryRequestSchemaV10
+>;
+
+/**
+ * `@2.0`: ask for the LOCAL reader explicitly.
+ *
+ * `servedBy` on the response says which reader answered, and on `@1.0` the
+ * host always chose by making the cloud call: the cloud plane is the only
+ * plane a cloud-authorized session gets, and no refusal licenses a fallback
+ * to the local reader. That is the problem for a session holding no cloud
+ * verdict: every refusal it meets - including the expired bearer an
+ * unverified session has - is a retriable 503, so that cohort gets no usage
+ * panel at all while sitting on facts its own host recorded locally.
+ *
+ * `local-only` says "do not make the cloud call"; the local reader answers and
+ * the response is stamped `servedBy: "local"`, a value the released line
+ * already carries. Narrowing only: it can reach nothing the released request
+ * could not.
+ *
+ * THIS LINE'S COMPAT IS NOT THE USUAL STRIP. Every other selector in this
+ * program rides a plain `z.object`, so an older peer drops the key and runs
+ * its released behaviour. This request is `.strict()`, so a `@1.0` peer
+ * REJECTS the whole request with a 400 instead. That is what forced a MAJOR
+ * rather than a minor, and it is why the client's negotiated-VERSION gate
+ * (`negotiatedUsageServesLocalOnly`, major >= 2) is load-bearing rather than
+ * belt-and-braces: send this to an old host and the usage panel breaks
+ * outright rather than degrading. For the same reason the `2 -> 1` downgrade
+ * REFUSES a request carrying `plane` instead of dropping it - dropping it
+ * would restore the cloud round trip the caller just asked not to spend.
+ */
+export const hostUsageSummaryRequestSchema = lazySchema(() =>
+  hostUsageSummaryRequestFields
+    .extend({ plane: z.literal("local-only").optional() })
+    .strict(),
+);
+export type HostUsageSummaryRequest = z.infer<
+  typeof hostUsageSummaryRequestSchema
+>;
+
+/**
+ * `servedBy` names which bounded reader answered the request - see the
+ * replication-and-read-path artifact's "one implementation, two bounded
+ * readers". Never a client-side choice: the host resolves the plane from
+ * the account's cloud-sync capability.
+ */
+export const hostUsageSummaryResponseSchemaV10 = lazySchema(() =>
+  z.object({
+    servedBy: z.enum(["local", "cloud"]),
+    summary: usageSummarySchema,
+    coverage: usageCostCoverageSchema,
+  }),
+);
+export type HostUsageSummaryResponseV10 = z.infer<
+  typeof hostUsageSummaryResponseSchemaV10
+>;

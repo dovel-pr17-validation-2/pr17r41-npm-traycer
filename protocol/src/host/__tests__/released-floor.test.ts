@@ -1,0 +1,61 @@
+import { describe, expect, it } from "vitest";
+import {
+  splitConnectionManifest,
+  SERVES_EVERY_INSTALLED_MAJOR,
+} from "@traycer/protocol/framework/index";
+import { hostRpcRegistry } from "@traycer/protocol/host/registry";
+import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
+import { releasedMethodNames } from "./__fixtures__/released-method-names";
+
+describe("released floor production module", () => {
+  it("matches the guarded released method-name fixture element-for-element", () => {
+    expect(RELEASED_FLOOR_METHOD_NAMES).toEqual(releasedMethodNames);
+  });
+
+  it("keeps host.notifications unary methods off the released floor", () => {
+    expect(
+      RELEASED_FLOOR_METHOD_NAMES.filter((method) =>
+        method.startsWith("host.notifications."),
+      ),
+    ).toEqual([]);
+  });
+
+  it("advertises every host.notifications unary method as an optional capability", () => {
+    const split = splitConnectionManifest(
+      hostRpcRegistry,
+      RELEASED_FLOOR_METHOD_NAMES,
+      SERVES_EVERY_INSTALLED_MAJOR,
+    );
+
+    // Latest advertised major for list is 2 (native projections), at minor 2
+    // (which carries both the `browser.human.needed` arm and the durable-home
+    // selector - see the contract's merge note); major 1 remains registered
+    // for the frozen all/unread bridge, and 2.0/2.1 stay installed so an older
+    // peer negotiates down to one of them, but optional capability manifests
+    // always advertise the method's latest major AND minor.
+    expect(split.optionalManifest).toMatchObject({
+      "host.notifications.list": { major: 2, minor: 6 },
+      "host.notifications.markRead": { major: 1, minor: 0 },
+      "host.notifications.resolve": { major: 1, minor: 0 },
+      "host.notifications.markAllRead": { major: 1, minor: 1 },
+      // `@1.1` alongside `markAllRead@1.1`: the two destructive bulk actions
+      // now carry the SAME `home: "local"` partition selector. They shipped a
+      // minor apart, and that gap is what let a mixed-plane clear reach the
+      // whole origin.
+      "host.notifications.clearAll": { major: 1, minor: 1 },
+      "host.notifications.getConfig": { major: 1, minor: 0 },
+      "host.notifications.setConfig": { major: 1, minor: 0 },
+      "host.notifications.getLongTurnAlert": { major: 1, minor: 0 },
+      "host.notifications.setLongTurnAlert": { major: 1, minor: 0 },
+      // `@1.2`: each entity's `unreadCount`, and whether the answer is the
+      // host's whole origin.
+      "host.notifications.indicatorState": { major: 1, minor: 2 },
+    });
+    expect(
+      hostRpcRegistry["host.notifications.list"][1].versions[0],
+    ).toBeDefined();
+    expect(
+      hostRpcRegistry["host.notifications.list"][2].versions[0],
+    ).toBeDefined();
+  });
+});

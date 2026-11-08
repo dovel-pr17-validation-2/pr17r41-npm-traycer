@@ -1,0 +1,844 @@
+/**
+ * `resources.subscribe@1.0` / `@1.1` / `@1.2` - versioned streaming-RPC contract for
+ * live process-resource snapshots.
+ *
+ * Subscribing opens a per-epic view over the host's `ResourceTracker`: the
+ * owner snapshots (chats, terminals, terminal-agents) whose `epicId` matches
+ * the requested epic, plus the epic-level aggregate for the local host. All
+ * values are host-local; cross-host aggregation is a later protocol/UI layer,
+ * not implied here.
+ *
+ * Frame shape (v1): every server frame carries the FULL current projection for
+ * the epic - the complete owner set plus the epic aggregate. The client
+ * replaces its view wholesale on each frame, so an owner dropping out of
+ * `owners` (or `epic` going `null`) is exactly "no longer tracked". This keeps
+ * removal semantics implicit and the host free of per-owner diffing, at the
+ * cost of resending unchanged owners; acceptable for the small owner counts a
+ * single epic holds. Deferred to future minors: cross-host fields and richer app
+ * process categories (add as new optional fields / frame variants, never by
+ * narrowing these).
+ *
+ * A missing owner snapshot means "not currently tracked", NOT zero use; a
+ * `null` epic aggregate (owners empty) is a quiet, valid state. The host emits
+ * one initial `snapshot`, then an `update` only when the epic's projection
+ * actually changes - so an epic with no tracked roots stays silent after its
+ * initial (empty) snapshot.
+ *
+ * Server frames:
+ *
+ * - `snapshot` - initial projection for the epic, emitted once on subscribe.
+ * - `update`   - a later projection, emitted when the epic's owners or
+ *                aggregate changed since the last emitted frame.
+ * - `pong`     - heartbeat response.
+ *
+ * Client frames:
+ *
+ * - `ping`      - heartbeat.
+ * - `setDemand` - `@1.5+` visibility hint: background while mounted,
+ *                 interactive only while the monitor is actually visible.
+ */
+import { z } from "zod";
+import { defineStreamRpcContract } from "@traycer/protocol/framework/versioned-stream-rpc";
+import {
+  defineDowngradePath,
+  defineRpcContract,
+  defineUpgradePath,
+} from "@traycer/protocol/framework/index";
+import { hostResourceScopeSchema } from "@traycer/protocol/host/resource-scope";
+import { lazySchema } from "@traycer/protocol/framework/lazy-schema";
+
+export const resourcesSubscribeOpenRequestV10Schema = lazySchema(() =>
+  z.object({
+    epicId: z.string(),
+  }),
+);
+export type ResourcesSubscribeOpenRequestV10 = z.infer<
+  typeof resourcesSubscribeOpenRequestV10Schema
+>;
+
+export const resourcesSubscribeScopeSchema = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("epic"),
+      epicId: z.string(),
+    }),
+    z.object({
+      kind: z.literal("global"),
+    }),
+  ]),
+);
+export type ResourcesSubscribeScopeWire = z.infer<
+  typeof resourcesSubscribeScopeSchema
+>;
+
+export const resourcesSubscribeOpenRequestV11Schema = lazySchema(() =>
+  z.object({
+    // Kept on wire so a newer client can safely downgrade a global probe to
+    // @1.0 without failing client-side request projection.
+    epicId: z.string(),
+    scope: resourcesSubscribeScopeSchema,
+  }),
+);
+export type ResourcesSubscribeOpenRequestV11 = z.infer<
+  typeof resourcesSubscribeOpenRequestV11Schema
+>;
+
+export const resourcesSubscribeOpenRequestSchema =
+  resourcesSubscribeOpenRequestV10Schema;
+export type ResourcesSubscribeOpenRequest = ResourcesSubscribeOpenRequestV10;
+
+export const resourceOwnerKindSchema = lazySchema(() =>
+  z.enum(["chat", "terminal", "terminal-agent"]),
+);
+export type ResourceOwnerKindWire = z.infer<typeof resourceOwnerKindSchema>;
+
+export const resourceOwnerRefSchema = lazySchema(() =>
+  z.object({
+    kind: resourceOwnerKindSchema,
+    hostId: z.string(),
+    epicId: z.string(),
+    ownerId: z.string(),
+  }),
+);
+export type ResourceOwnerRefWire = z.infer<typeof resourceOwnerRefSchema>;
+
+export const resourceProcessSnapshotSchema = lazySchema(() =>
+  z.object({
+    pid: z.number().int().nonnegative(),
+    parentPid: z.number().int().nonnegative().nullable(),
+    rootPid: z.number().int().nonnegative(),
+    name: z.string(),
+    command: z.string().nullable(),
+    cpuPercent: z.number(),
+    rssBytes: z.number().int().nonnegative(),
+  }),
+);
+export type ResourceProcessSnapshotWire = z.infer<
+  typeof resourceProcessSnapshotSchema
+>;
+
+/**
+ * Live resource use for one owner at a single sample. `cpuPercent` is derived
+ * from CPU-time deltas over wall time and may exceed 100 on multi-core hosts;
+ * `rssBytes` is summed resident set across the owner's process tree.
+ */
+export const ownerResourceSnapshotSchema = lazySchema(() =>
+  z.object({
+    owner: resourceOwnerRefSchema,
+    sampledAt: z.number(),
+    rootPids: z.array(z.number()),
+    activeProcessName: z.string().nullable(),
+    processCount: z.number().int().nonnegative(),
+    cpuPercent: z.number(),
+    rssBytes: z.number().int().nonnegative(),
+    processes: z.array(resourceProcessSnapshotSchema),
+  }),
+);
+export type OwnerResourceSnapshotWire = z.infer<
+  typeof ownerResourceSnapshotSchema
+>;
+
+/**
+ * Frozen `@1.3` owner snapshot: adds `harnessId`, the provider that owns the
+ * tree (`claude`, `codex`, …) so the client can render the provider icon
+ * instead of a generic "GUI agent" / "TUI agent" label. `null` for a
+ * harness-less owner (a plain terminal shell). Additive-only: the `@1.0`–`@1.2`
+ * `ownerResourceSnapshotSchema` above stays frozen.
+ */
+export const ownerResourceSnapshotSchemaV13 = lazySchema(() =>
+  z.object({
+    ...ownerResourceSnapshotSchema.shape,
+    harnessId: z.string().nullable(),
+  }),
+);
+export type OwnerResourceSnapshotWireV13 = z.infer<
+  typeof ownerResourceSnapshotSchemaV13
+>;
+
+/** Sum of the local owner snapshots that share the epic (owner roots only). */
+export const epicResourceSnapshotSchema = lazySchema(() =>
+  z.object({
+    hostId: z.string(),
+    epicId: z.string(),
+    sampledAt: z.number(),
+    ownerCount: z.number().int().nonnegative(),
+    processCount: z.number().int().nonnegative(),
+    cpuPercent: z.number(),
+    rssBytes: z.number().int().nonnegative(),
+  }),
+);
+export type EpicResourceSnapshotWire = z.infer<
+  typeof epicResourceSnapshotSchema
+>;
+
+export const appResourceSnapshotSchema = lazySchema(() =>
+  z.object({
+    sampledAt: z.number(),
+    hostTotalMemoryBytes: z.number().int().nonnegative(),
+    process: resourceProcessSnapshotSchema.nullable(),
+    processCount: z.number().int().nonnegative(),
+    cpuPercent: z.number(),
+    rssBytes: z.number().int().nonnegative(),
+  }),
+);
+export type AppResourceSnapshotWire = z.infer<typeof appResourceSnapshotSchema>;
+
+/** Aggregate resource use for the host process and all of its descendants. */
+export const hostTreeResourceSnapshotSchema = lazySchema(() =>
+  z.object({
+    sampledAt: z.number(),
+    processCount: z.number().int().nonnegative(),
+    cpuPercent: z.number(),
+    rssBytes: z.number().int().nonnegative(),
+  }),
+);
+export type HostTreeResourceSnapshotWire = z.infer<
+  typeof hostTreeResourceSnapshotSchema
+>;
+
+/**
+ * Host-tree processes that are not charged to an owner. Process readings are
+ * self values only; consumers derive inclusive subtree totals from the process
+ * parent/root relationships.
+ */
+export const otherResourceSnapshotSchema = lazySchema(() =>
+  z.object({
+    sampledAt: z.number(),
+    rootPids: z.array(z.number().int().nonnegative()),
+    processCount: z.number().int().nonnegative(),
+    cpuPercent: z.number(),
+    rssBytes: z.number().int().nonnegative(),
+    processes: z.array(resourceProcessSnapshotSchema),
+  }),
+);
+export type OtherResourceSnapshotWire = z.infer<
+  typeof otherResourceSnapshotSchema
+>;
+
+const resourcesProjectionFieldsV11 = {
+  epicId: lazySchema(() => z.string()),
+  sampledAt: lazySchema(() => z.number()),
+  app: lazySchema(() => appResourceSnapshotSchema.nullable()),
+  owners: lazySchema(() => z.array(ownerResourceSnapshotSchema)),
+  epics: lazySchema(() => z.array(epicResourceSnapshotSchema).optional()),
+  // `null` when the epic has no tracked owner roots - "not currently tracked",
+  // distinct from an aggregate whose totals happen to be zero.
+  epic: lazySchema(() => epicResourceSnapshotSchema.nullable()),
+  hasBinaryPayload: lazySchema(() => z.literal(false)),
+} as const;
+
+// Frozen `resources.subscribe@1.0` / `@1.1` frame shape. Do not add fields
+// here: a resolver serving either minor must emit precisely this projection.
+export const resourcesSubscribeServerFrameSchema = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("snapshot"),
+      ...resourcesProjectionFieldsV11,
+    }),
+    z.object({
+      kind: z.literal("update"),
+      ...resourcesProjectionFieldsV11,
+    }),
+    z.object({
+      kind: z.literal("pong"),
+      hasBinaryPayload: z.literal(false),
+    }),
+  ]),
+);
+export type ResourcesSubscribeServerFrame = z.infer<
+  typeof resourcesSubscribeServerFrameSchema
+>;
+
+const resourcesProjectionFieldsV12 = {
+  ...resourcesProjectionFieldsV11,
+  hostTree: lazySchema(() => hostTreeResourceSnapshotSchema.nullable()),
+  other: lazySchema(() => otherResourceSnapshotSchema.nullable()),
+} as const;
+
+export const resourcesSubscribeServerFrameSchemaV12 = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("snapshot"),
+      ...resourcesProjectionFieldsV12,
+    }),
+    z.object({
+      kind: z.literal("update"),
+      ...resourcesProjectionFieldsV12,
+    }),
+    z.object({
+      kind: z.literal("pong"),
+      hasBinaryPayload: z.literal(false),
+    }),
+  ]),
+);
+export type ResourcesSubscribeServerFrameV12 = z.infer<
+  typeof resourcesSubscribeServerFrameSchemaV12
+>;
+
+export const resourcesSubscribeClientFrameSchema = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("ping"),
+      hasBinaryPayload: z.literal(false),
+    }),
+  ]),
+);
+export type ResourcesSubscribeClientFrame = z.infer<
+  typeof resourcesSubscribeClientFrameSchema
+>;
+
+export const resourcesSubscribeDemandSchema = lazySchema(() =>
+  z.enum(["background", "interactive"]),
+);
+export type ResourcesSubscribeDemand = z.infer<
+  typeof resourcesSubscribeDemandSchema
+>;
+
+/**
+ * `@1.5` adds client-controlled sampling demand. The server always starts a
+ * subscription at background cadence, so an older/newer peer combination is
+ * safe: absence of this frame means lower refresh frequency, never extra work.
+ */
+export const resourcesSubscribeClientFrameSchemaV15 = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("ping"),
+      hasBinaryPayload: z.literal(false),
+    }),
+    z.object({
+      kind: z.literal("setDemand"),
+      demand: resourcesSubscribeDemandSchema,
+      hasBinaryPayload: z.literal(false),
+    }),
+  ]),
+);
+export type ResourcesSubscribeClientFrameV15 = z.infer<
+  typeof resourcesSubscribeClientFrameSchemaV15
+>;
+
+export const resourcesSubscribeV10 = defineStreamRpcContract({
+  method: "resources.subscribe",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  openRequestSchema: resourcesSubscribeOpenRequestV10Schema,
+  serverFrameSchema: resourcesSubscribeServerFrameSchema,
+  clientFrameSchema: resourcesSubscribeClientFrameSchema,
+});
+
+export const resourcesSubscribeV11 = defineStreamRpcContract({
+  method: "resources.subscribe",
+  schemaVersion: { major: 1, minor: 1 } as const,
+  openRequestSchema: resourcesSubscribeOpenRequestV11Schema,
+  serverFrameSchema: resourcesSubscribeServerFrameSchema,
+  clientFrameSchema: resourcesSubscribeClientFrameSchema,
+});
+
+export const resourcesSubscribeV12 = defineStreamRpcContract({
+  method: "resources.subscribe",
+  schemaVersion: { major: 1, minor: 2 } as const,
+  openRequestSchema: resourcesSubscribeOpenRequestV11Schema,
+  serverFrameSchema: resourcesSubscribeServerFrameSchemaV12,
+  clientFrameSchema: resourcesSubscribeClientFrameSchema,
+});
+
+// `@1.3` frame: identical to `@1.2` except `owners` carry `harnessId`. Prior
+// minors stay frozen; a client on `@1.2` or below never receives the field.
+const resourcesProjectionFieldsV13 = {
+  ...resourcesProjectionFieldsV12,
+  owners: lazySchema(() => z.array(ownerResourceSnapshotSchemaV13)),
+} as const;
+
+export const resourcesSubscribeServerFrameSchemaV13 = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("snapshot"),
+      ...resourcesProjectionFieldsV13,
+    }),
+    z.object({
+      kind: z.literal("update"),
+      ...resourcesProjectionFieldsV13,
+    }),
+    z.object({
+      kind: z.literal("pong"),
+      hasBinaryPayload: z.literal(false),
+    }),
+  ]),
+);
+export type ResourcesSubscribeServerFrameV13 = z.infer<
+  typeof resourcesSubscribeServerFrameSchemaV13
+>;
+
+export const resourcesSubscribeV13 = defineStreamRpcContract({
+  method: "resources.subscribe",
+  schemaVersion: { major: 1, minor: 3 } as const,
+  openRequestSchema: resourcesSubscribeOpenRequestV11Schema,
+  serverFrameSchema: resourcesSubscribeServerFrameSchemaV13,
+  clientFrameSchema: resourcesSubscribeClientFrameSchema,
+});
+
+/**
+ * `@1.4` grows the owner vocabulary by `managed-command` - the host's
+ * supervised long-running commands (shells). Their trees were
+ * always tracked; before `@1.4` the host folded them into `other` because the
+ * wire had no kind for them, and it still does that for any peer negotiated
+ * below `@1.4`. The `@1.0`-`@1.3` enum stays frozen: a kind is not an additive
+ * field, so an old peer must never receive one it cannot name.
+ */
+export const resourceOwnerKindSchemaV14 = lazySchema(() =>
+  z.enum(["chat", "terminal", "terminal-agent", "managed-command"]),
+);
+export type ResourceOwnerKindWireV14 = z.infer<
+  typeof resourceOwnerKindSchemaV14
+>;
+
+export const resourceOwnerRefSchemaV14 = lazySchema(() =>
+  z.object({
+    ...resourceOwnerRefSchema.shape,
+    kind: resourceOwnerKindSchemaV14,
+  }),
+);
+export type ResourceOwnerRefWireV14 = z.infer<typeof resourceOwnerRefSchemaV14>;
+
+/**
+ * What a `managed-command` owner row needs beyond the generic owner fields: the
+ * human description the command was created with, and whether it is monitoring -
+ * the same state its row in the Shells list renders, so one process tree is not
+ * labelled two different ways. `commandId` repeats `owner.ownerId` - the same
+ * value by construction - so a client joining this row to the managed-command
+ * list stream does it through a named field rather than a convention.
+ *
+ * `createdByAgentId` names the shell's creator - the agent whose tool call made
+ * it, which is what lets a client nest the row under that agent instead of
+ * listing it beside one. The owner list stays flat on the wire: the creator is
+ * an id, and whether it currently has an owner row of its own is a question
+ * only the client's own view can answer. It defaults rather than requires: a
+ * host from before the field exists must degrade to today's flat list, not
+ * fail the whole frame's parse and blank the panel.
+ */
+export const managedCommandOwnerSchema = lazySchema(() =>
+  z.object({
+    commandId: z.string(),
+    monitoring: z.boolean(),
+    description: z.string(),
+    createdByAgentId: z.string().default(""),
+  }),
+);
+export type ManagedCommandOwnerWire = z.infer<typeof managedCommandOwnerSchema>;
+
+/**
+ * `@1.4` owner snapshot: the `@1.3` shape plus the widened owner kind and
+ * `managedCommand`, which is non-null exactly when the kind is
+ * `managed-command`. Not yet frozen: the v2 surface is staging-only with
+ * matched fleets, so this shape is still edited in place (see the shell
+ * unification ADR) - additions must default so an older host still parses.
+ */
+export const ownerResourceSnapshotSchemaV14 = lazySchema(() =>
+  z.object({
+    ...ownerResourceSnapshotSchemaV13.shape,
+    owner: resourceOwnerRefSchemaV14,
+    managedCommand: managedCommandOwnerSchema.nullable(),
+  }),
+);
+export type OwnerResourceSnapshotWireV14 = z.infer<
+  typeof ownerResourceSnapshotSchemaV14
+>;
+
+const resourcesProjectionFieldsV14 = {
+  ...resourcesProjectionFieldsV13,
+  owners: lazySchema(() => z.array(ownerResourceSnapshotSchemaV14)),
+} as const;
+
+export const resourcesSubscribeServerFrameSchemaV14 = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("snapshot"),
+      ...resourcesProjectionFieldsV14,
+    }),
+    z.object({
+      kind: z.literal("update"),
+      ...resourcesProjectionFieldsV14,
+    }),
+    z.object({
+      kind: z.literal("pong"),
+      hasBinaryPayload: z.literal(false),
+    }),
+  ]),
+);
+export type ResourcesSubscribeServerFrameV14 = z.infer<
+  typeof resourcesSubscribeServerFrameSchemaV14
+>;
+
+export const resourcesSubscribeV14 = defineStreamRpcContract({
+  method: "resources.subscribe",
+  schemaVersion: { major: 1, minor: 4 } as const,
+  openRequestSchema: resourcesSubscribeOpenRequestV11Schema,
+  serverFrameSchema: resourcesSubscribeServerFrameSchemaV14,
+  clientFrameSchema: resourcesSubscribeClientFrameSchema,
+});
+
+/**
+ * `@1.5` adds truthful nullable memory readings and a bounded semantic
+ * descriptor for Chromium processes. A memory null means unavailable or
+ * incomplete; descriptor null means the process has no safely joined semantic
+ * label. Older minors keep their numeric RSS field and receive zero only at
+ * the host's explicit legacy-projection boundary.
+ */
+const nullableMemoryDetailFields = {
+  pssBytes: lazySchema(() => z.number().int().nonnegative().nullable()),
+  privateBytes: lazySchema(() => z.number().int().nonnegative().nullable()),
+} as const;
+
+const resourceReadingFieldsV15 = {
+  // Deliberately the frozen minors' `z.number()`: tightening a field a client
+  // has to parse turns a jittery host reading into an unparseable frame, and
+  // the client has no cheaper recovery than dropping the projection.
+  cpuPercent: lazySchema(() => z.number()),
+  rssBytes: lazySchema(() => z.number().int().nonnegative().nullable()),
+  ...nullableMemoryDetailFields,
+} as const;
+
+export const chromiumProcessRuntimeSchema = lazySchema(() =>
+  z.enum(["sessions", "cell-runner"]),
+);
+export type ChromiumProcessRuntimeWire = z.infer<
+  typeof chromiumProcessRuntimeSchema
+>;
+
+export const chromiumProcessRoleSchema = lazySchema(() =>
+  z.enum([
+    "browser",
+    "renderer",
+    "gpu",
+    "network",
+    "storage",
+    "audio",
+    "utility",
+    "subprocess",
+  ]),
+);
+export type ChromiumProcessRoleWire = z.infer<typeof chromiumProcessRoleSchema>;
+
+export const chromiumProcessDescriptorSchema = lazySchema(() =>
+  z.object({
+    family: z.literal("chromium"),
+    runtime: chromiumProcessRuntimeSchema,
+    role: chromiumProcessRoleSchema,
+  }),
+);
+export type ChromiumProcessDescriptorWire = z.infer<
+  typeof chromiumProcessDescriptorSchema
+>;
+
+export const resourceProcessSnapshotSchemaV15 = lazySchema(() =>
+  z.object({
+    ...resourceProcessSnapshotSchema.shape,
+    ...resourceReadingFieldsV15,
+    descriptor: chromiumProcessDescriptorSchema.nullable(),
+  }),
+);
+export type ResourceProcessSnapshotWireV15 = z.infer<
+  typeof resourceProcessSnapshotSchemaV15
+>;
+
+export const ownerResourceSnapshotSchemaV15 = lazySchema(() =>
+  z.object({
+    ...ownerResourceSnapshotSchemaV14.shape,
+    ...resourceReadingFieldsV15,
+    processes: z.array(resourceProcessSnapshotSchemaV15),
+  }),
+);
+export type OwnerResourceSnapshotWireV15 = z.infer<
+  typeof ownerResourceSnapshotSchemaV15
+>;
+
+export const epicResourceSnapshotSchemaV15 = lazySchema(() =>
+  z.object({
+    ...epicResourceSnapshotSchema.shape,
+    ...resourceReadingFieldsV15,
+  }),
+);
+export type EpicResourceSnapshotWireV15 = z.infer<
+  typeof epicResourceSnapshotSchemaV15
+>;
+
+export const appResourceSnapshotSchemaV15 = lazySchema(() =>
+  z.object({
+    ...appResourceSnapshotSchema.shape,
+    ...resourceReadingFieldsV15,
+    process: resourceProcessSnapshotSchemaV15.nullable(),
+  }),
+);
+export type AppResourceSnapshotWireV15 = z.infer<
+  typeof appResourceSnapshotSchemaV15
+>;
+
+export const hostTreeResourceSnapshotSchemaV15 = lazySchema(() =>
+  z.object({
+    ...hostTreeResourceSnapshotSchema.shape,
+    ...resourceReadingFieldsV15,
+  }),
+);
+export type HostTreeResourceSnapshotWireV15 = z.infer<
+  typeof hostTreeResourceSnapshotSchemaV15
+>;
+
+export const otherResourceSnapshotSchemaV15 = lazySchema(() =>
+  z.object({
+    ...otherResourceSnapshotSchema.shape,
+    ...resourceReadingFieldsV15,
+    processes: z.array(resourceProcessSnapshotSchemaV15),
+  }),
+);
+export type OtherResourceSnapshotWireV15 = z.infer<
+  typeof otherResourceSnapshotSchemaV15
+>;
+
+/**
+ * Aggregate-only usage whose process identity cannot safely appear in this
+ * subscription. Global views use it for unauthorized owner trees; an epic
+ * view also uses it for otherwise-authorized owners outside that epic. It has
+ * deliberately no pid, root, command, descriptor, owner, epic, or account
+ * fields, so host-wide totals can reconcile without leaking the hidden tree.
+ */
+export const restrictedResourceSnapshotSchemaV15 = lazySchema(() =>
+  z
+    .object({
+      sampledAt: z.number(),
+      processCount: z.number().int().nonnegative(),
+      ...resourceReadingFieldsV15,
+    })
+    .strict(),
+);
+export type RestrictedResourceSnapshotWireV15 = z.infer<
+  typeof restrictedResourceSnapshotSchemaV15
+>;
+
+const resourcesProjectionFieldsV15 = {
+  ...resourcesProjectionFieldsV14,
+  app: lazySchema(() => appResourceSnapshotSchemaV15.nullable()),
+  owners: lazySchema(() => z.array(ownerResourceSnapshotSchemaV15)),
+  epic: lazySchema(() => epicResourceSnapshotSchemaV15.nullable()),
+  epics: lazySchema(() => z.array(epicResourceSnapshotSchemaV15).optional()),
+  hostTree: lazySchema(() => hostTreeResourceSnapshotSchemaV15.nullable()),
+  other: lazySchema(() => otherResourceSnapshotSchemaV15.nullable()),
+  restricted: lazySchema(() => restrictedResourceSnapshotSchemaV15.nullable()),
+} as const;
+
+export const resourcesSubscribeServerFrameSchemaV15 = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("snapshot"),
+      ...resourcesProjectionFieldsV15,
+    }),
+    z.object({
+      kind: z.literal("update"),
+      ...resourcesProjectionFieldsV15,
+    }),
+    z.object({
+      kind: z.literal("pong"),
+      hasBinaryPayload: z.literal(false),
+    }),
+  ]),
+);
+export type ResourcesSubscribeServerFrameV15 = z.infer<
+  typeof resourcesSubscribeServerFrameSchemaV15
+>;
+
+export const resourcesSubscribeV15 = defineStreamRpcContract({
+  method: "resources.subscribe",
+  schemaVersion: { major: 1, minor: 5 } as const,
+  openRequestSchema: resourcesSubscribeOpenRequestV11Schema,
+  serverFrameSchema: resourcesSubscribeServerFrameSchemaV15,
+  clientFrameSchema: resourcesSubscribeClientFrameSchemaV15,
+});
+
+/**
+ * `@1.6` carries the host's logical processor count so clients can display a
+ * share of the machine. `cpuPercent` keeps its per-core meaning and may exceed
+ * 100. Earlier negotiated minors have no count; their app schemas stay frozen
+ * and strip it when decoding a newer frame.
+ */
+export const appResourceSnapshotSchemaV16 = lazySchema(() =>
+  z.object({
+    ...appResourceSnapshotSchemaV15.shape,
+    hostCpuCount: z.number().int().positive(),
+  }),
+);
+export type AppResourceSnapshotWireV16 = z.infer<
+  typeof appResourceSnapshotSchemaV16
+>;
+
+const resourcesProjectionFieldsV16 = {
+  ...resourcesProjectionFieldsV15,
+  app: lazySchema(() => appResourceSnapshotSchemaV16.nullable()),
+} as const;
+
+export const resourcesSubscribeServerFrameSchemaV16 = lazySchema(() =>
+  z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("snapshot"),
+      ...resourcesProjectionFieldsV16,
+    }),
+    z.object({
+      kind: z.literal("update"),
+      ...resourcesProjectionFieldsV16,
+    }),
+    z.object({
+      kind: z.literal("pong"),
+      hasBinaryPayload: z.literal(false),
+    }),
+  ]),
+);
+export type ResourcesSubscribeServerFrameV16 = z.infer<
+  typeof resourcesSubscribeServerFrameSchemaV16
+>;
+
+export const resourcesSubscribeV16 = defineStreamRpcContract({
+  method: "resources.subscribe",
+  schemaVersion: { major: 1, minor: 6 } as const,
+  openRequestSchema: resourcesSubscribeOpenRequestV11Schema,
+  serverFrameSchema: resourcesSubscribeServerFrameSchemaV16,
+  clientFrameSchema: resourcesSubscribeClientFrameSchemaV15,
+});
+
+// ── `resources.kill@1.0` — unary ────────────────────────────────────────────
+// Terminates the entire process subtree beneath each requested pid (graceful
+// SIGTERM, then SIGKILL escalation for survivors). Brand-new method, NOT on the
+// released floor: an old host simply lacks it. The host re-derives which pids
+// are killable from its own live sample (tracked owner/other trees, minus the
+// app + host process trees), so a stale or stray pid is silently skipped rather
+// than trusted. `killed` echoes the subset the host actually acted on.
+export const resourcesKillRequestSchema = lazySchema(() =>
+  z.object({
+    pids: z.array(z.number().int().nonnegative()),
+  }),
+);
+export type ResourcesKillRequest = z.infer<typeof resourcesKillRequestSchema>;
+
+export const resourcesKillResponseSchema = lazySchema(() =>
+  z.object({
+    killed: z.array(z.number().int().nonnegative()),
+  }),
+);
+export type ResourcesKillResponse = z.infer<typeof resourcesKillResponseSchema>;
+
+export const resourcesKillV10 = defineRpcContract({
+  method: "resources.kill",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: resourcesKillRequestSchema,
+  responseSchema: resourcesKillResponseSchema,
+});
+
+// ── `resources.listLocalServers@1.0` — unary, FROZEN ─────────────────────────
+// Shipped in the v1.3.0 release addressed by `epicId`. The `@2.0` line below
+// takes the shared host-resource scope instead, so the Start Page can ask for
+// the ports its own epic-less terminals own; a v1.3.0 peer keeps this shape.
+// Its own copy of the response too: a frozen line composed from the live
+// response schema would move with it.
+export const resourcesListLocalServersRequestSchemaV10 = lazySchema(() =>
+  z.object({
+    epicId: z.string(),
+  }),
+);
+export type ResourcesListLocalServersRequestV10 = z.infer<
+  typeof resourcesListLocalServersRequestSchemaV10
+>;
+
+const localServerSchemaV10 = lazySchema(() =>
+  z.object({
+    pid: z.number().int().nonnegative(),
+    port: z.number().int().min(1).max(65_535),
+    processName: z.string(),
+  }),
+);
+
+export const resourcesListLocalServersResponseSchemaV10 = lazySchema(() =>
+  z.object({
+    servers: z.array(localServerSchemaV10),
+  }),
+);
+
+export const resourcesListLocalServersV10 = defineRpcContract({
+  method: "resources.listLocalServers",
+  schemaVersion: { major: 1, minor: 0 } as const,
+  requestSchema: resourcesListLocalServersRequestSchemaV10,
+  responseSchema: resourcesListLocalServersResponseSchemaV10,
+});
+
+// ── `resources.listLocalServers@2.0` — unary ───────────────────────────────
+// Lists listening TCP ports owned by process trees already attributed to one
+// scope. Discovery is intentionally on demand rather than part of the resource
+// stream: port scans are useful only while a blank browser tab is visible.
+//
+// `hostResourceScopeSchema`, not this module's `resourcesSubscribeScopeSchema`:
+// the two unions share a word and mean different things. `global` up there is
+// EVERY epic's owners; `independent` here is the owners with NO epic, which for
+// this request is exactly the device's Start Page terminals.
+export const resourcesListLocalServersRequestSchema = lazySchema(() =>
+  z.object({
+    scope: hostResourceScopeSchema,
+  }),
+);
+export type ResourcesListLocalServersRequest = z.infer<
+  typeof resourcesListLocalServersRequestSchema
+>;
+
+export const localServerSchema = lazySchema(() =>
+  z.object({
+    pid: z.number().int().nonnegative(),
+    port: z.number().int().min(1).max(65_535),
+    processName: z.string(),
+  }),
+);
+export type LocalServerWire = z.infer<typeof localServerSchema>;
+
+export const resourcesListLocalServersResponseSchema = lazySchema(() =>
+  z.object({
+    servers: z.array(localServerSchema),
+  }),
+);
+export type ResourcesListLocalServersResponse = z.infer<
+  typeof resourcesListLocalServersResponseSchema
+>;
+
+export const resourcesListLocalServersV20 = defineRpcContract({
+  method: "resources.listLocalServers",
+  schemaVersion: { major: 2, minor: 0 } as const,
+  requestSchema: resourcesListLocalServersRequestSchema,
+  responseSchema: resourcesListLocalServersResponseSchema,
+});
+
+export const resourcesListLocalServersUpgradeV10ToV20 = defineUpgradePath<
+  typeof resourcesListLocalServersV10,
+  typeof resourcesListLocalServersV20
+>({
+  from: resourcesListLocalServersV10.schemaVersion,
+  to: resourcesListLocalServersV20.schemaVersion,
+  // A v1.0 caller can only ever name an epic; the response is the same shape.
+  upgradeRequest: (request) => ({
+    scope: { kind: "epic", epicId: request.epicId },
+  }),
+  upgradeResponse: (response) => response,
+});
+
+export const resourcesListLocalServersDowngradeV20ToV10 = defineDowngradePath<
+  typeof resourcesListLocalServersV20,
+  typeof resourcesListLocalServersV10
+>({
+  from: resourcesListLocalServersV20.schemaVersion,
+  to: resourcesListLocalServersV10.schemaVersion,
+  // An epic-less inventory is exactly what a v1.0 host has no way to name, so
+  // the Start Page's request to one is unsupported rather than answered with
+  // some epic's ports.
+  downgradeRequest: (request) =>
+    request.scope.kind === "epic"
+      ? { ok: true, value: { epicId: request.scope.epicId } }
+      : {
+          ok: false,
+          error: {
+            code: "DOWNGRADE_UNSUPPORTED",
+            message:
+              "resources.listLocalServers@1.0 lists one epic's servers and has no epic-less inventory",
+          },
+        },
+  downgradeResponse: (response) => ({ ok: true, value: response }),
+});

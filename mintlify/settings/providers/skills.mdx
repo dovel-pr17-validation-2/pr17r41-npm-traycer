@@ -1,0 +1,70 @@
+---
+title: "Skills"
+description: "Import or write skills, choose which providers can use them, and invoke them from chat."
+---
+
+import { FeatureVideo } from "/snippets/feature-video.jsx";
+
+<FeatureVideo src="https://assets.traycer.ai/docs/videos/skills-setup.mp4" label="Create a skill with Markdown instructions" />
+
+A skill is a folder with a `SKILL.md` inside it: a name, a description of when to use it, and Markdown instructions. The agent loads a skill on its own when the work matches, or you can invoke it by name in chat.
+
+Open **Settings → Providers**, select a provider, and open **Skills**. Hermes Agent, Oh My Pi, Devin, Pi, Reasonix, Antigravity, and Command Code have no **Skills** tab.
+
+The location picker at the top chooses whether you are managing skills for every workspace on the host (**Global**) or for one workspace.
+
+## Import Skills
+
+Click **Add skill**. The dialog starts with an import step.
+
+<Steps>
+  <Step title="Paste a source">
+    In **Skill source**, paste an `npx skills` command, an `owner/repo`, a git or tree URL, or a folder path. Then click **Add skill**.
+  </Step>
+  <Step title="Pick the skills">
+    The host clones or copies the source and lists every `SKILL.md` it finds. Select the ones you want. Selecting a skill you already have replaces it with the version from this source.
+  </Step>
+  <Step title="Install">
+    Click **Install N skills**.
+  </Step>
+</Steps>
+
+## Write A Skill
+
+In the **Add skill** dialog, choose "or write one from scratch".
+
+1. Enter a **Name**. Use lowercase letters, digits, and hyphens, for example `review-pr`. The name becomes the folder name and the command you type in chat.
+2. Enter a **Description**. The agent reads it to decide when to use the skill.
+3. Write the Markdown **Instructions**.
+4. Choose who can use it under **Available to**:
+   - The provider's own option, for example **Claude Code only**, stores it in that provider's own skills folder.
+   - **Personal**, or your team's name on a host that runs your team's settings, stores it there. Personal reaches every provider on every host of yours; a team's reaches every provider on every member's hosts. It appears when you manage **Global** skills.
+5. Click **Create skill**.
+
+The dialog shows where the skill will be saved. To switch back to importing, choose "or import an existing one".
+
+## Skill List
+
+Badges show where each skill comes from. Use the filter menu to show or hide each type.
+
+| Badge             | Meaning                                                                              |
+| ----------------- | ------------------------------------------------------------------------------------ |
+| **Shared**        | In a shared skills folder (`~/.agents/skills` or a workspace's `.agents/skills`). Traycer reads it. |
+| **Provider-only** | Stored in this provider's own skills folder.                                         |
+| **Plugin**        | Comes from an installed plugin. Remove the plugin to remove the skill.               |
+| **Built-in**      | Ships with the provider and can't be removed from here.                              |
+
+Open a skill to see its **Name**, **When to use**, **Source**, and **Instructions**. From there you can **Edit** it and **Save changes**, **Remove** it, or, for an imported skill, **Update from source**. If you edited an imported skill, updating asks before it overwrites your edits.
+
+A **Shared** skill can't be edited or removed here: manage it with whatever put it there. Choose **Add to Personal** to put a copy there, which reaches every provider on every host of yours. On a host that runs your team's settings, the button names your team, and the copy reaches every member's hosts.
+
+## Use A Skill In Chat
+
+Type `/` or `$` in the composer to open the same picker.
+
+- At the start of a message, the picker lists skills and the coding agent's own commands.
+- Later in a message, it lists skills only.
+
+You can use several skills in one message. For example, a skill named `release-notes` is `/release-notes`.
+
+**Skills** and **Plugins** are separate tabs. Plugins install from a source string; see [Plugins](/settings/providers#plugins).

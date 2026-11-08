@@ -1,0 +1,1185 @@
+import { describe, expect, it } from "vitest";
+import { validateVersionedRpcRegistry } from "@traycer/protocol/framework/index";
+
+import {
+  agentListDowngradeV2ToV1,
+  agentListDowngradeV3ToV1,
+  agentListDowngradeV3ToV2,
+  agentListDowngradeV4ToV1,
+  agentListDowngradeV4ToV2,
+  agentListDowngradeV4ToV3,
+  agentListDowngradeV5ToV1,
+  agentListDowngradeV5ToV2,
+  agentListDowngradeV5ToV3,
+  agentListDowngradeV5ToV4,
+  agentListDowngradeV6ToV1,
+  agentListDowngradeV6ToV2,
+  agentListDowngradeV6ToV3,
+  agentListDowngradeV6ToV4,
+  agentListDowngradeV6ToV5,
+  agentListDowngradeV9ToV1,
+  agentListDowngradeV9ToV2,
+  agentListDowngradeV9ToV3,
+  agentListDowngradeV9ToV4,
+  agentListDowngradeV9ToV5,
+  agentListDowngradeV9ToV6,
+  agentListDowngradeV9ToV7,
+  agentListDowngradeV9ToV8,
+} from "@traycer/protocol/host/agent/contracts";
+import {
+  listAgentsResponseSchemaV10,
+  listAgentsResponseSchemaV20,
+  listAgentsResponseSchemaV30,
+  listAgentsResponseSchemaV40,
+  listAgentsResponseSchemaV50,
+  listAgentsResponseSchemaV60,
+  listAgentsResponseSchemaV70,
+  listAgentsResponseSchema,
+  listAgentsResponseSchemaV80,
+  listAgentsResponseSchemaV91,
+  listAgentsResponseSchemaV92,
+} from "@traycer/protocol/host/agent/shared";
+import {
+  agentGuiListHarnessesDowngradeV2ToV1,
+  agentGuiListHarnessesDowngradeV3ToV1,
+  agentGuiListHarnessesDowngradeV3ToV2,
+  agentGuiListHarnessesDowngradeV4ToV1,
+  agentGuiListHarnessesDowngradeV4ToV2,
+  agentGuiListHarnessesDowngradeV4ToV3,
+  agentGuiListHarnessesDowngradeV5ToV1,
+  agentGuiListHarnessesDowngradeV5ToV2,
+  agentGuiListHarnessesDowngradeV5ToV3,
+  agentGuiListHarnessesDowngradeV5ToV4,
+  agentGuiListHarnessesDowngradeV6ToV1,
+  agentGuiListHarnessesDowngradeV6ToV2,
+  agentGuiListHarnessesDowngradeV6ToV3,
+  agentGuiListHarnessesDowngradeV6ToV4,
+  agentGuiListHarnessesDowngradeV6ToV5,
+  agentGuiListHarnessesDowngradeV8ToV1,
+  agentGuiListHarnessesDowngradeV8ToV2,
+  agentGuiListHarnessesDowngradeV8ToV3,
+  agentGuiListHarnessesDowngradeV8ToV4,
+  agentGuiListHarnessesDowngradeV8ToV5,
+  agentGuiListHarnessesDowngradeV8ToV6,
+  agentGuiListHarnessesDowngradeV8ToV7,
+  agentGuiListHarnessesDowngradeV9ToV1,
+  agentGuiListHarnessesDowngradeV9ToV2,
+  agentGuiListHarnessesDowngradeV9ToV3,
+  agentGuiListHarnessesDowngradeV9ToV4,
+  agentGuiListHarnessesDowngradeV9ToV5,
+  agentGuiListHarnessesDowngradeV9ToV6,
+  agentGuiListHarnessesDowngradeV9ToV7,
+  agentGuiListHarnessesDowngradeV9ToV8,
+  agentGuiListHarnessesUpgradeV90ToV91,
+} from "@traycer/protocol/host/agent/gui/contracts";
+import {
+  guiHarnessOptionSchema,
+  listGuiHarnessesResponseSchema,
+  listGuiHarnessesResponseSchemaV10,
+  listGuiHarnessesResponseSchemaV20,
+  listGuiHarnessesResponseSchemaV21,
+  listGuiHarnessesResponseSchemaV30,
+  listGuiHarnessesResponseSchemaV40,
+  listGuiHarnessesResponseSchemaV50,
+  listGuiHarnessesResponseSchemaV60,
+  listGuiHarnessesResponseSchemaV71,
+  listGuiHarnessesResponseSchemaV80,
+  listGuiHarnessesResponseSchemaV90,
+  listGuiHarnessesResponseSchemaV92,
+} from "@traycer/protocol/host/agent/gui/unary-schemas";
+import {
+  PROVIDER_AUTH_STATUS_SCHEMA,
+  PROVIDER_AUTH_STATUS_SCHEMA_V10,
+  providerCliStateSchemaV10,
+  providersListResponseSchema,
+  providersListResponseSchemaV10,
+  providersListResponseSchemaV20,
+  providersListResponseSchemaV30,
+  providersListResponseSchemaV40,
+  providersListResponseSchemaV50,
+  providersListResponseSchemaV60,
+  providersListResponseSchemaV70,
+  providersListResponseSchemaV80,
+  providersListResponseSchemaV92,
+  providersSetApiKeyResponseSchemaV10,
+} from "@traycer/protocol/host/provider-schemas";
+// Construction is structural-only. The full schema-compatibility pass over
+// the lines this file exercises is the explicit `validateVersionedRpcRegistry`
+// below, which holds the v2.0–v9.0 lines and their upgrade/downgrade bridges.
+import {
+  hostRpcRegistry,
+  providersAwaitLoginDowngradeV22ToV10,
+  providersListDowngradeV2ToV1,
+  providersListDowngradeV4ToV1,
+  providersListDowngradeV4ToV2,
+  providersListDowngradeV4ToV3,
+  providersListDowngradeV5ToV1,
+  providersListDowngradeV5ToV2,
+  providersListDowngradeV5ToV3,
+  providersListDowngradeV5ToV4,
+  providersListDowngradeV6ToV1,
+  providersListDowngradeV6ToV2,
+  providersListDowngradeV6ToV3,
+  providersListDowngradeV6ToV4,
+  providersListDowngradeV6ToV5,
+  providersListDowngradeV9ToV1,
+  providersListDowngradeV9ToV2,
+  providersListDowngradeV9ToV3,
+  providersListDowngradeV9ToV4,
+  providersListDowngradeV9ToV5,
+  providersListDowngradeV9ToV6,
+  providersListDowngradeV9ToV7,
+  providersListDowngradeV9ToV8,
+  providersSetApiKeyDowngradeV21ToV10,
+} from "@traycer/protocol/host/registry";
+
+// States `supportedPermissionModes` explicitly rather than taking the live
+// schema default, which now includes `auto`. Several tests below feed these
+// rows STRAIGHT into an older line's schema (not through a bridge) to build the
+// "what a v2.1/v3.0 host returned" input, and a live default would put a mode
+// on those rows that the older line's frozen enum rejects. The `auto`-bearing
+// case has its own test at the bottom of this file, where the bridge that
+// strips it is the subject.
+function harnessOption(id: string) {
+  return guiHarnessOptionSchema.parse({
+    id,
+    label: id,
+    available: true,
+    error: null,
+    modes: ["gui"],
+    requiresApiKey: false,
+    supportedPermissionModes: [
+      "supervised",
+      "auto_accept_edits",
+      "full_access",
+    ],
+  });
+}
+
+function agentSummary(id: string, harnessId: string | null) {
+  return {
+    id,
+    parentId: null,
+    hostId: "host-1",
+    isLocal: true,
+    surface: "gui",
+    harnessId,
+    isSelf: false,
+    title: id,
+    capabilities: { readTranscript: true, sendMessage: true },
+    active: false,
+    folderPaths: [],
+    isWorktree: false,
+    runConfig: {
+      model: { kind: "concrete", slug: "gpt-5.6-sol" },
+      reasoningEffort: "high",
+      fastMode: true,
+    },
+    // The `@9.1` session facet. `null` is the row's own "this host cannot
+    // know" - a GUI chat has no PTY session - and every downgrade bridge
+    // below reparses through a frozen summary that drops both keys.
+    sessionState: null,
+    lastExit: null,
+    // The `@9.2` archive flag; the bridges reparse through a frozen summary
+    // that drops it as well.
+    archived: false,
+  };
+}
+
+function providerState(providerId: string, status: string) {
+  return {
+    providerId,
+    enabled: true,
+    disabledBy: null,
+    selected: { kind: "bundled" },
+    candidates: [],
+    auth: { status, badgeText: null, label: null, detail: null },
+    authPending: false,
+    checkedAt: null,
+    apiKey: { supported: false, configured: false, source: null },
+    terminalAgentArgs: "",
+    envOverrides: [],
+    loginCapability: null,
+    availabilityPending: false,
+    nativeCapabilities: {
+      supportedTabs: ["general", "env", "usage"],
+      mcp: null,
+      plugins: null,
+      skills: null,
+    },
+  };
+}
+
+describe("hostRpcRegistry provider and harness lines", () => {
+  it("passes schema compatibility for the v2.0–v9.0 provider/harness lines", () => {
+    expect(() =>
+      validateVersionedRpcRegistry({
+        "agent.gui.listHarnesses": hostRpcRegistry["agent.gui.listHarnesses"],
+        "agent.list": hostRpcRegistry["agent.list"],
+        "providers.awaitLogin": hostRpcRegistry["providers.awaitLogin"],
+        "providers.list": hostRpcRegistry["providers.list"],
+        "providers.setApiKey": hostRpcRegistry["providers.setApiKey"],
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe("post-v1.0 GUI harness non-breaking v2→v1 downgrade bridges", () => {
+  it("drops post-v1.0 harnesses from agent.gui.listHarnesses for v1.0 callers", () => {
+    // The v2→v1 bridge is anchored at 2.1, major 2's latest installed minor.
+    const v2Response = listGuiHarnessesResponseSchemaV21.parse({
+      harnesses: [
+        harnessOption("claude"),
+        harnessOption("grok"),
+        harnessOption("qwen"),
+        harnessOption("kiro"),
+        harnessOption("kimi"),
+        harnessOption("droid"),
+        harnessOption("copilot"),
+        harnessOption("kilocode"),
+        harnessOption("cursor"),
+      ],
+    });
+
+    const result =
+      agentGuiListHarnessesDowngradeV2ToV1.downgradeResponse(v2Response);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.harnesses.map((harness) => harness.id)).toEqual([
+      "claude",
+      "cursor",
+    ]);
+    // The downgraded value must satisfy the frozen v1.0 schema - i.e. a real
+    // v1.0 client's strict decode would accept it.
+    expect(() =>
+      listGuiHarnessesResponseSchemaV10.parse(result.value),
+    ).not.toThrow();
+  });
+
+  it("drops post-v1.0 providers from providers.list for v1.0 callers", () => {
+    const v2Response = providersListResponseSchemaV20.parse({
+      providers: [
+        providerState("cursor", "unknown"),
+        providerState("grok", "unknown"),
+        providerState("qwen", "unknown"),
+        providerState("kiro", "unknown"),
+        providerState("kimi", "unknown"),
+        providerState("droid", "unknown"),
+        providerState("copilot", "unknown"),
+        providerState("kilocode", "unknown"),
+      ],
+    });
+
+    const result = providersListDowngradeV2ToV1.downgradeResponse(v2Response);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(
+      result.value.providers.map((provider) => provider.providerId),
+    ).toEqual(["cursor"]);
+    expect(() =>
+      providersListResponseSchemaV10.parse(result.value),
+    ).not.toThrow();
+  });
+
+  it("widens provider auth in v2 and downgrades new statuses for v1.0 callers", () => {
+    expect(PROVIDER_AUTH_STATUS_SCHEMA.safeParse("configured").success).toBe(
+      true,
+    );
+    expect(PROVIDER_AUTH_STATUS_SCHEMA.safeParse("unavailable").success).toBe(
+      true,
+    );
+    expect(
+      PROVIDER_AUTH_STATUS_SCHEMA_V10.safeParse("configured").success,
+    ).toBe(false);
+    expect(
+      PROVIDER_AUTH_STATUS_SCHEMA_V10.safeParse("unavailable").success,
+    ).toBe(false);
+
+    const v2Response = providersListResponseSchemaV20.parse({
+      providers: [
+        providerState("cursor", "configured"),
+        providerState("grok", "unavailable"),
+      ],
+    });
+
+    expect(providersListResponseSchemaV10.safeParse(v2Response).success).toBe(
+      false,
+    );
+    const result = providersListDowngradeV2ToV1.downgradeResponse(v2Response);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.providers).toHaveLength(1);
+    expect(result.value.providers[0]?.providerId).toBe("cursor");
+    expect(result.value.providers[0]?.auth.status).toBe("unknown");
+    expect(() =>
+      providersListResponseSchemaV10.parse(result.value),
+    ).not.toThrow();
+  });
+
+  it("downgrades provider-state mutation responses for v1.0 callers", () => {
+    const state = providersListResponseSchema.parse({
+      providers: [providerState("cursor", "unavailable")],
+    }).providers[0];
+    const setApiKey = providersSetApiKeyDowngradeV21ToV10.downgradeResponse({
+      state,
+    });
+
+    expect(setApiKey.ok).toBe(true);
+    if (!setApiKey.ok) return;
+    expect(setApiKey.value.state.auth.status).toBe("unknown");
+    expect(() =>
+      providersSetApiKeyResponseSchemaV10.parse(setApiKey.value),
+    ).not.toThrow();
+
+    const awaitLogin = providersAwaitLoginDowngradeV22ToV10.downgradeResponse({
+      state,
+      existingProfileId: null,
+      codeRejected: false,
+      refusal: null,
+    });
+    expect(awaitLogin.ok).toBe(true);
+    if (!awaitLogin.ok) return;
+    expect(awaitLogin.value.state?.auth.status).toBe("unknown");
+
+    expect(
+      providersAwaitLoginDowngradeV22ToV10.downgradeResponse({
+        state: null,
+        existingProfileId: null,
+        codeRejected: false,
+        refusal: null,
+      }),
+    ).toEqual({ ok: true, value: { state: null } });
+  });
+
+  it("rejects post-v1.0 provider mutation requests during v2→v1 downgrade", () => {
+    expect(
+      providerCliStateSchemaV10.safeParse({
+        ...providerState("cursor", "unknown"),
+        futureField: true,
+      }).success,
+    ).toBe(false);
+
+    expect(
+      providersSetApiKeyDowngradeV21ToV10.downgradeRequest({
+        providerId: "grok",
+        apiKey: "grok-key",
+      }),
+    ).toMatchObject({
+      ok: false,
+      error: { code: "DOWNGRADE_UNSUPPORTED" },
+    });
+
+    const requestWithFutureField = Object.freeze({
+      providerId: "cursor",
+      apiKey: "cursor-key",
+      futureField: true,
+    });
+
+    expect(
+      providersSetApiKeyDowngradeV21ToV10.downgradeRequest(
+        requestWithFutureField,
+      ),
+    ).toMatchObject({
+      ok: false,
+      error: { code: "DOWNGRADE_UNSUPPORTED" },
+    });
+
+    expect(
+      providersSetApiKeyDowngradeV21ToV10.downgradeRequest({
+        providerId: "cursor",
+        apiKey: "cursor-key",
+      }),
+    ).toEqual({
+      ok: true,
+      value: { providerId: "cursor", apiKey: "cursor-key" },
+    });
+  });
+
+  it("drops post-v1.0 agents from agent.list for v1.0 callers", () => {
+    const v2Response = listAgentsResponseSchemaV20.parse({
+      caller: { agentId: "self", canSendMessages: true },
+      scope: "all",
+      agents: [
+        agentSummary("a-claude", "claude"),
+        agentSummary("a-grok", "grok"),
+        agentSummary("a-qwen", "qwen"),
+        agentSummary("a-kiro", "kiro"),
+        agentSummary("a-kilocode", "kilocode"),
+        agentSummary("a-kimi", "kimi"),
+        agentSummary("a-droid", "droid"),
+        agentSummary("a-copilot", "copilot"),
+        agentSummary("a-null", null),
+      ],
+    });
+
+    const result = agentListDowngradeV2ToV1.downgradeResponse(v2Response);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.agents.map((agent) => agent.id)).toEqual([
+      "a-claude",
+      "a-null",
+    ]);
+    // A real v1.0 client's strict decode must accept the result.
+    expect(() => listAgentsResponseSchemaV10.parse(result.value)).not.toThrow();
+  });
+});
+
+describe("post-v2.0 Amp non-breaking v3→v2 / v3→v1 downgrade bridges", () => {
+  it("drops Amp from agent.gui.listHarnesses for v2.0 and v1.0 callers", () => {
+    const v3Response = listGuiHarnessesResponseSchemaV30.parse({
+      harnesses: [
+        harnessOption("claude"),
+        harnessOption("cursor"),
+        harnessOption("amp"),
+      ],
+    });
+
+    const toV2 =
+      agentGuiListHarnessesDowngradeV3ToV2.downgradeResponse(v3Response);
+    expect(toV2.ok).toBe(true);
+    if (!toV2.ok) return;
+    expect(toV2.value.harnesses.map((harness) => harness.id)).toEqual([
+      "claude",
+      "cursor",
+    ]);
+    expect(() =>
+      listGuiHarnessesResponseSchemaV20.parse(toV2.value),
+    ).not.toThrow();
+
+    const toV1 =
+      agentGuiListHarnessesDowngradeV3ToV1.downgradeResponse(v3Response);
+    expect(toV1.ok).toBe(true);
+    if (!toV1.ok) return;
+    expect(toV1.value.harnesses.map((harness) => harness.id)).toEqual([
+      "claude",
+      "cursor",
+    ]);
+    expect(() =>
+      listGuiHarnessesResponseSchemaV10.parse(toV1.value),
+    ).not.toThrow();
+  });
+
+  it("drops Amp agents from agent.list for v2.0 and v1.0 callers", () => {
+    const v3Response = listAgentsResponseSchemaV30.parse({
+      caller: { agentId: "self", canSendMessages: true },
+      scope: "all",
+      agents: [
+        agentSummary("a-claude", "claude"),
+        agentSummary("a-amp", "amp"),
+        agentSummary("a-null", null),
+      ],
+    });
+
+    const toV2 = agentListDowngradeV3ToV2.downgradeResponse(v3Response);
+    expect(toV2.ok).toBe(true);
+    if (!toV2.ok) return;
+    expect(toV2.value.agents.map((agent) => agent.id)).toEqual([
+      "a-claude",
+      "a-null",
+    ]);
+    expect(() => listAgentsResponseSchemaV20.parse(toV2.value)).not.toThrow();
+
+    const toV1 = agentListDowngradeV3ToV1.downgradeResponse(v3Response);
+    expect(toV1.ok).toBe(true);
+    if (!toV1.ok) return;
+    expect(toV1.value.agents.map((agent) => agent.id)).toEqual([
+      "a-claude",
+      "a-null",
+    ]);
+    expect(() => listAgentsResponseSchemaV10.parse(toV1.value)).not.toThrow();
+  });
+
+  it("drops the Amp provider from providers.list for v3.0, v2.0, and v1.0 callers", () => {
+    const liveResponse = providersListResponseSchemaV92.parse({
+      providers: [
+        providerState("cursor", "unknown"),
+        providerState("amp", "unknown"),
+      ],
+    });
+
+    const toV3 = providersListDowngradeV9ToV3.downgradeResponse(liveResponse);
+    expect(toV3.ok).toBe(true);
+    if (!toV3.ok) return;
+    expect(toV3.value.providers.map((provider) => provider.providerId)).toEqual(
+      ["cursor", "amp"],
+    );
+    expect(() =>
+      providersListResponseSchemaV30.parse(toV3.value),
+    ).not.toThrow();
+
+    const toV2 = providersListDowngradeV9ToV2.downgradeResponse(liveResponse);
+    expect(toV2.ok).toBe(true);
+    if (!toV2.ok) return;
+    expect(toV2.value.providers.map((provider) => provider.providerId)).toEqual(
+      ["cursor"],
+    );
+    expect(() =>
+      providersListResponseSchemaV20.parse(toV2.value),
+    ).not.toThrow();
+
+    const toV1 = providersListDowngradeV9ToV1.downgradeResponse(liveResponse);
+    expect(toV1.ok).toBe(true);
+    if (!toV1.ok) return;
+    expect(toV1.value.providers.map((provider) => provider.providerId)).toEqual(
+      ["cursor"],
+    );
+    expect(() =>
+      providersListResponseSchemaV10.parse(toV1.value),
+    ).not.toThrow();
+  });
+});
+
+describe("post-v3.0 Devin/Pi downgrade bridges (agent.gui.listHarnesses/agent.list v4, providers.list v4.0)", () => {
+  it("drops Devin/Pi from agent.gui.listHarnesses for v3.0, v2.0, and v1.0 callers", () => {
+    const v4Response = listGuiHarnessesResponseSchemaV40.parse({
+      harnesses: [
+        harnessOption("claude"),
+        harnessOption("cursor"),
+        harnessOption("amp"),
+        harnessOption("devin"),
+        harnessOption("pi"),
+      ],
+    });
+
+    const toV3 =
+      agentGuiListHarnessesDowngradeV4ToV3.downgradeResponse(v4Response);
+    expect(toV3.ok).toBe(true);
+    if (!toV3.ok) return;
+    expect(toV3.value.harnesses.map((harness) => harness.id)).toEqual([
+      "claude",
+      "cursor",
+      "amp",
+    ]);
+    expect(() =>
+      listGuiHarnessesResponseSchemaV30.parse(toV3.value),
+    ).not.toThrow();
+
+    const toV2 =
+      agentGuiListHarnessesDowngradeV4ToV2.downgradeResponse(v4Response);
+    expect(toV2.ok).toBe(true);
+    if (!toV2.ok) return;
+    expect(toV2.value.harnesses.map((harness) => harness.id)).toEqual([
+      "claude",
+      "cursor",
+    ]);
+    expect(() =>
+      listGuiHarnessesResponseSchemaV20.parse(toV2.value),
+    ).not.toThrow();
+
+    const toV1 =
+      agentGuiListHarnessesDowngradeV4ToV1.downgradeResponse(v4Response);
+    expect(toV1.ok).toBe(true);
+    if (!toV1.ok) return;
+    expect(toV1.value.harnesses.map((harness) => harness.id)).toEqual([
+      "claude",
+      "cursor",
+    ]);
+    expect(() =>
+      listGuiHarnessesResponseSchemaV10.parse(toV1.value),
+    ).not.toThrow();
+  });
+
+  it("drops Devin/Pi agents from agent.list for v3.0, v2.0, and v1.0 callers", () => {
+    const v4Response = listAgentsResponseSchemaV40.parse({
+      caller: { agentId: "self", canSendMessages: true },
+      scope: "all",
+      agents: [
+        agentSummary("a-claude", "claude"),
+        agentSummary("a-amp", "amp"),
+        agentSummary("a-devin", "devin"),
+        agentSummary("a-pi", "pi"),
+        agentSummary("a-null", null),
+      ],
+    });
+
+    const toV3 = agentListDowngradeV4ToV3.downgradeResponse(v4Response);
+    expect(toV3.ok).toBe(true);
+    if (!toV3.ok) return;
+    expect(toV3.value.agents.map((agent) => agent.id)).toEqual([
+      "a-claude",
+      "a-amp",
+      "a-null",
+    ]);
+    expect(() => listAgentsResponseSchemaV30.parse(toV3.value)).not.toThrow();
+
+    const toV2 = agentListDowngradeV4ToV2.downgradeResponse(v4Response);
+    expect(toV2.ok).toBe(true);
+    if (!toV2.ok) return;
+    expect(toV2.value.agents.map((agent) => agent.id)).toEqual([
+      "a-claude",
+      "a-null",
+    ]);
+    expect(() => listAgentsResponseSchemaV20.parse(toV2.value)).not.toThrow();
+
+    const toV1 = agentListDowngradeV4ToV1.downgradeResponse(v4Response);
+    expect(toV1.ok).toBe(true);
+    if (!toV1.ok) return;
+    expect(toV1.value.agents.map((agent) => agent.id)).toEqual([
+      "a-claude",
+      "a-null",
+    ]);
+    expect(() => listAgentsResponseSchemaV10.parse(toV1.value)).not.toThrow();
+  });
+
+  it("drops Devin/Pi from providers.list for v3.0, v2.0, and v1.0 callers", () => {
+    const v4Response = providersListResponseSchemaV40.parse({
+      providers: [
+        providerState("cursor", "unknown"),
+        providerState("amp", "unknown"),
+        providerState("devin", "unknown"),
+        providerState("pi", "unknown"),
+      ],
+    });
+
+    const toV3 = providersListDowngradeV4ToV3.downgradeResponse(v4Response);
+    expect(toV3.ok).toBe(true);
+    if (!toV3.ok) return;
+    expect(toV3.value.providers.map((provider) => provider.providerId)).toEqual(
+      ["cursor", "amp"],
+    );
+    expect(() =>
+      providersListResponseSchemaV30.parse(toV3.value),
+    ).not.toThrow();
+
+    const toV2 = providersListDowngradeV4ToV2.downgradeResponse(v4Response);
+    expect(toV2.ok).toBe(true);
+    if (!toV2.ok) return;
+    expect(toV2.value.providers.map((provider) => provider.providerId)).toEqual(
+      ["cursor"],
+    );
+    expect(() =>
+      providersListResponseSchemaV20.parse(toV2.value),
+    ).not.toThrow();
+
+    const toV1 = providersListDowngradeV4ToV1.downgradeResponse(v4Response);
+    expect(toV1.ok).toBe(true);
+    if (!toV1.ok) return;
+    expect(toV1.value.providers.map((provider) => provider.providerId)).toEqual(
+      ["cursor"],
+    );
+    expect(() =>
+      providersListResponseSchemaV10.parse(toV1.value),
+    ).not.toThrow();
+  });
+});
+
+describe("post-v6.0 Hugging Face/Reasonix/Antigravity non-breaking downgrade bridges", () => {
+  // These three catalog methods each opened a new major when a release froze
+  // their previous line: `huggingface` could not ride v6.0 and opened v7.0,
+  // and `reasonix` could not ride ANY minor of major 7 - the v1.2.0 tags
+  // shipped 7.0, and `versioned-rpc.ts` refuses a minor that grows a response
+  // enum over its predecessor - so it opened v8.0.
+  //
+  // Antigravity did NOT join that same v8.0 the way Reasonix joined v8.0 over
+  // v7.0: `cli-v1.3.0` / `host-v1.3.0` shipped v8.0 from a branch cut BEFORE
+  // Antigravity landed on `main`, so v8.0 is now frozen at the twenty ids it
+  // actually shipped (Hugging Face and Reasonix included, Antigravity not),
+  // and Antigravity needed its own new major, v9.0 - the live shape now sits
+  // there, one hop further out, and every older caller (v8.0 included) gets
+  // the ids it predates filtered out.
+  it("drops Hugging Face/Reasonix/Antigravity from agent.gui.listHarnesses for every released caller down to v1.0", () => {
+    const v9Response = listGuiHarnessesResponseSchemaV92.parse({
+      harnesses: [
+        harnessOption("claude"),
+        harnessOption("cursor"),
+        harnessOption("amp"),
+        harnessOption("devin"),
+        harnessOption("pi"),
+        harnessOption("hermes"),
+        harnessOption("omp"),
+        harnessOption("huggingface"),
+        harnessOption("reasonix"),
+        harnessOption("antigravity"),
+      ],
+    });
+
+    // The new adjacent hop: v8.0 (`cli-v1.3.0` / `host-v1.3.0`) shipped with
+    // both Hugging Face and Reasonix, so it keeps them and loses only
+    // Antigravity, which predates it.
+    const toV8 =
+      agentGuiListHarnessesDowngradeV9ToV8.downgradeResponse(v9Response);
+    expect(toV8.ok).toBe(true);
+    if (!toV8.ok) return;
+    expect(toV8.value.harnesses.map((harness) => harness.id)).toEqual([
+      "claude",
+      "cursor",
+      "amp",
+      "devin",
+      "pi",
+      "hermes",
+      "omp",
+      "huggingface",
+      "reasonix",
+    ]);
+    expect(() =>
+      listGuiHarnessesResponseSchemaV90.parse(toV8.value),
+    ).not.toThrow();
+
+    // Major 7 shipped with Hugging Face, so it keeps it and loses Reasonix
+    // and Antigravity alike. The bridge lands on 7.1, major 7's latest
+    // installed minor.
+    const toV7 =
+      agentGuiListHarnessesDowngradeV9ToV7.downgradeResponse(v9Response);
+    expect(toV7.ok).toBe(true);
+    if (!toV7.ok) return;
+    expect(toV7.value.harnesses.map((harness) => harness.id)).toEqual([
+      "claude",
+      "cursor",
+      "amp",
+      "devin",
+      "pi",
+      "hermes",
+      "omp",
+      "huggingface",
+    ]);
+    expect(() =>
+      listGuiHarnessesResponseSchemaV71.parse(toV7.value),
+    ).not.toThrow();
+
+    // v6.0 shipped with omp, so it keeps omp and loses Hugging Face,
+    // Reasonix and Antigravity.
+    const toV6 =
+      agentGuiListHarnessesDowngradeV9ToV6.downgradeResponse(v9Response);
+    expect(toV6.ok).toBe(true);
+    if (!toV6.ok) return;
+    expect(toV6.value.harnesses.map((harness) => harness.id)).toEqual([
+      "claude",
+      "cursor",
+      "amp",
+      "devin",
+      "pi",
+      "hermes",
+      "omp",
+    ]);
+    expect(() =>
+      listGuiHarnessesResponseSchemaV60.parse(toV6.value),
+    ).not.toThrow();
+
+    const toV5 =
+      agentGuiListHarnessesDowngradeV9ToV5.downgradeResponse(v9Response);
+    expect(toV5.ok).toBe(true);
+    if (!toV5.ok) return;
+    expect(toV5.value.harnesses.map((harness) => harness.id)).toEqual([
+      "claude",
+      "cursor",
+      "amp",
+      "devin",
+      "pi",
+      "hermes",
+    ]);
+    expect(() =>
+      listGuiHarnessesResponseSchemaV50.parse(toV5.value),
+    ).not.toThrow();
+
+    const toV4 =
+      agentGuiListHarnessesDowngradeV9ToV4.downgradeResponse(v9Response);
+    expect(toV4.ok).toBe(true);
+    if (!toV4.ok) return;
+    expect(toV4.value.harnesses.map((harness) => harness.id)).toEqual([
+      "claude",
+      "cursor",
+      "amp",
+      "devin",
+      "pi",
+    ]);
+    expect(() =>
+      listGuiHarnessesResponseSchemaV40.parse(toV4.value),
+    ).not.toThrow();
+
+    const toV3 =
+      agentGuiListHarnessesDowngradeV9ToV3.downgradeResponse(v9Response);
+    expect(toV3.ok).toBe(true);
+    if (!toV3.ok) return;
+    expect(toV3.value.harnesses.map((harness) => harness.id)).toEqual([
+      "claude",
+      "cursor",
+      "amp",
+    ]);
+    expect(() =>
+      listGuiHarnessesResponseSchemaV30.parse(toV3.value),
+    ).not.toThrow();
+
+    const toV2 =
+      agentGuiListHarnessesDowngradeV9ToV2.downgradeResponse(v9Response);
+    expect(toV2.ok).toBe(true);
+    if (!toV2.ok) return;
+    expect(toV2.value.harnesses.map((harness) => harness.id)).toEqual([
+      "claude",
+      "cursor",
+    ]);
+    expect(() =>
+      listGuiHarnessesResponseSchemaV20.parse(toV2.value),
+    ).not.toThrow();
+
+    const toV1 =
+      agentGuiListHarnessesDowngradeV9ToV1.downgradeResponse(v9Response);
+    expect(toV1.ok).toBe(true);
+    if (!toV1.ok) return;
+    expect(toV1.value.harnesses.map((harness) => harness.id)).toEqual([
+      "claude",
+      "cursor",
+    ]);
+    expect(() =>
+      listGuiHarnessesResponseSchemaV10.parse(toV1.value),
+    ).not.toThrow();
+  });
+
+  it("drops Hugging Face/Reasonix/Antigravity agents from agent.list for every released caller down to v1.0", () => {
+    // Parsed through the 9.2 shape the bridges originate at, so `archived`
+    // reaches each bridge and every hop below is seen to drop it.
+    const v9Response = listAgentsResponseSchemaV92.parse({
+      caller: { agentId: "self", canSendMessages: true },
+      scope: "all",
+      agents: [
+        agentSummary("a-claude", "claude"),
+        agentSummary("a-amp", "amp"),
+        agentSummary("a-devin", "devin"),
+        agentSummary("a-pi", "pi"),
+        agentSummary("a-hermes", "hermes"),
+        agentSummary("a-omp", "omp"),
+        agentSummary("a-hf", "huggingface"),
+        agentSummary("a-reasonix", "reasonix"),
+        agentSummary("a-antigravity", "antigravity"),
+        agentSummary("a-null", null),
+      ],
+    });
+
+    // The new adjacent hop: v8.0 shipped with both Hugging Face and Reasonix
+    // rows, so both survive; only Antigravity, which predates v8.0, goes.
+    // `runConfig` survives too - v8.0 models it same as v7.0.
+    const toV8 = agentListDowngradeV9ToV8.downgradeResponse(v9Response);
+    expect(toV8.ok).toBe(true);
+    if (!toV8.ok) return;
+    expect(toV8.value.agents.map((agent) => agent.id)).toEqual([
+      "a-claude",
+      "a-amp",
+      "a-devin",
+      "a-pi",
+      "a-hermes",
+      "a-omp",
+      "a-hf",
+      "a-reasonix",
+      "a-null",
+    ]);
+    expect(toV8.value.agents.every((agent) => "runConfig" in agent)).toBe(true);
+    expect(() => listAgentsResponseSchemaV80.parse(toV8.value)).not.toThrow();
+
+    // v7.0 shipped with Hugging Face, so that row survives; only Reasonix and
+    // Antigravity go. `runConfig` survives too - it is a v7.0 field, unlike
+    // every hop below, where the frozen shape predates it and the reparse
+    // drops it.
+    const toV7 = agentListDowngradeV9ToV7.downgradeResponse(v9Response);
+    expect(toV7.ok).toBe(true);
+    if (!toV7.ok) return;
+    expect(toV7.value.agents.map((agent) => agent.id)).toEqual([
+      "a-claude",
+      "a-amp",
+      "a-devin",
+      "a-pi",
+      "a-hermes",
+      "a-omp",
+      "a-hf",
+      "a-null",
+    ]);
+    expect(toV7.value.agents.every((agent) => "runConfig" in agent)).toBe(true);
+    expect(() => listAgentsResponseSchemaV70.parse(toV7.value)).not.toThrow();
+
+    // v6.0 shipped with omp, so an omp agent row survives; Hugging Face,
+    // Reasonix, and Antigravity go.
+    const toV6 = agentListDowngradeV9ToV6.downgradeResponse(v9Response);
+    expect(toV6.ok).toBe(true);
+    if (!toV6.ok) return;
+    expect(toV6.value.agents.map((agent) => agent.id)).toEqual([
+      "a-claude",
+      "a-amp",
+      "a-devin",
+      "a-pi",
+      "a-hermes",
+      "a-omp",
+      "a-null",
+    ]);
+    expect(toV6.value.agents.every((agent) => !("runConfig" in agent))).toBe(
+      true,
+    );
+    expect(() => listAgentsResponseSchemaV60.parse(toV6.value)).not.toThrow();
+
+    const toV5 = agentListDowngradeV9ToV5.downgradeResponse(v9Response);
+    expect(toV5.ok).toBe(true);
+    if (!toV5.ok) return;
+    expect(toV5.value.agents.map((agent) => agent.id)).toEqual([
+      "a-claude",
+      "a-amp",
+      "a-devin",
+      "a-pi",
+      "a-hermes",
+      "a-null",
+    ]);
+    expect(toV5.value.agents.every((agent) => !("runConfig" in agent))).toBe(
+      true,
+    );
+    expect(() => listAgentsResponseSchemaV50.parse(toV5.value)).not.toThrow();
+
+    const toV4 = agentListDowngradeV9ToV4.downgradeResponse(v9Response);
+    expect(toV4.ok).toBe(true);
+    if (!toV4.ok) return;
+    expect(toV4.value.agents.map((agent) => agent.id)).toEqual([
+      "a-claude",
+      "a-amp",
+      "a-devin",
+      "a-pi",
+      "a-null",
+    ]);
+    expect(toV4.value.agents.every((agent) => !("runConfig" in agent))).toBe(
+      true,
+    );
+    expect(() => listAgentsResponseSchemaV40.parse(toV4.value)).not.toThrow();
+
+    const toV3 = agentListDowngradeV9ToV3.downgradeResponse(v9Response);
+    expect(toV3.ok).toBe(true);
+    if (!toV3.ok) return;
+    expect(toV3.value.agents.map((agent) => agent.id)).toEqual([
+      "a-claude",
+      "a-amp",
+      "a-null",
+    ]);
+    expect(toV3.value.agents.every((agent) => !("runConfig" in agent))).toBe(
+      true,
+    );
+    expect(() => listAgentsResponseSchemaV30.parse(toV3.value)).not.toThrow();
+
+    const toV2 = agentListDowngradeV9ToV2.downgradeResponse(v9Response);
+    expect(toV2.ok).toBe(true);
+    if (!toV2.ok) return;
+    expect(toV2.value.agents.map((agent) => agent.id)).toEqual([
+      "a-claude",
+      "a-null",
+    ]);
+    expect(toV2.value.agents.every((agent) => !("runConfig" in agent))).toBe(
+      true,
+    );
+    expect(() => listAgentsResponseSchemaV20.parse(toV2.value)).not.toThrow();
+
+    const toV1 = agentListDowngradeV9ToV1.downgradeResponse(v9Response);
+    expect(toV1.ok).toBe(true);
+    if (!toV1.ok) return;
+    expect(toV1.value.agents.map((agent) => agent.id)).toEqual([
+      "a-claude",
+      "a-null",
+    ]);
+    expect(toV1.value.agents.every((agent) => !("runConfig" in agent))).toBe(
+      true,
+    );
+    expect(() => listAgentsResponseSchemaV10.parse(toV1.value)).not.toThrow();
+  });
+
+  it("drops Hugging Face/Reasonix/Antigravity from providers.list for every released caller down to v1.0", () => {
+    // `cli-v1.1.9` shipped v6.0 and `cli-v1.2.0` shipped v7.0, so none of
+    // `huggingface`, `reasonix`, or `antigravity` could join the line below
+    // it. `cli-v1.3.0` then shipped v8.0 carrying `huggingface` and
+    // `reasonix` - but from a branch cut before Antigravity landed, so v8.0
+    // is now frozen too. Driven from v9.0, the newest (still unreleased)
+    // line, which is the only one that carries all three.
+    const v9Response = providersListResponseSchemaV92.parse({
+      providers: [
+        providerState("cursor", "unknown"),
+        providerState("amp", "unknown"),
+        providerState("devin", "unknown"),
+        providerState("pi", "unknown"),
+        providerState("hermes", "unknown"),
+        providerState("omp", "unknown"),
+        providerState("huggingface", "unknown"),
+        providerState("reasonix", "unknown"),
+        providerState("antigravity", "unknown"),
+      ],
+    });
+
+    // The new adjacent hop: v8.0 shipped with both Hugging Face and Reasonix,
+    // so both survive; only Antigravity, which predates v8.0, goes.
+    const toV8 = providersListDowngradeV9ToV8.downgradeResponse(v9Response);
+    expect(toV8.ok).toBe(true);
+    if (!toV8.ok) return;
+    expect(toV8.value.providers.map((provider) => provider.providerId)).toEqual(
+      [
+        "cursor",
+        "amp",
+        "devin",
+        "pi",
+        "hermes",
+        "omp",
+        "huggingface",
+        "reasonix",
+      ],
+    );
+    expect(() =>
+      providersListResponseSchemaV80.parse(toV8.value),
+    ).not.toThrow();
+
+    // Major 7 keeps Hugging Face and loses Reasonix and Antigravity alike;
+    // the bridge lands on 7.0, major 7's only (and therefore latest)
+    // installed minor.
+    const toV7 = providersListDowngradeV9ToV7.downgradeResponse(v9Response);
+    expect(toV7.ok).toBe(true);
+    if (!toV7.ok) return;
+    expect(toV7.value.providers.map((provider) => provider.providerId)).toEqual(
+      ["cursor", "amp", "devin", "pi", "hermes", "omp", "huggingface"],
+    );
+    expect(() =>
+      providersListResponseSchemaV70.parse(toV7.value),
+    ).not.toThrow();
+
+    const toV6 = providersListDowngradeV9ToV6.downgradeResponse(v9Response);
+    expect(toV6.ok).toBe(true);
+    if (!toV6.ok) return;
+    expect(toV6.value.providers.map((provider) => provider.providerId)).toEqual(
+      ["cursor", "amp", "devin", "pi", "hermes", "omp"],
+    );
+    expect(() =>
+      providersListResponseSchemaV60.parse(toV6.value),
+    ).not.toThrow();
+
+    const toV5 = providersListDowngradeV9ToV5.downgradeResponse(v9Response);
+    expect(toV5.ok).toBe(true);
+    if (!toV5.ok) return;
+    expect(toV5.value.providers.map((provider) => provider.providerId)).toEqual(
+      ["cursor", "amp", "devin", "pi", "hermes"],
+    );
+    expect(() =>
+      providersListResponseSchemaV50.parse(toV5.value),
+    ).not.toThrow();
+
+    const toV4 = providersListDowngradeV9ToV4.downgradeResponse(v9Response);
+    expect(toV4.ok).toBe(true);
+    if (!toV4.ok) return;
+    expect(toV4.value.providers.map((provider) => provider.providerId)).toEqual(
+      ["cursor", "amp", "devin", "pi"],
+    );
+    expect(() =>
+      providersListResponseSchemaV40.parse(toV4.value),
+    ).not.toThrow();
+
+    const toV3 = providersListDowngradeV9ToV3.downgradeResponse(v9Response);
+    expect(toV3.ok).toBe(true);
+    if (!toV3.ok) return;
+    expect(toV3.value.providers.map((provider) => provider.providerId)).toEqual(
+      ["cursor", "amp"],
+    );
+    expect(() =>
+      providersListResponseSchemaV30.parse(toV3.value),
+    ).not.toThrow();
+
+    const toV2 = providersListDowngradeV9ToV2.downgradeResponse(v9Response);
+    expect(toV2.ok).toBe(true);
+    if (!toV2.ok) return;
+    expect(toV2.value.providers.map((provider) => provider.providerId)).toEqual(
+      ["cursor"],
+    );
+    expect(() =>
+      providersListResponseSchemaV20.parse(toV2.value),
+    ).not.toThrow();
+
+    const toV1 = providersListDowngradeV9ToV1.downgradeResponse(v9Response);
+    expect(toV1.ok).toBe(true);
+    if (!toV1.ok) return;
+    expect(toV1.value.providers.map((provider) => provider.providerId)).toEqual(
+      ["cursor"],
+    );
+    expect(() =>
+      providersListResponseSchemaV10.parse(toV1.value),
+    ).not.toThrow();
+  });
+});
+
+/**
+ * The `auto` permission mode and the `nativeAutoJudge` row field ride
+ * `agent.gui.listHarnesses@9.1`. Everything below 9.1 has to lose both, and the
+ * two lose them by different mechanisms - which is the whole reason this has
+ * its own suite rather than an extra assertion on the Reasonix one.
+ */
+describe("agent.gui.listHarnesses@9.1 auto-mode downgrades", () => {
+  function autoHarnessOption(id: string) {
+    return guiHarnessOptionSchema.parse({
+      id,
+      label: id,
+      available: true,
+      error: null,
+      modes: ["gui"],
+      requiresApiKey: false,
+      supportedPermissionModes: [
+        "supervised",
+        "auto_accept_edits",
+        "auto",
+        "full_access",
+      ],
+      nativeAutoJudge: true,
+    });
+  }
+
+  const v91Response = listGuiHarnessesResponseSchemaV92.parse({
+    harnesses: [autoHarnessOption("claude"), autoHarnessOption("reasonix")],
+  });
+
+  it("keeps auto and nativeAutoJudge on the head line", () => {
+    expect(v91Response.harnesses[0].supportedPermissionModes).toContain("auto");
+    expect(v91Response.harnesses[0].nativeAutoJudge).toBe(true);
+  });
+
+  it("strips auto and nativeAutoJudge for an 8.0 caller, keeping the row", () => {
+    // The row must SURVIVE, minus the mode. The bridges filter by
+    // `safeParse().success`, so an unstripped `auto` would not degrade the one
+    // field - it would drop every row and empty the caller's picker.
+    const toV8 =
+      agentGuiListHarnessesDowngradeV9ToV8.downgradeResponse(v91Response);
+    expect(toV8.ok).toBe(true);
+    if (!toV8.ok) return;
+
+    // BOTH rows survive: major 8's id enum is the pre-Antigravity twenty, so
+    // `reasonix` is in it. This bridge drops ids, and the only id major 9 added
+    // is `antigravity` - the modes and the judge flag are what it strips here.
+    expect(toV8.value.harnesses.map((harness) => harness.id)).toEqual([
+      "claude",
+      "reasonix",
+    ]);
+    expect(toV8.value.harnesses[0].supportedPermissionModes).toEqual([
+      "supervised",
+      "auto_accept_edits",
+      "full_access",
+    ]);
+    expect(Object.hasOwn(toV8.value.harnesses[0], "nativeAutoJudge")).toBe(
+      false,
+    );
+    expect(() =>
+      listGuiHarnessesResponseSchemaV80.parse(toV8.value),
+    ).not.toThrow();
+  });
+
+  it("strips auto all the way down to the frozen 1.0 row", () => {
+    const toV1 =
+      agentGuiListHarnessesDowngradeV9ToV1.downgradeResponse(v91Response);
+    expect(toV1.ok).toBe(true);
+    if (!toV1.ok) return;
+    expect(toV1.value.harnesses[0].supportedPermissionModes).toEqual([
+      "supervised",
+      "auto_accept_edits",
+      "full_access",
+    ]);
+    expect(() =>
+      listGuiHarnessesResponseSchemaV10.parse(toV1.value),
+    ).not.toThrow();
+  });
+
+  it("upgrades a 9.0 row by filling nativeAutoJudge false", () => {
+    // A host that predates 9.1 has no native-judge concept, so `false` is the
+    // pre-feature reading rather than a guess.
+    const v90Response = listGuiHarnessesResponseSchemaV90.parse({
+      harnesses: [harnessOption("claude")],
+    });
+    const upgraded =
+      agentGuiListHarnessesUpgradeV90ToV91.upgradeResponse(v90Response);
+    expect(upgraded.harnesses[0].nativeAutoJudge).toBe(false);
+    expect(() => listGuiHarnessesResponseSchema.parse(upgraded)).not.toThrow();
+  });
+});

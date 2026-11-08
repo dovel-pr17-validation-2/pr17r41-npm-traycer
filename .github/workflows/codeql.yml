@@ -1,0 +1,64 @@
+name: CodeQL
+
+# Static analysis security testing (SAST) over the JS/TS sources. Runs on every
+# PR and push to main so Scorecard's "SAST" check sees a tool on each commit, and
+# weekly so newly-published queries re-scan unchanged code. No secrets.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Only a pull request's runs supersede each other. A push to `main` gets its own
+  # group (the run id): every merge is tested once, so a later merge must never
+  # cancel an earlier merge's run.
+  group: codeql-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (javascript-typescript)
+    # The one job a team PR into `main` runs (AGENTS.md, "When CI runs"): a new
+    # alert shows on the PR that introduces it instead of after the merge, and
+    # Scorecard's SAST check counts only merged PRs that carried a scan. It is
+    # not a required check, so it never holds the merge button.
+    runs-on: ubuntu-24.04
+    permissions:
+      security-events: write # upload results to code scanning
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: javascript-typescript
+          # Default + security-focused queries; the codebase is interpreted, so
+          # no build step is needed.
+          queries: security-extended
+          # Narrows WHAT is scanned (test specs are excluded), never WHICH rules
+          # run - the config file deliberately carries no `queries` key, so
+          # `security-extended` above still applies.
+          #
+          # If you change either input, check both halves rather than trusting
+          # a green check: the code-scanning analyses API reports
+          # `results_count` (did `paths-ignore` apply) and `rules_count` (did
+          # the query suite survive, or did the config silently displace it).
+          # Deliberately no expected numbers here - `security-extended` grows
+          # with every CodeQL release, so a pinned count would be stale within
+          # weeks and read as a regression. Compare against the previous
+          # analysis on the same ref instead.
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: "/language:javascript-typescript"

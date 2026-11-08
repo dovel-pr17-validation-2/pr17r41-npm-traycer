@@ -1,0 +1,1023 @@
+import { z } from "zod";
+import type { WorktreeBusyHolder } from "./worktree-busy-holders";
+import type { EnvironmentStaleWrite } from "./environment-stale-write";
+
+declare const validatedMethodVersionRegistryBrand: unique symbol;
+declare const validatedVersionedRpcRegistryBrand: unique symbol;
+
+export type SchemaVersion = {
+  major: number;
+  minor: number;
+};
+
+// Single source of truth for the wire error codes. The type is derived from
+// this array so adding a code here automatically widens `RpcErrorCode` and is
+// recognized by `isRpcErrorCode` - no parallel list to keep in sync.
+export const RPC_ERROR_CODES = [
+  "RPC_ERROR",
+  "DOWNGRADE_UNSUPPORTED",
+  "INCOMPATIBLE",
+  "UNAUTHORIZED",
+  "FORBIDDEN",
+  // The authenticated principal kind is not permitted to invoke this verb.
+  // Additive and degrade-safe: old peers narrow the unknown code to
+  // RPC_ERROR while preserving the response status and message.
+  "VERB_NOT_ALLOWED",
+  "E_HOST_UNSUPPORTED",
+  "WORKTREE_BUSY",
+  "WORKTREE_HOLDERS_CHANGED",
+  "WORKTREE_REBIND_BLOCKED",
+  "WORKTREE_SETUP_FAILED",
+  "WORKTREE_SETUP_CANCELLED",
+  "WORKTREE_MISSING",
+  "WORKSPACE_BINDING_REQUIRED",
+  "WORKTREE_REMOVE_LAST_ENTRY",
+  "PROVIDER_DISABLED",
+  "SENDER_TUI_UNSUPPORTED",
+  // Caller-supplied input is structurally valid but semantically rejected
+  // (e.g. minting the reserved `traycer:system` agent id). Additive and
+  // degrade-safe: the wire `code` is an open string and old clients narrow
+  // unknown codes to RPC_ERROR while keeping the 4xx status.
+  "E_INVALID_ARGUMENT",
+  // Role-surface outcomes (same additive degrade story as E_INVALID_ARGUMENT).
+  // An absent agent and a foreign-account agent share E_AGENT_NOT_FOUND with
+  // one message template - anything more specific would be an existence
+  // oracle across the account boundary.
+  "E_AGENT_NOT_FOUND",
+  // The caller's OWN agent lives on another host; the message names it, so
+  // telling the caller where to go discloses nothing across accounts.
+  "E_AGENT_NOT_LOCAL",
+  // The host needed the cloud to answer the call and the cloud gave no
+  // verdict (a transport failure, a timeout, a 5xx). RETRYABLE (503): it says
+  // nothing about the target, so it must not read as E_AGENT_NOT_FOUND. Same
+  // additive degrade story as E_INVALID_ARGUMENT.
+  "E_CLOUD_UNREACHABLE",
+  // A HOME-partitioned request (`clearAll@1.1`'s `home: "local"`) arrived
+  // while this host could not read local-home membership. RETRYABLE (503) and
+  // deliberately NOT collapsed into a generic failure: the alternative to
+  // refusing is guessing, and for a destructive clear the guess that matches
+  // the read path's fallback would widen "clear my local partition" into
+  // "clear the whole origin". The client shows a retry, not a failure.
+  "E_LOCAL_HOME_MEMBERSHIP_UNKNOWN",
+  // The caller's cloud verdict was withdrawn BETWEEN a resolver's pre-check
+  // and the wire. `BaseHTTPClient` resolves the caller's header reader after
+  // its own proxy-authorization await and refuses the send when it answers
+  // null, so nothing was sent - this is neither a server fault (500) nor a
+  // sign-out (401), and the same additive degrade story as
+  // E_INVALID_ARGUMENT applies.
+  //
+  // It exists as its own code because a CACHE has to name it. The host's
+  // idempotency cache retains every non-2xx so a retry cannot re-run a
+  // mutation that may have landed; a withdrawn credential is the case where
+  // the mutation demonstrably did NOT land, and without a distinct code the
+  // cache would have to guess from the 503 status, which several unrelated
+  // outcomes also carry.
+  "E_CLOUD_CREDENTIAL_WITHDRAWN",
+  // A claim held by ANOTHER of the caller's own agents - a real authorization
+  // error with role-specific copy, distinct from the generic epic-access
+  // FORBIDDEN whose "check Task access" guidance would mislead here.
+  "E_ROLE_FORBIDDEN",
+  // The epic document is sealed, newer than this host understands, or cannot
+  // be read safely. Distinct from FORBIDDEN: the caller may hold editor access
+  // while the document itself is intentionally read-only.
+  "E_EPIC_READ_ONLY",
+  // `environment.host.bind` refused: a live bot of the host's current
+  // environment is bound to it, and a host belongs to exactly one
+  // environment. Same additive degrade story as E_INVALID_ARGUMENT.
+  "E_HOST_HAS_BOTS_OF_ANOTHER_ENVIRONMENT",
+  // A keyed unary was refused before resolver dispatch because the bounded
+  // replay cache had no safe slot. The command definitely did not run and may
+  // retry with the SAME key once capacity returns. This meaning is part of the
+  // negotiated `unary.idempotencyKey` capability; changing it requires a new
+  // capability name, never a reinterpretation of this code.
+  "E_IDEMPOTENCY_CACHE_SATURATED",
+  // The original keyed unary exceeded the host's in-flight replay ceiling.
+  // The host will never dispatch the key again while that execution remains
+  // live, but it can no longer promise a committed or rejected answer to a
+  // later joiner. Clients reconcile this ambiguous outcome through echo/TTL.
+  "E_IDEMPOTENCY_OUTCOME_UNKNOWN",
+  // The original keyed unary SETTLED, and its response was too large for the
+  // host to retain for replay. Distinct from E_IDEMPOTENCY_OUTCOME_UNKNOWN in
+  // the one way a client acts on: there the answer is unknowable, here it is
+  // known and simply not kept, so the command definitely ran and must NOT be
+  // retried under the same key expecting a result. The host keeps the key
+  // precisely so the retry cannot re-execute it. Additive and degrade-safe
+  // like E_INVALID_ARGUMENT - a client that does not know this code sees an
+  // ordinary 409.
+  "E_IDEMPOTENCY_REPLAY_TOO_LARGE",
+  "TERMINAL_ID_TAKEN",
+  // A durable terminal is mid-delete. 409, not 500: the caller can retry
+  // after the marker settles. Additive and degrade-safe like E_INVALID_ARGUMENT.
+  "TERMINAL_DELETING",
+  // `agent.sendMessage`'s prompt exceeded the shared A2A_MESSAGE_MAX_UTF8_BYTES
+  // ceiling. Same additive degrade story as E_INVALID_ARGUMENT.
+  "MESSAGE_TOO_LARGE",
+  // ─── Share-gate refusal taxonomy (s5-share-error-taxonomy) ──────────────
+  //
+  // The wire encoding of `EpicShareRefusal` (see
+  // `host/epic/share-refusal.ts`), which replaces the `SHARE_*` message-PREFIX
+  // pseudo-types the share gate used to emit. Two facts that had justified the
+  // prefixes were checked and are false: additive codes here ARE old-client
+  // safe (an unrecognised code narrows to `RPC_ERROR` while the 4xx status
+  // survives - `ws-rpc-client.ts`), and no OSS client parses those prefixes.
+  //
+  // One code per USER-DISTINGUISHABLE refusal, because the code is the only
+  // typed channel on the response error envelope (`{ code, message }`) and the
+  // GUI must branch on the refusal AND, for a pending promotion, on its
+  // reason - "still copying" and "the cloud is unreachable" need different
+  // copy and different retry guidance. Keeping the reason in the message would
+  // reproduce the defect this ticket exists to remove.
+  //
+  // Every share refusal has a code here, including the generic member: a
+  // refusal with no typed home is what dropped `EpicShareNotOwnedError` into a
+  // 500.
+  "E_SHARE_NEEDS_CLOUD_SYNC",
+  "E_SHARE_NOT_OWNED",
+  "E_SHARE_PENDING_RECENT_ATTEMPT",
+  "E_SHARE_PENDING_BUSY",
+  "E_SHARE_PENDING_OFFLINE",
+  "E_SHARE_PENDING_FAILED",
+  // The caller's session holds no cloud verdict, so the host made no cloud
+  // call for it. Split from E_SHARE_PENDING_OFFLINE, which it used to ride:
+  // that code's advice is "check your connection", and it is wrong whenever
+  // the verdict was lost to an expired or revoked session rather than to an
+  // unreachable authn. The host cannot tell those apart (the verdict is a
+  // boolean the client asserts) and the client can, so the code says only what
+  // the host knows and the client picks the copy. Additive: a GUI that does
+  // not know it renders its generic share failure and drops the host's
+  // message (vague, not wrong); the message is what a CLI, an agent or a log
+  // reader gets, and is written to stand alone for them.
+  "E_SHARE_PENDING_UNVERIFIED",
+  "E_SHARE_REFUSED",
+  // A latest-checkpoint fork (`epic.createChat`'s `forkSource: {boundary:
+  // "latest"}`, and the A2A `agent.fork`/`forkAgent` tool that shares the same
+  // seed builder) named a source chat with no assistant record to fork from
+  // yet. A precondition on the CALLER's chosen source, not a server fault -
+  // same additive degrade story as E_INVALID_ARGUMENT.
+  "E_FORK_CHECKPOINT_UNAVAILABLE",
+  // A fork named a boundary the source chat's cloud publication does not
+  // cover yet: the host could only reach the source through the cloud (or
+  // doc) tier - a cross-host fork, where the target holds no local
+  // transcript - and the requested assistant message is newer than what the
+  // source host has published. RETRYABLE, and the only fork refusal that is:
+  // the same call succeeds once the source's next publish sweep lands, so
+  // callers should keep the surface open and offer a retry rather than
+  // treating it as a dead end. Distinct from
+  // E_FORK_CHECKPOINT_UNAVAILABLE (no assistant record to fork from at all)
+  // and from the caller-bug slice errors (boundary is not an assistant
+  // message, no turn key, interview block missing), which are permanent and
+  // must never be reported as "still syncing". Same additive degrade story
+  // as E_INVALID_ARGUMENT.
+  "E_FORK_BOUNDARY_NOT_PUBLISHED",
+  // `worktree.setAutoCleanupPolicy` was called with an `expectedRevision` the
+  // host no longer holds - another surface changed this host's automatic
+  // cleanup policy first. A precondition failure on the CALLER's stale read,
+  // not a server fault, and never a blind retry: the loser of the race would
+  // be re-enabling scheduled DELETION under a threshold the user has since
+  // moved. Clients re-read the policy and re-present it. Same additive degrade
+  // story as E_INVALID_ARGUMENT - the code carries the whole meaning, so no
+  // typed details channel is widened for it.
+  "AUTO_CLEANUP_POLICY_REVISION_CONFLICT",
+  // The host's idempotency cache refused a key it has already seen under a
+  // different RPC contract or different params - its `keyReuseConflict`,
+  // answered with status 409. A precondition failure on the CALLER's key
+  // choice, and never a blind retry: the same key with the same params
+  // REPLAYS the cached outcome instead, which is the whole point of the
+  // cache; reaching this code means the two calls genuinely differ.
+  //
+  // Minted to replace a PROSE coupling. Before this code, the only thing
+  // distinguishing a key-reuse conflict from every other 409 on the wire was
+  // the English sentence the host wrote, which the renderer matched by
+  // substring - two definitions of one fact, in two repos, with nothing that
+  // fails when they drift. The message fragment survives as
+  // `IDEMPOTENCY_KEY_REUSE_MESSAGE_FRAGMENT` (`ws-protocol.ts`) for hosts
+  // that predate this code, but it is now the FALLBACK, not the contract.
+  //
+  // Same additive degrade story as E_INVALID_ARGUMENT, and here the degrade
+  // is the compatibility story in full: a client that predates this code
+  // narrows it to RPC_ERROR (`isRpcErrorCode`) while keeping the 409 and the
+  // message, which is exactly what it does today.
+  "IDEMPOTENCY_KEY_REUSE",
+  // The host machine ran out of disk space (or its disk quota) while serving
+  // the request. Its own code because the only useful next step, freeing
+  // space on the HOST machine, is invisible behind RPC_ERROR's generic copy,
+  // and the host may not be the machine the user is sitting at. Same additive
+  // degrade story as E_INVALID_ARGUMENT: a client that does not know this code
+  // shows its generic failure, exactly as it did before the code existed.
+  "E_HOST_STORAGE_FULL",
+  // ─── Sandbox host refusals (on-demand sandboxes) ────────────────────────
+  //
+  // Domain codes live here, as the share-refusal taxonomy's do: the code is
+  // the only typed channel on the error envelope, and each of these needs its
+  // own copy and its own next step. Same additive degrade story as
+  // E_INVALID_ARGUMENT - a client that predates them narrows each to
+  // RPC_ERROR while keeping the status and the message.
+  //
+  // The target sandbox is frozen for lack of credits. Not retryable until the
+  // balance is topped up; a dial path answers this instead of waiting out a
+  // HOST_UNREACHABLE timeout against a host that is deliberately down.
+  "SANDBOX_FROZEN",
+  // A sandbox host refuses to receive or store a user credential (profile
+  // sync, settings API keys, provider login, browser sign-ins): nothing
+  // secret lives on a sandbox outside the secrets track's broker.
+  "SANDBOX_HOST_REFUSES_CREDENTIALS",
+  // The sandbox host's guest configuration (`configureGuest`) has not
+  // completed: a harness spawn waited its 30 seconds for it and refused, with
+  // the attempt's last status in the message, rather than hang through a
+  // broker outage.
+  "SANDBOX_GUEST_NOT_CONFIGURED",
+  // The host runs a profile that carries no agents (the Automations pod's
+  // `automation` profile: shells, terminals and file copies only), so the two
+  // agent-creation verbs answer this instead of creating one. Not retryable
+  // on that host; the agent belongs on one of the user's own hosts or a
+  // sandbox.
+  "PROFILE_REFUSES_AGENTS",
+  // ─── Sandbox secrets refusals (the egress broker) ───────────────────────
+  //
+  // Spelled as the broker, the gateway and the forwarder spell them on their
+  // own wires (a refusal body's `code`, a typed egress event's `code`), so one
+  // string names one refusal on every channel that can carry it. Additive, as
+  // the block above: a client that predates them narrows each to RPC_ERROR.
+  //
+  // The sandbox's egress authorization is older than the grant set it was
+  // minted for: a decision, a re-bind or a wake is in flight. Retryable
+  // shortly, and NOT a missing grant - nothing is to be asked of the user.
+  "authorization_stale",
+  // The destination's protocol has no worker class, so a secret bound to it
+  // cannot be brokered, and brokering is the only way a sandbox holds one: no
+  // secret can be stored for that protocol.
+  "protocol_not_brokered",
+  // A request signed in a shape no signing worker reproduces (a presigned URL,
+  // a credential set handed to a third party). Such a shape is unsupported.
+  "signing_shape_unsupported",
+  // The route's pre-issued leaf certificate is missing or expired, so its
+  // TLS-terminated endpoint cannot answer.
+  "leaf_unavailable",
+  // The destination sits behind a private connector that is enrolled and not
+  // connected.
+  "connector_offline",
+  // The destination sits behind a private connector that was never enrolled
+  // or has been revoked.
+  "connector_not_enrolled",
+  // The route's loopback endpoint could not be bound in the guest (an
+  // in-guest listener holds the port); the route is never sent direct.
+  "endpoint_unavailable",
+  // The destination answers HTTP/3 only, which the bound class cannot carry.
+  "h3_only_destination",
+  // Undo named a version whose value was destroyed.
+  "version_destroyed",
+  // Destroy named the current version: replace or revoke the secret first.
+  "version_current",
+  // ─── Environment ────────────────────────────────────────────────────────
+  //
+  // A settings write the host forwards to the person's environment lost a
+  // compare-and-set: another surface changed the item first. The envelope's
+  // `staleWrite` says who and the current revision; the page re-reads and
+  // says "changed on <host> just now". Additive, as above.
+  "ENVIRONMENT_WRITE_STALE",
+  // `providers.link`: the harness has no sign-in the
+  // environment can hold, so the profile stays on this host; the Link dialog
+  // says "On <host> only." and nothing more. Additive, as above.
+  "PROVIDER_LINK_NOT_OFFERED",
+  // `providers.link`: Traycer is not reachable (or the host is not set up
+  // yet), so nothing can be linked now; the dialog says "Connect to Traycer
+  // to link this profile." Additive, as above.
+  "PROVIDER_LINK_UNAVAILABLE",
+  // ─── Same principal ─────────────────────────────────────────────────────
+  //
+  // The two hosts belong to different owners (a person and a team, or two
+  // people): an agent message, or a host-agent attach, between them is
+  // refused. One reason name on every wire that carries the refusal, so the
+  // GUI picks its sentence from it alone; distinct from a transport failure,
+  // which says nothing about who owns the target. Additive, as above: a
+  // released peer narrows it to RPC_ERROR and keeps the status.
+  "principal_mismatch",
+  // ─── Bots ───────────────────────────────────────────────────────────────
+  //
+  // `bot.create` named a `requestKey` that already made a bot, and this
+  // request cannot be answered with it: its fields differ, or that bot was
+  // deleted since. Nothing was created; the bot the key made, if live, is in
+  // the person's list. Additive, as above.
+  "E_BOT_REQUEST_KEY_REUSED",
+  // ─── Evicted chats ──────────────────────────────────────────────────────
+  //
+  // A host dropped a chat's records once the cloud held them, and could not
+  // bring them back for a write (`epic.hydrateChat`, or a send that reached
+  // the host first). The chat stays as it was and nothing was written; each
+  // has its own line on the chat's composer. Additive, as above.
+  //
+  // The host could not reach the cloud copy. Retryable once it can.
+  "CHAT_EVICTED_UNREACHABLE",
+  // The cloud copy is no longer the one the host dropped: the chat was
+  // continued on another host, whose copy is the latest.
+  "CHAT_EVICTED_HEAD_MOVED",
+] as const;
+
+export type RpcErrorCode = (typeof RPC_ERROR_CODES)[number];
+
+export function isRpcErrorCode(value: string): value is RpcErrorCode {
+  return (RPC_ERROR_CODES as readonly string[]).includes(value);
+}
+
+export type RpcErrorDetails = {
+  code: RpcErrorCode;
+  message: string;
+  /**
+   * Typed holder inventory on `WORKTREE_BUSY` and
+   * `WORKTREE_HOLDERS_CHANGED`. Optional: omitted on every other code, and
+   * omitted by hosts that predate the holders minor. See
+   * `worktreeBusyHolderSchema`.
+   */
+  holders?: readonly WorktreeBusyHolder[];
+  /**
+   * Host-computed digest of `holders`. Present on `WORKTREE_BUSY` and
+   * `WORKTREE_HOLDERS_CHANGED` from a current host; omitted otherwise.
+   */
+  holdersRevision?: string;
+  /**
+   * Who changed the item and its current revision, on
+   * `ENVIRONMENT_WRITE_STALE` only. See `environment-stale-write.ts`.
+   */
+  staleWrite?: EnvironmentStaleWrite;
+};
+
+export type RpcContract<
+  ReqSchema extends z.ZodType,
+  ResSchema extends z.ZodType,
+> = {
+  method: string;
+  schemaVersion: SchemaVersion;
+  requestSchema: ReqSchema;
+  responseSchema: ResSchema;
+};
+
+export type AnyRpcContract = RpcContract<z.ZodType, z.ZodType>;
+
+export type RequestOf<Contract> =
+  Contract extends RpcContract<infer ReqSchema, infer _ResSchema>
+    ? z.infer<ReqSchema>
+    : never;
+
+export type ResponseOf<Contract> =
+  Contract extends RpcContract<infer _ReqSchema, infer ResSchema>
+    ? z.infer<ResSchema>
+    : never;
+
+export type RpcRequestFor<Contract> = Contract extends AnyRpcContract
+  ? {
+      requestId: string;
+      method: Contract["method"];
+      schemaVersion: Contract["schemaVersion"];
+      params: RequestOf<Contract>;
+    }
+  : never;
+
+export type RpcSuccessFor<Contract> = Contract extends AnyRpcContract
+  ? {
+      requestId: string;
+      method: Contract["method"];
+      schemaVersion: Contract["schemaVersion"];
+      result: ResponseOf<Contract>;
+    }
+  : never;
+
+export type RpcErrorFor<Contract> = Contract extends AnyRpcContract
+  ? {
+      requestId: string;
+      method: Contract["method"];
+      schemaVersion: Contract["schemaVersion"];
+      error: RpcErrorDetails;
+    }
+  : never;
+
+export type RpcResultFor<Contract> =
+  | RpcSuccessFor<Contract>
+  | RpcErrorFor<Contract>;
+
+export type RpcResponseUpgradeContext<Request> = {
+  readonly request: Request;
+  readonly hostId: string;
+};
+
+type SameMethodPair<
+  From extends AnyRpcContract,
+  To extends AnyRpcContract,
+> = From["method"] extends To["method"]
+  ? To["method"] extends From["method"]
+    ? true
+    : false
+  : false;
+
+type UpgradePathBase<From extends AnyRpcContract, To extends AnyRpcContract> = {
+  from: From["schemaVersion"];
+  to: To["schemaVersion"];
+  upgradeRequest: (request: RequestOf<From>) => RequestOf<To>;
+};
+
+export type ContextlessUpgradePath<
+  From extends AnyRpcContract,
+  To extends AnyRpcContract,
+> =
+  SameMethodPair<From, To> extends true
+    ? UpgradePathBase<From, To> & {
+        upgradeResponse: (response: ResponseOf<From>) => ResponseOf<To>;
+      }
+    : never;
+
+export type ContextualUpgradePath<
+  From extends AnyRpcContract,
+  To extends AnyRpcContract,
+> =
+  SameMethodPair<From, To> extends true
+    ? UpgradePathBase<From, To> & {
+        upgradeResponse: (
+          response: ResponseOf<From>,
+          context: RpcResponseUpgradeContext<RequestOf<From>> | undefined,
+        ) => ResponseOf<To>;
+      }
+    : never;
+
+export type UpgradePath<
+  From extends AnyRpcContract,
+  To extends AnyRpcContract,
+> = ContextlessUpgradePath<From, To> | ContextualUpgradePath<From, To>;
+
+export type DowngradeResult<Value> =
+  | { ok: true; value: Value }
+  | { ok: false; error: RpcErrorDetails };
+
+export type DowngradePath<
+  From extends AnyRpcContract,
+  To extends AnyRpcContract,
+> =
+  SameMethodPair<From, To> extends true
+    ? {
+        from: From["schemaVersion"];
+        to: To["schemaVersion"];
+        downgradeRequest: (
+          request: RequestOf<From>,
+        ) => DowngradeResult<RequestOf<To>>;
+        downgradeResponse: (
+          response: ResponseOf<From>,
+        ) => DowngradeResult<ResponseOf<To>>;
+      }
+    : never;
+
+export type UnsupportedMethodDegrade = {
+  readonly kind: "unsupported";
+};
+
+export type FallbackMethodDegrade<
+  Canonical extends AnyRpcContract,
+  Fallback extends AnyRpcContract,
+  FloorMethod extends string,
+> = {
+  readonly kind: "fallback";
+  readonly to: {
+    readonly method: FloorMethod;
+    readonly major: Fallback["schemaVersion"]["major"];
+    readonly minor: Fallback["schemaVersion"]["minor"];
+  };
+  readonly adaptRequest: (request: RequestOf<Canonical>) => RequestOf<Fallback>;
+  readonly adaptResponse: (
+    response: ResponseOf<Fallback>,
+  ) => ResponseOf<Canonical>;
+};
+
+export type MethodDegradeDeclaration<
+  Canonical extends AnyRpcContract = AnyRpcContract,
+  Fallback extends AnyRpcContract = AnyRpcContract,
+  FloorMethod extends string = string,
+> =
+  | UnsupportedMethodDegrade
+  | FallbackMethodDegrade<Canonical, Fallback, FloorMethod>;
+
+type ErasedFallbackMethodDegrade<
+  Canonical extends AnyRpcContract,
+  FloorMethod extends string,
+> = {
+  readonly kind: "fallback";
+  readonly to: {
+    readonly method: FloorMethod;
+    readonly major: number;
+    readonly minor: number;
+  };
+  readonly adaptRequest: (request: RequestOf<Canonical>) => unknown;
+  readonly adaptResponse: (response: never) => ResponseOf<Canonical>;
+};
+
+type ErasedMethodDegradeDeclaration<
+  Canonical extends AnyRpcContract,
+  FloorMethod extends string,
+> =
+  | UnsupportedMethodDegrade
+  | ErasedFallbackMethodDegrade<Canonical, FloorMethod>;
+
+/**
+ * Erased bridge shape used by registry storage and traversal internals.
+ *
+ * Author bridges with `defineUpgradePath()` instead of constructing this type
+ * directly. The `never` parameter preserves assignability for narrower adapters
+ * after erasure.
+ */
+export type AnyUpgradePath = {
+  from: SchemaVersion;
+  to: SchemaVersion;
+  upgradeRequest: (request: never) => object;
+  upgradeResponse: (
+    response: never,
+    context: RpcResponseUpgradeContext<never> | undefined,
+  ) => object;
+};
+
+/**
+ * Erased downgrade bridge shape used by registry storage and traversal internals.
+ *
+ * Author bridges with `defineDowngradePath()` instead of constructing this type
+ * directly. As with `AnyUpgradePath`, the `never` parameter keeps narrower
+ * downgrade functions assignable after erasure.
+ */
+export type AnyDowngradePath = {
+  from: SchemaVersion;
+  to: SchemaVersion;
+  downgradeRequest: (request: never) => DowngradeResult<object>;
+  downgradeResponse: (response: never) => DowngradeResult<object>;
+};
+
+export type VersionEntry<
+  Contract extends AnyRpcContract,
+  Upgrade extends AnyUpgradePath | null,
+> = {
+  readonly contract: Contract;
+  readonly upgradeFromPreviousVersion: Upgrade;
+  /**
+   * Declares that this minor's RESPONSE value growth (new enum values,
+   * new union variants, widened forms relative to the previous minor)
+   * is emission-gated: the host consults the negotiated version and
+   * never emits the new values to older peers (the chat-frame-projection
+   * pattern). Without this, the registry validator rejects response-side
+   * value growth on a minor - an old peer's schema REFUSES such values,
+   * and for state-controlled response data that refusal poisons every
+   * old peer with no opt-out. It also permits replacing a dropped union arm
+   * when that same projection supplies the older arm to older callers.
+   * Declaring it is a reviewed claim about the EMITTER, which the validator
+   * cannot check; other structural reductions remain forbidden.
+   */
+  readonly responseGrowthProjectionGated?: true;
+  /**
+   * Declares that the first contract in a new major changes semantics even
+   * when its isolated request/response schemas remain structurally
+   * compatible. Use only when the method belongs to a coherently negotiated
+   * family whose authority or topology changed across the major boundary.
+   */
+  readonly semanticMajorBreakFromPreviousMajor?: true;
+};
+
+export type AnyVersionEntry = VersionEntry<
+  AnyRpcContract,
+  AnyUpgradePath | null
+>;
+
+type NumberKeys<RecordType> = keyof RecordType & number;
+
+export type MajorVersionLine<
+  Versions extends Readonly<Record<number, AnyVersionEntry>>,
+  LatestMinor extends NumberKeys<Versions>,
+  Downgrades extends Readonly<Record<number, AnyDowngradePath>>,
+> = {
+  readonly latestMinor: LatestMinor;
+  readonly versions: Versions;
+  readonly downgradePathsFromLatest: Downgrades;
+};
+
+type AnyMajorVersionLine = MajorVersionLine<
+  Readonly<Record<number, AnyVersionEntry>>,
+  number,
+  Readonly<Record<number, AnyDowngradePath>>
+>;
+
+/**
+ * Raw method registry shape before validation.
+ *
+ * Use this at boundaries where a registry can still be malformed. Promote it to
+ * `MethodVersionRegistry` with `defineVersionedRpcRegistry()` or
+ * `validateVersionedRpcRegistry()` before calling traversal helpers.
+ */
+export type UncheckedMethodVersionRegistry = Readonly<
+  Record<number, AnyMajorVersionLine>
+> & {
+  readonly degrade?: MethodDegradeDeclaration;
+};
+
+/**
+ * Validated method registry required by the traversal helpers.
+ *
+ * Guarantees:
+ * - `latestMinor` is installed and is the highest installed minor in the line
+ * - each contract matches its major/minor slot and method key
+ * - each non-initial installed version defines an upgrade from the previous
+ *   installed version in the overall chain
+ * - each downgrade originates from the latest installed version of its line and
+ *   targets the latest installed version of an older major
+ */
+export type MethodVersionRegistry<
+  Registry extends UncheckedMethodVersionRegistry =
+    UncheckedMethodVersionRegistry,
+  Latest = unknown,
+> = Registry & {
+  readonly [validatedMethodVersionRegistryBrand]: Latest;
+};
+
+/**
+ * Raw multi-method registry shape before validation.
+ */
+export type UncheckedVersionedRpcRegistry = Readonly<
+  Record<string, UncheckedMethodVersionRegistry>
+>;
+
+type ValidatedVersionedRpcRegistryMethods<
+  Registry extends UncheckedVersionedRpcRegistry,
+> = {
+  readonly [Method in keyof Registry & string]: MethodVersionRegistry<
+    Registry[Method],
+    LatestContractFromUncheckedRegistry<Registry[Method]>
+  >;
+};
+
+type ValidatedVersionedRpcRegistryBrand = {
+  readonly [validatedVersionedRpcRegistryBrand]: true;
+};
+
+/**
+ * Validated multi-method registry.
+ *
+ * Usage pattern:
+ * - static source literals: `defineVersionedRpcRegistry(...)`
+ * - dynamic inputs: `validateVersionedRpcRegistry(registry)` then use the refined value
+ */
+export type VersionedRpcRegistry<
+  Registry extends UncheckedVersionedRpcRegistry =
+    UncheckedVersionedRpcRegistry,
+> = ValidatedVersionedRpcRegistryMethods<Registry> &
+  ValidatedVersionedRpcRegistryBrand;
+
+type DigitsLessThan = {
+  "0": never;
+  "1": "0";
+  "2": "0" | "1";
+  "3": "0" | "1" | "2";
+  "4": "0" | "1" | "2" | "3";
+  "5": "0" | "1" | "2" | "3" | "4";
+  "6": "0" | "1" | "2" | "3" | "4" | "5";
+  "7": "0" | "1" | "2" | "3" | "4" | "5" | "6";
+  "8": "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7";
+  "9": "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8";
+};
+
+type DigitLessThan<
+  Left extends string,
+  Right extends string,
+> = Left extends keyof DigitsLessThan
+  ? Right extends keyof DigitsLessThan
+    ? Left extends DigitsLessThan[Right]
+      ? true
+      : false
+    : false
+  : false;
+
+// Recursion depth is bounded by the number of decimal digits, not the value.
+type LengthTuple<
+  Value extends string,
+  Accumulator extends unknown[] = [],
+> = Value extends `${string}${infer Rest}`
+  ? LengthTuple<Rest, [unknown, ...Accumulator]>
+  : Accumulator;
+
+type TupleShorterThan<
+  Left extends unknown[],
+  Right extends unknown[],
+> = Left extends [unknown, ...infer LeftRest]
+  ? Right extends [unknown, ...infer RightRest]
+    ? TupleShorterThan<LeftRest, RightRest>
+    : false
+  : Right extends [unknown, ...unknown[]]
+    ? true
+    : false;
+
+type SameLengthLessThan<
+  Left extends string,
+  Right extends string,
+> = Left extends `${infer LeftHead}${infer LeftTail}`
+  ? Right extends `${infer RightHead}${infer RightTail}`
+    ? LeftHead extends RightHead
+      ? SameLengthLessThan<LeftTail, RightTail>
+      : DigitLessThan<LeftHead, RightHead>
+    : false
+  : false;
+
+type IsLessThan<Left extends number, Right extends number> = Left extends Right
+  ? false
+  : `${Left}` extends infer LeftString extends string
+    ? `${Right}` extends infer RightString extends string
+      ? LengthTuple<LeftString> extends infer LeftLength extends unknown[]
+        ? LengthTuple<RightString> extends infer RightLength extends unknown[]
+          ? TupleShorterThan<LeftLength, RightLength> extends true
+            ? true
+            : TupleShorterThan<RightLength, LeftLength> extends true
+              ? false
+              : SameLengthLessThan<LeftString, RightString>
+          : false
+        : false
+      : false
+    : false;
+
+type LowerNumbers<
+  Values extends number,
+  UpperBound extends number,
+> = Values extends number
+  ? IsLessThan<Values, UpperBound> extends true
+    ? Values
+    : never
+  : never;
+
+type AllOtherNumbersAreLessThan<
+  Candidate extends number,
+  Values extends number,
+> = false extends (
+  Exclude<Values, Candidate> extends infer Other extends number
+    ? IsLessThan<Other, Candidate>
+    : never
+)
+  ? false
+  : true;
+
+type HighestNumber<Values extends number, AllValues extends number = Values> = [
+  Values,
+] extends [never]
+  ? never
+  : Values extends infer Candidate extends number
+    ? AllOtherNumbersAreLessThan<Candidate, AllValues> extends true
+      ? Candidate
+      : never
+    : never;
+
+type ContractForRegistrySlot<
+  Method extends string,
+  Major extends number,
+  Minor extends number,
+  Contract extends AnyRpcContract,
+> = Contract extends {
+  method: Method;
+  schemaVersion: {
+    major: Major;
+    minor: Minor;
+  };
+}
+  ? Contract
+  : never;
+
+type ContractAtVersion<
+  Registry extends UncheckedMethodVersionRegistry,
+  Major extends NumberKeys<Registry>,
+  Minor extends NumberKeys<Registry[Major]["versions"]>,
+> = Registry[Major]["versions"][Minor]["contract"];
+
+type LatestContractForLine<Line extends AnyMajorVersionLine> =
+  Line["versions"][Line["latestMinor"]]["contract"];
+
+type PreviousInstalledMinor<
+  Versions extends Readonly<Record<number, AnyVersionEntry>>,
+  Minor extends number,
+> = HighestNumber<LowerNumbers<NumberKeys<Versions>, Minor>>;
+
+type PreviousInstalledMajor<
+  Registry extends UncheckedMethodVersionRegistry,
+  Major extends number,
+> = HighestNumber<LowerNumbers<NumberKeys<Registry>, Major>>;
+
+type PreviousInstalledContract<
+  Registry extends UncheckedMethodVersionRegistry,
+  Major extends NumberKeys<Registry>,
+  Minor extends NumberKeys<Registry[Major]["versions"]>,
+> =
+  PreviousInstalledMinor<
+    Registry[Major]["versions"],
+    Minor
+  > extends infer PreviousMinor
+    ? [PreviousMinor] extends [never]
+      ? PreviousInstalledMajor<Registry, Major> extends infer PreviousMajor
+        ? [PreviousMajor] extends [never]
+          ? never
+          : PreviousMajor extends NumberKeys<Registry>
+            ? LatestContractForLine<Registry[PreviousMajor]>
+            : never
+        : never
+      : PreviousMinor extends NumberKeys<Registry[Major]["versions"]>
+        ? ContractAtVersion<Registry, Major, PreviousMinor>
+        : never
+    : never;
+
+type ValidateVersionEntry<
+  Method extends string,
+  Registry extends UncheckedMethodVersionRegistry,
+  Major extends NumberKeys<Registry>,
+  Minor extends NumberKeys<Registry[Major]["versions"]>,
+> = Registry[Major]["versions"][Minor] extends infer Entry extends
+  AnyVersionEntry
+  ? Entry["contract"] extends infer Contract extends AnyRpcContract
+    ? {
+        readonly contract: ContractForRegistrySlot<
+          Method,
+          Major,
+          Minor,
+          Contract
+        >;
+        readonly upgradeFromPreviousVersion: PreviousInstalledContract<
+          Registry,
+          Major,
+          Minor
+        > extends infer PreviousContract
+          ? [PreviousContract] extends [never]
+            ? null
+            : PreviousContract extends AnyRpcContract
+              ? UpgradePath<
+                  PreviousContract,
+                  ContractForRegistrySlot<Method, Major, Minor, Contract>
+                >
+              : never
+          : never;
+        /** See `VersionEntry.responseGrowthProjectionGated`. */
+        readonly responseGrowthProjectionGated?: true;
+      }
+    : never
+  : never;
+
+type ValidateLineVersions<
+  Method extends string,
+  Registry extends UncheckedMethodVersionRegistry,
+  Major extends NumberKeys<Registry>,
+> = {
+  readonly [
+    Minor in NumberKeys<Registry[Major]["versions"]>
+  ]: ValidateVersionEntry<Method, Registry, Major, Minor>;
+};
+
+type ValidateLineDowngrades<
+  Registry extends UncheckedMethodVersionRegistry,
+  Major extends NumberKeys<Registry>,
+  Downgrades extends Readonly<Record<number, AnyDowngradePath>>,
+> = {
+  readonly [
+    TargetMajor in keyof Downgrades & number
+  ]: TargetMajor extends NumberKeys<Registry>
+    ? IsLessThan<TargetMajor, Major> extends true
+      ? DowngradePath<
+          LatestContractForLine<Registry[Major]>,
+          LatestContractForLine<Registry[TargetMajor]>
+        >
+      : never
+    : never;
+};
+
+type ValidateMajorVersionLine<
+  Method extends string,
+  Registry extends UncheckedMethodVersionRegistry,
+  Major extends NumberKeys<Registry>,
+> =
+  Registry[Major] extends MajorVersionLine<
+    infer Versions,
+    infer _LatestMinor,
+    infer Downgrades
+  >
+    ? {
+        readonly latestMinor: HighestNumber<NumberKeys<Versions>>;
+        readonly versions: ValidateLineVersions<Method, Registry, Major>;
+        readonly downgradePathsFromLatest: ValidateLineDowngrades<
+          Registry,
+          Major,
+          Downgrades
+        >;
+      }
+    : never;
+
+type ValidateMethodVersionRegistry<
+  Method extends string,
+  Registry extends UncheckedMethodVersionRegistry,
+> = {
+  readonly [Major in NumberKeys<Registry>]: ValidateMajorVersionLine<
+    Method,
+    Registry,
+    Major
+  >;
+};
+
+/**
+ * Compile-time mirror of the runtime registry validator.
+ *
+ * Enforced invariants:
+ * - registry key matches `contract.method`
+ * - major/minor slots match `contract.schemaVersion`
+ * - `latestMinor` points at the highest installed minor in the line
+ * - each non-initial version defines an upgrade from the previous installed version
+ * - downgrades target latest contracts on older majors only
+ */
+export type ValidateVersionedRpcRegistry<
+  Registry extends UncheckedVersionedRpcRegistry,
+> = {
+  readonly [Method in keyof Registry & string]: ValidateMethodVersionRegistry<
+    Method,
+    Registry[Method]
+  >;
+};
+
+export type ValidateVersionedRpcRegistryDegrades<
+  Registry extends UncheckedVersionedRpcRegistry,
+  FloorMethod extends string,
+> = {
+  readonly [Method in keyof Registry & string]: Method extends FloorMethod
+    ? unknown
+    : {
+        readonly degrade: ErasedMethodDegradeDeclaration<
+          LatestContractFromUncheckedRegistry<Registry[Method]>,
+          FloorMethod
+        >;
+      };
+};
+
+type RegistryContractValue<Registry extends MethodVersionRegistry> = {
+  [Major in NumberKeys<Registry>]: {
+    [Minor in NumberKeys<Registry[Major]["versions"]>]: ContractAtVersion<
+      Registry,
+      Major,
+      Minor
+    >;
+  }[NumberKeys<Registry[Major]["versions"]>];
+}[NumberKeys<Registry>];
+
+type RegistryRequestValue<Registry extends MethodVersionRegistry> = RequestOf<
+  RegistryContractValue<Registry>
+>;
+
+type RegistryResponseValue<Registry extends MethodVersionRegistry> = ResponseOf<
+  RegistryContractValue<Registry>
+>;
+
+type LatestContractFromUncheckedRegistry<
+  Registry extends UncheckedMethodVersionRegistry,
+> = [NumberKeys<Registry>] extends [never]
+  ? AnyRpcContract
+  : LatestContractForLine<Registry[HighestNumber<NumberKeys<Registry>>]>;
+
+/**
+ * The latest installed contract on the highest installed major line.
+ */
+export type LatestContract<Registry extends MethodVersionRegistry> =
+  Registry[typeof validatedMethodVersionRegistryBrand];
+
+export type InstalledSchemaVersion<Registry extends MethodVersionRegistry> = {
+  [Major in NumberKeys<Registry>]: {
+    [Minor in NumberKeys<Registry[Major]["versions"]>]: {
+      major: Major;
+      minor: Minor;
+    };
+  }[NumberKeys<Registry[Major]["versions"]>];
+}[NumberKeys<Registry>];
+
+export type ContractForInstalledVersion<
+  Registry extends MethodVersionRegistry,
+  Version extends InstalledSchemaVersion<Registry>,
+> = ContractAtVersion<Registry, Version["major"], Version["minor"]>;
+
+/**
+ * Erased bridge view used while iterating across installed versions.
+ *
+ * Validation guarantees each stored bridge lines up with the previous installed
+ * version in the chain, so traversal can safely operate over registry-wide unions.
+ */
+export type RuntimeUpgradePath<Registry extends MethodVersionRegistry> = {
+  from: SchemaVersion;
+  to: SchemaVersion;
+  upgradeRequest: (
+    request: RegistryRequestValue<Registry>,
+  ) => RegistryRequestValue<Registry>;
+  upgradeResponse: (
+    response: RegistryResponseValue<Registry>,
+    context:
+      | RpcResponseUpgradeContext<RegistryRequestValue<Registry>>
+      | undefined,
+  ) => RegistryResponseValue<Registry>;
+};
+
+/**
+ * Erased direct-downgrade view used while executing a validated latest-line bridge.
+ */
+export type RuntimeDowngradePath<Registry extends MethodVersionRegistry> = {
+  from: SchemaVersion;
+  to: SchemaVersion;
+  downgradeRequest: (
+    request: RegistryRequestValue<Registry>,
+  ) => DowngradeResult<RegistryRequestValue<Registry>>;
+  downgradeResponse: (
+    response: RegistryResponseValue<Registry>,
+  ) => DowngradeResult<RegistryResponseValue<Registry>>;
+};

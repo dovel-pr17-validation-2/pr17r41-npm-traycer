@@ -1,0 +1,631 @@
+import { useEffect, type ReactNode } from "react";
+import type { HostRpcRegistry } from "@traycer/protocol/host/index";
+import {
+  HOST_FROZEN_WORD,
+  hostSandboxStateWord,
+} from "@traycer/protocol/host/host-status";
+import type {
+  SandboxMember,
+  SandboxSummary,
+} from "@traycer/protocol/host/sandbox-control";
+import type { TaskHostRow } from "@traycer/protocol/host/task-host-summary";
+import { TaskSandboxEndDetails } from "@/components/hosts/task-sandbox-end-details";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { mintNewEpicTerminalTile } from "@/components/epic-canvas/sidebar/new-terminal-tile-ref";
+import { useEpicViewTabId } from "@/components/epic-canvas/view-tab-context";
+import type { AgentHostProjection } from "@/hooks/epic/use-agent-host-projection";
+import { useEpicTileNavigation } from "@/hooks/epic/use-epic-tile-navigation";
+import { useHostClientForHostId } from "@/hooks/host/use-host-client-for-host-id";
+import { useHostQuery } from "@/hooks/host/use-host-query";
+import { useMaybeEpicStore } from "@/hooks/use-epic-store";
+import { useDeadlineReached } from "@/hooks/use-deadline-reached";
+import { useRefreshSandboxCosts } from "@/hooks/sandboxes/use-refresh-sandbox-costs";
+import { useSandboxCatalogue } from "@/hooks/sandboxes/use-sandbox-catalogue-query";
+import {
+  sandboxConfigurationOf,
+  useSandboxConfigurations,
+  type SandboxConfigurations,
+} from "@/hooks/sandboxes/use-sandbox-configurations";
+import { useSandboxCosts } from "@/hooks/sandboxes/use-sandbox-costs-query";
+import { tileIntent } from "@/lib/canvas/tile-open/intent";
+import { useRegionValue } from "@/lib/layout-overrides";
+import { useSampledNow } from "@/lib/relative-time";
+import {
+  AGENT_SANDBOX,
+  DETAILS,
+  FILES,
+  HOST_LABEL,
+  hoverAgentIdentity,
+  hoverAlsoInTask,
+  hoverAwakeMinutes,
+  hoverMoreSessions,
+  hoverSandboxIdentity,
+  hoverSessionCount,
+  hoverTaskConfiguration,
+  hoverTodayCost,
+  KEEP_THIS_SANDBOX,
+  OPEN_TERMINAL,
+  reachSentence,
+  REACH_UNNAMED_HOSTS,
+  SESSIONS_UNKNOWN,
+  shortPriceLabel,
+  TASK_FILES,
+  wakeString,
+} from "@/lib/sandboxes/sandbox-strings";
+import {
+  sandboxMemberName,
+  sandboxHostActivityLine,
+  sandboxIdlePolicyLine,
+  sandboxSessionKinds,
+  sandboxShapeLine,
+} from "@/lib/sandboxes/sandbox-row-lines";
+import { cn } from "@/lib/utils";
+import { useAuthStore } from "@/stores/auth/auth-store";
+import { useEpicLeftPanelStore } from "@/stores/epics/left-panel-store";
+import { openSandboxDetails } from "@/stores/sandboxes/sandbox-details-store";
+import {
+  tabSurfaceKey,
+  useSurfaceHostSelectionStore,
+} from "@/stores/host/surface-host-selection-store";
+
+export function AgentHostSection(props: {
+  readonly projection: AgentHostProjection;
+  readonly epicId: string;
+  readonly nodeId: string;
+  readonly ownerHostUnreachable: boolean;
+  readonly onKeep: (sandbox: SandboxSummary) => void;
+}): ReactNode {
+  return props.projection.kind === "host" ? (
+    <AuthorizedHostSection
+      sandbox={props.projection.sandbox}
+      epicId={props.epicId}
+      nodeId={props.nodeId}
+      ownerHostUnreachable={props.ownerHostUnreachable}
+      onKeep={props.onKeep}
+    />
+  ) : (
+    <TaskHostSection host={props.projection.host} nodeId={props.nodeId} />
+  );
+}
+
+function TaskHostSection(props: {
+  readonly host: TaskHostRow;
+  readonly nodeId: string;
+}): ReactNode {
+  const teams = useAuthStore((state) => state.shareableTeams);
+  const principal = props.host.principal;
+  const configuration =
+    principal.kind === "team"
+      ? (teams.find((team) => team.teamId === principal.id)?.slug ?? null)
+      : null;
+  const others = useMaybeEpicStore(
+    (state) =>
+      [
+        ...Object.values(state.chats.byId),
+        ...Object.values(state.tuiAgents.byId),
+      ]
+        .filter(
+          (agent) =>
+            agent.hostId === props.host.hostId && agent.id !== props.nodeId,
+        )
+        .map((agent) => agent.title)
+        .join(", "),
+    "",
+  );
+  const otherCount = useMaybeEpicStore(
+    (state) =>
+      [
+        ...Object.values(state.chats.byId),
+        ...Object.values(state.tuiAgents.byId),
+      ].filter(
+        (agent) =>
+          agent.hostId === props.host.hostId && agent.id !== props.nodeId,
+      ).length,
+    0,
+  );
+  return (
+    <section className="space-y-1 px-3 py-2 text-ui-xs" aria-label={HOST_LABEL}>
+      <p className="font-medium text-muted-foreground">{HOST_LABEL}</p>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="font-medium break-words">{props.host.label}</span>
+        {configuration === null ? null : (
+          <Badge size="xs" variant="muted">
+            {configuration}
+          </Badge>
+        )}
+        {props.host.sandboxEnd !== null ? (
+          <span className="text-muted-foreground">destroyed</span>
+        ) : null}
+        {principal.kind === "team" && props.host.sandboxEnd === null ? (
+          <span className="text-muted-foreground">
+            {hoverTaskConfiguration(configuration)}
+          </span>
+        ) : null}
+      </div>
+      {props.host.reach === "other_principal" ? (
+        <p className="text-muted-foreground">
+          {reachSentence(REACH_UNNAMED_HOSTS)}
+        </p>
+      ) : null}
+      {otherCount === 0 ? null : (
+        <HostSessionDisclosure
+          names={others}
+          more={0}
+          hostWide={null}
+          summary={hoverAlsoInTask(otherCount)}
+        />
+      )}
+      {props.host.sandboxEnd === null ? (
+        <HostFilesAction hostId={null} />
+      ) : (
+        <TaskSandboxEndDetails
+          ended={{
+            name: props.host.label ?? "This sandbox",
+            end: props.host.sandboxEnd,
+          }}
+        />
+      )}
+    </section>
+  );
+}
+
+function memberName(
+  member: SandboxMember | null,
+  viewerUserId: string | null,
+): string | null {
+  return member === null ? null : sandboxMemberName(member, viewerUserId);
+}
+
+function AuthorizedHostSection(props: {
+  readonly sandbox: SandboxSummary;
+  readonly epicId: string;
+  readonly nodeId: string;
+  readonly ownerHostUnreachable: boolean;
+  readonly onKeep: (sandbox: SandboxSummary) => void;
+}): ReactNode {
+  const { sandbox } = props;
+  const configurations = useSandboxConfigurations();
+  const configuration = hoverConfiguration(sandbox, configurations);
+  const awake = sandbox.state === "awake" && !sandbox.frozen;
+  return (
+    <section className="space-y-1 px-3 py-2 text-ui-xs" aria-label={HOST_LABEL}>
+      <p className="font-medium text-muted-foreground">{HOST_LABEL}</p>
+      <HostHeading sandbox={sandbox} awake={awake} />
+      {configuration === null ? null : (
+        <p
+          className="text-muted-foreground"
+          data-testid="agent-host-configuration"
+        >
+          {configuration}
+        </p>
+      )}
+      <HostIdentityLine
+        sandbox={sandbox}
+        epicId={props.epicId}
+        configuration={configuration}
+        awake={awake}
+      />
+      <HostIdlePolicy sandbox={sandbox} />
+      {awake ? (
+        <HostActivity
+          sandbox={sandbox}
+          epicId={props.epicId}
+          nodeId={props.nodeId}
+          ownerHostUnreachable={props.ownerHostUnreachable}
+        />
+      ) : null}
+      <HostActions
+        sandbox={sandbox}
+        epicId={props.epicId}
+        ownerHostUnreachable={props.ownerHostUnreachable}
+        awake={awake}
+        onKeep={props.onKeep}
+      />
+    </section>
+  );
+}
+
+/**
+ * The configuration the sandbox runs under, the line under its name: the
+ * sandbox's bound environment, read against the person's teams (Personal
+ * once every team has answered and none is its). An absent environment is
+ * unknown; `null` only while its name is still unread. The summary keeps this
+ * available while the sandbox is suspended or stopped.
+ */
+function hoverConfiguration(
+  sandbox: SandboxSummary,
+  configurations: SandboxConfigurations,
+): string | null {
+  if (sandbox.environmentId === null) return "unknown";
+  const configuration = sandboxConfigurationOf(
+    sandbox,
+    configurations.configurations,
+  );
+  if (configuration?.kind === "team") return configuration.teamName;
+  return configurations.complete &&
+    !configurations.teamEnvironmentIds.has(sandbox.environmentId)
+    ? "Personal"
+    : null;
+}
+
+function HostHeading(props: {
+  readonly sandbox: SandboxSummary;
+  readonly awake: boolean;
+}): ReactNode {
+  const { sandbox } = props;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      <span
+        aria-hidden
+        className={cn(
+          "size-1.5 shrink-0 rounded-full",
+          props.awake ? "bg-success" : "bg-muted-foreground/50",
+        )}
+      />
+      <span className="font-medium break-words">{sandbox.displayName}</span>
+      <span className="text-muted-foreground">
+        {hostSandboxStateWord(sandbox.state)}
+        {sandbox.frozen ? ` · ${HOST_FROZEN_WORD}` : ""}
+        {props.awake && sandbox.priceMcPerHour !== null
+          ? ` · ${shortPriceLabel(sandbox.priceMcPerHour.awakeMc)}`
+          : ""}
+      </span>
+    </div>
+  );
+}
+
+function HostIdentityLine(props: {
+  readonly sandbox: SandboxSummary;
+  readonly epicId: string;
+  readonly configuration: string | null;
+  readonly awake: boolean;
+}): ReactNode {
+  const { sandbox } = props;
+  const costs = useSandboxCosts();
+  useRefreshSandboxCosts();
+  const viewerUserId = useAuthStore(
+    (state) => state.contextMetadata?.userId ?? null,
+  );
+  const createdBy = memberName(sandbox.createdBy, viewerUserId);
+  const payer = memberName(sandbox.wakePayer, viewerUserId);
+  const creatorName = useMaybeEpicStore((state) => {
+    const id = sandbox.createdByAgentId;
+    if (id === null || sandbox.createdByTaskId !== props.epicId) return null;
+    if (Object.hasOwn(state.chats.byId, id)) return state.chats.byId[id].title;
+    if (Object.hasOwn(state.tuiAgents.byId, id))
+      return state.tuiAgents.byId[id].title;
+    return null;
+  }, null);
+  const now = useSampledNow();
+  const cost = costs.data?.sandboxes.find(
+    (row) => row.sandboxId === sandbox.id,
+  );
+  const payerName =
+    payer ?? (props.configuration === "Personal" ? "you" : null);
+  const startedBy =
+    createdBy ?? (props.configuration === "Personal" ? "you" : null);
+  return (
+    <p className="text-muted-foreground">
+      <HostIdentity
+        sandbox={sandbox}
+        creatorName={creatorName}
+        startedBy={startedBy}
+        payerName={payerName}
+      />
+      {props.awake
+        ? ` · ${hoverAwakeMinutes(Math.max(0, Math.floor((now - sandbox.lastTransitionAt) / 60_000)))}`
+        : ""}
+      {cost === undefined ? "" : ` · ${hoverTodayCost(cost.todayMillicredits)}`}
+    </p>
+  );
+}
+
+function HostActions(props: {
+  readonly sandbox: SandboxSummary;
+  readonly epicId: string;
+  readonly ownerHostUnreachable: boolean;
+  readonly awake: boolean;
+  readonly onKeep: (sandbox: SandboxSummary) => void;
+}): ReactNode {
+  const { sandbox } = props;
+  const canOpen =
+    !sandbox.frozen &&
+    sandbox.state !== "destroyed" &&
+    sandbox.state !== "destroying" &&
+    sandbox.state !== "failed";
+  const { openTile } = useEpicTileNavigation();
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      <Button
+        type="button"
+        size="xs"
+        variant="ghost"
+        disabled={!canOpen || (props.awake && props.ownerHostUnreachable)}
+        onClick={() => {
+          // Opened, the tile wakes a resting sandbox, and its create waits for
+          // the host's folderless cwd (the empty cwd asks for it).
+          openTile(
+            tileIntent(
+              mintNewEpicTerminalTile({
+                hostId: sandbox.hostId,
+                epicId: props.epicId,
+                cwd: "",
+              }),
+              { epicId: props.epicId },
+              "explicit",
+              "direct_ui",
+            ),
+            "user",
+          );
+        }}
+      >
+        {OPEN_TERMINAL}
+      </Button>
+      <HostFilesAction
+        hostId={sandbox.hostId}
+        disabled={!canOpen || props.ownerHostUnreachable}
+      />
+      <Button
+        type="button"
+        size="xs"
+        variant="ghost"
+        onClick={() => openSandboxDetails(sandbox.id)}
+      >
+        {DETAILS}
+      </Button>
+      {sandbox.burst && canOpen ? (
+        <Button
+          type="button"
+          size="xs"
+          variant="ghost"
+          onClick={() => props.onKeep(sandbox)}
+        >
+          {KEEP_THIS_SANDBOX}
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+function HostIdentity(props: {
+  readonly sandbox: SandboxSummary;
+  readonly creatorName: string | null;
+  readonly startedBy: string | null;
+  readonly payerName: string | null;
+}): ReactNode {
+  const { sandbox } = props;
+  const shape = sandboxShapeLine(sandbox);
+  if (!sandbox.burst) {
+    return hoverSandboxIdentity({
+      shape,
+      creator: props.startedBy,
+      payer: props.payerName,
+    });
+  }
+  let identity = AGENT_SANDBOX;
+  if (props.creatorName !== null && props.payerName !== null) {
+    identity = hoverAgentIdentity(props.creatorName, props.payerName);
+  }
+  return (
+    <>
+      {identity}
+      {" · "}
+      {shape}
+    </>
+  );
+}
+
+function HostIdlePolicy(props: {
+  readonly sandbox: SandboxSummary;
+}): ReactNode {
+  const catalogue = useSandboxCatalogue(
+    !props.sandbox.burst && !props.sandbox.frozen,
+  );
+  const fidelity = catalogue.data?.providers.find(
+    (provider) =>
+      provider.provider === props.sandbox.provider &&
+      provider.os.includes(props.sandbox.os),
+  )?.suspendFidelity;
+  const wake = fidelity === undefined ? null : wakeString(fidelity);
+  if (props.sandbox.frozen || props.sandbox.state === "destroyed") return null;
+  return (
+    <p className="text-muted-foreground">
+      {sandboxIdlePolicyLine(props.sandbox)}
+      {!props.sandbox.burst && wake !== null ? ` · ${wake}` : ""}
+    </p>
+  );
+}
+
+interface SessionSnapshot<T> {
+  readonly data: T | undefined;
+  readonly dataUpdatedAt: number;
+  readonly isError: boolean;
+  readonly isFetching: boolean;
+}
+
+/** Session facts must have settled after the host total they are subtracted from. */
+function isCurrentSessionSnapshot<T>(
+  snapshot: SessionSnapshot<T>,
+  statusUpdatedAt: number,
+): snapshot is SessionSnapshot<T> & { readonly data: T } {
+  return (
+    snapshot.data !== undefined &&
+    !snapshot.isError &&
+    !snapshot.isFetching &&
+    snapshot.dataUpdatedAt >= statusUpdatedAt
+  );
+}
+
+/** Published task files and a host's filesystem are separate destinations. */
+function HostFilesAction(props: {
+  readonly hostId: string | null;
+  readonly disabled?: boolean;
+}): ReactNode {
+  const tabId = useEpicViewTabId();
+  const openPanel = useEpicLeftPanelStore(
+    (state) => state.setActivePanelIdAndExpand,
+  );
+  const setHost = useSurfaceHostSelectionStore((state) => state.setSelection);
+  const fileTreeShown = useRegionValue("railFileTree", "shown") === "shown";
+  // A host's files open in File Tree, so with that panel off the action would
+  // land on another panel and show none of them.
+  if (props.hostId !== null && !fileTreeShown) return null;
+  return (
+    <Button
+      type="button"
+      size="xs"
+      variant="ghost"
+      disabled={props.disabled === true || tabId === null}
+      onClick={() => {
+        if (tabId === null) return;
+        if (props.hostId !== null)
+          setHost(tabSurfaceKey("file-tree", tabId), props.hostId);
+        openPanel(tabId, props.hostId === null ? "artifacts" : "file-tree");
+      }}
+    >
+      {props.hostId === null ? TASK_FILES : FILES}
+    </Button>
+  );
+}
+
+/** Observe a held status without dialing or waking a host to inspect it. */
+function HostActivity(props: {
+  readonly sandbox: SandboxSummary;
+  readonly epicId: string;
+  readonly nodeId: string;
+  readonly ownerHostUnreachable: boolean;
+}): ReactNode {
+  const client = useHostClientForHostId(props.sandbox.hostId);
+  const status = useHostQuery<HostRpcRegistry, "host.status">({
+    cacheKeyIdentity: undefined,
+    client,
+    method: "host.status",
+    params: {},
+    options: { enabled: false },
+  });
+  const count = status.data?.busySessionCount ?? null;
+  const expired = useDeadlineReached(status.dataUpdatedAt + 30_000);
+  const live =
+    !props.ownerHostUnreachable &&
+    !status.isError &&
+    count !== null &&
+    !expired;
+  const agents = useHostQuery<HostRpcRegistry, "agent.list">({
+    cacheKeyIdentity: undefined,
+    client,
+    method: "agent.list",
+    params: { epicId: props.epicId, senderAgentId: props.nodeId, scope: "all" },
+    options: { enabled: false },
+  });
+  const terminals = useHostQuery<HostRpcRegistry, "terminal.list">({
+    cacheKeyIdentity: undefined,
+    client,
+    method: "terminal.list",
+    params: { scope: { kind: "epic", epicId: props.epicId } },
+    options: { enabled: false },
+  });
+  const refreshAgents = agents.refetch;
+  const refreshTerminals = terminals.refetch;
+  useEffect(() => {
+    if (!live) return;
+    void refreshAgents();
+    void refreshTerminals();
+  }, [live, status.dataUpdatedAt, refreshAgents, refreshTerminals]);
+  // A new count cannot be combined with this task's older session snapshots:
+  // that would attribute newly started work here to an unreadable other task.
+  if (
+    !live ||
+    !isCurrentSessionSnapshot(agents, status.dataUpdatedAt) ||
+    !isCurrentSessionSnapshot(terminals, status.dataUpdatedAt)
+  ) {
+    return <p className="text-muted-foreground">{SESSIONS_UNKNOWN}</p>;
+  }
+  const here = agents.data.agents.filter(
+    (agent) => agent.hostId === props.sandbox.hostId && agent.active,
+  );
+  const runningTerminals = terminals.data.sessions.filter(
+    (terminal) =>
+      terminal.status === "running" && terminal.sessionKind === "terminal",
+  );
+  const names = [
+    ...here.flatMap((agent) => (agent.title === null ? [] : [agent.title])),
+    ...runningTerminals.flatMap((terminal) =>
+      terminal.title === null ? [] : [terminal.title],
+    ),
+  ];
+  const more = Math.max(0, count - here.length - runningTerminals.length);
+  const hostWide = sandboxHostActivityLine(
+    sandboxSessionKinds(status.data?.sessions ?? null),
+  );
+  const listed = status.data?.sessions ?? null;
+  return (
+    <HostSessionDisclosure
+      names={names.join(", ")}
+      more={more}
+      hostWide={hostWide}
+      summary={hoverSessionCount(
+        hoverReportedSessionCount({
+          listedOnHost:
+            listed === null
+              ? null
+              : listed.agents.length + listed.terminals.length,
+          busySessionCount: count,
+          taskSessions: here.length + runningTerminals.length,
+        }),
+      )}
+    />
+  );
+}
+
+/**
+ * The hover's session summary. Closed, it is only the count. Open, it is the
+ * lines the hover used to show flat: kinds, this task's names, and sessions
+ * the busy count places in other tasks. Nothing, when every one of those
+ * lines would be empty.
+ */
+function HostSessionDisclosure(props: {
+  readonly names: string;
+  readonly more: number;
+  readonly hostWide: string | null;
+  readonly summary: string;
+}): ReactNode {
+  if (props.hostWide === null && props.names.length === 0 && props.more === 0) {
+    return null;
+  }
+  return (
+    <details
+      data-testid="agent-host-sessions"
+      className="min-w-0 max-w-full break-words"
+    >
+      <summary className="w-fit max-w-full cursor-pointer text-start break-words">
+        {props.summary}
+      </summary>
+      <div className="max-h-40 space-y-1 overflow-y-auto overscroll-contain text-muted-foreground">
+        {props.hostWide === null ? null : (
+          <p data-testid="agent-host-activity">{props.hostWide}</p>
+        )}
+        {props.names.length === 0 ? null : <p>{props.names}</p>}
+        {props.more > 0 ? <p>{hoverMoreSessions(props.more)}</p> : null}
+      </div>
+    </details>
+  );
+}
+
+/**
+ * Sessions the hover can account for. The host's own list is the full count.
+ * Without one, the task's sessions plus those the busy count places in other
+ * tasks. A missing report never becomes a zero; that path says so above.
+ */
+function hoverReportedSessionCount(input: {
+  readonly listedOnHost: number | null;
+  readonly busySessionCount: number;
+  readonly taskSessions: number;
+}): number {
+  const accounted =
+    input.taskSessions +
+    Math.max(0, input.busySessionCount - input.taskSessions);
+  return input.listedOnHost === null
+    ? accounted
+    : Math.max(input.listedOnHost, accounted);
+}
