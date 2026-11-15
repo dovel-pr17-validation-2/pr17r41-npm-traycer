@@ -188,7 +188,7 @@ jobs:
           package-manager-cache: false
           node-version: "24.20.0"
       - name: Cache bun global install cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -643,7 +643,7 @@ jobs:
         working-directory: clients/desktop
         run: echo "version=$(node -p "require('electron/package.json').version")" >> "$GITHUB_OUTPUT"
       - name: Cache the Electron downloads
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/Library/Caches/electron
           key: electron-${{ runner.os }}-${{ steps.electron.outputs.version }}
